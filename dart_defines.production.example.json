@@ -1,0 +1,10 @@
+{
+  "APP_ENV": "production",
+  "API_BASE_URL": "https://api.example.com",
+  "AUTH_API_BASE_URL": "https://api.example.com",
+  "ANALYTICS_API_BASE_URL": "https://api.example.com",
+  "PRODUCT_CATALOG_URL": "https://commerce.example.com/products",
+  "AFFILIATE_CHANNEL_ID": "replace-with-real-channel-id",
+  "AI_TIMEOUT_MS": "90000",
+  "MAX_IMAGE_BYTES": "5242880"
+}
