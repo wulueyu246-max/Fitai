@@ -597,16 +597,36 @@ function validateAffiliateConversion(input) {
   };
 }
 
-function isAllowedOrigin(origin) {
-  if (!origin || config.allowedOrigins.has(origin)) {
+function isLocalDevelopmentOrigin(origin) {
+  if (typeof origin !== "string") return false;
+
+  let parsed;
+  try {
+    parsed = new URL(origin);
+  } catch (_) {
+    return false;
+  }
+
+  if (
+    parsed.protocol !== "http:" ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== "/" ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    return false;
+  }
+
+  return ["localhost", "127.0.0.1"].includes(parsed.hostname.toLowerCase());
+}
+
+function isAllowedOrigin(origin, currentConfig = config) {
+  if (!origin || currentConfig.allowedOrigins.has(origin)) {
     return true;
   }
 
-  if (!config.isProduction) {
-    return /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(origin);
-  }
-
-  return false;
+  return isLocalDevelopmentOrigin(origin);
 }
 
 function estimateBase64Bytes(base64Value) {
@@ -1036,9 +1056,11 @@ app.use(
     allowedHeaders: [
       "Authorization",
       "Content-Type",
+      "X-Requested-With",
       "X-Admin-Key",
       "X-Request-Id",
     ],
+    optionsSuccessStatus: 204,
     exposedHeaders: ["X-Request-Id", "Retry-After"],
     maxAge: 600,
   }),
@@ -1891,6 +1913,8 @@ module.exports = {
   validateOutfitRequest,
   validateProductionConfig,
   logOptionalServiceWarnings,
+  isAllowedOrigin,
+  isLocalDevelopmentOrigin,
   initializeDataStores,
   scheduleSupabaseRetry,
   safeSupabaseError,

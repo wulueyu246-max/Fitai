@@ -26,6 +26,8 @@ const {
   resolveAiConfig,
   sanitizeAiErrorMessage,
   shouldUseMockAi,
+  isAllowedOrigin,
+  isLocalDevelopmentOrigin,
   validateProductionConfig,
   validateOutfitRequest,
 } = require("../index");
@@ -93,6 +95,91 @@ test("logs clear warnings for disabled optional services", () => {
   assert.equal(warnings.length, 4);
   assert.ok(warnings.some((message) => message.includes("Supabase")));
   assert.ok(warnings.some((message) => message.includes("返回 503")));
+});
+
+test("allows only exact localhost and loopback HTTP origins", () => {
+  const configured = {allowedOrigins: new Set()};
+  for (const origin of [
+    "http://localhost",
+    "http://localhost:61728",
+    "http://localhost:1",
+    "http://127.0.0.1",
+    "http://127.0.0.1:54321",
+  ]) {
+    assert.equal(isLocalDevelopmentOrigin(origin), true, origin);
+    assert.equal(isAllowedOrigin(origin, configured), true, origin);
+  }
+
+  for (const origin of [
+    "http://localhost.evil.com",
+    "http://127.0.0.1.evil.com:61728",
+    "https://localhost:61728",
+    "http://localhost:61728/path",
+    "http://user:pass@localhost:61728",
+  ]) {
+    assert.equal(isLocalDevelopmentOrigin(origin), false, origin);
+    assert.equal(isAllowedOrigin(origin, configured), false, origin);
+  }
+});
+
+test("allows configured HTTPS origins and requests without Origin", () => {
+  const configured = {
+    allowedOrigins: new Set(["https://app.example.com"]),
+  };
+
+  assert.equal(isAllowedOrigin("https://app.example.com", configured), true);
+  assert.equal(isAllowedOrigin(undefined, configured), true);
+  assert.equal(
+    isAllowedOrigin("https://other.example.com", configured),
+    false,
+  );
+});
+
+test("handles allowed and rejected CORS preflight requests", async () => {
+  const server = await listenForRequests(app, 0);
+
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object");
+    const url = `http://127.0.0.1:${address.port}/outfit`;
+    const response = await fetch(url, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "http://localhost:61728",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type,x-requested-with",
+      },
+    });
+
+    assert.equal(response.status, 204);
+    assert.equal(
+      response.headers.get("access-control-allow-origin"),
+      "http://localhost:61728",
+    );
+    assert.match(
+      response.headers.get("access-control-allow-methods") || "",
+      /OPTIONS/,
+    );
+    assert.match(
+      response.headers.get("access-control-allow-headers") || "",
+      /X-Requested-With/i,
+    );
+
+    const rejected = await fetch(url, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "http://localhost.evil.com",
+        "Access-Control-Request-Method": "POST",
+      },
+    });
+    const rejectedBody = await rejected.json();
+    assert.equal(rejected.status, 403);
+    assert.equal(rejectedBody.error.code, "ORIGIN_NOT_ALLOWED");
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
 });
 
 test("validates a complete outfit request with three images", () => {
