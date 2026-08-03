@@ -62,6 +62,11 @@ class ProductAnalyticsService {
           'sku': product.sku,
           'brand': product.brand,
           'source': source,
+          'platform': product.sourceProvider.isNotEmpty
+              ? product.sourceProvider
+              : product.affiliateChannelId.isNotEmpty
+                  ? product.affiliateChannelId
+                  : 'unknown',
           'affiliateChannelId': product.affiliateChannelId,
           'commissionRate': product.commission.toString(),
           'productPrice': product.numericPrice.toString(),

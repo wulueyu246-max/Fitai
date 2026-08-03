@@ -44,6 +44,25 @@ void main() {
             'shoes': '鞋子',
             'accessories': '配饰',
             'summary': '总结',
+            'products': [
+              {
+                'title': '结构感短款外套',
+                'brand': 'Shupi Select',
+                'product_id': 'catalog-product-1',
+                'category': '上衣',
+                'color': '深灰',
+                'size': 'S-XL',
+                'keyword': '短款外套',
+                'price': 399,
+                'image_url': 'https://cdn.example.com/product-1.jpg',
+                'detail_url': 'https://shop.example.com/product-1',
+                'platform': 'mock-catalog',
+                'commission_rate': 0.08,
+                'affiliate_url':
+                    'https://shop.example.com/product-1?channel=test',
+                'stock_status': 'in_stock',
+              },
+            ],
           },
           'products': [
             {
@@ -73,8 +92,18 @@ void main() {
     expect(analysis.bodyAnalysis, '身体分析');
     expect(analysis.suggestion, '总结');
     expect(analysis.recommendedProducts, hasLength(1));
-    expect(analysis.recommendedProducts.single.name, '短款外套');
-    expect(analysis.recommendedProducts.single.sourceProvider, 'ai-analysis');
+    expect(analysis.recommendedProducts.single.name, '结构感短款外套');
+    expect(
+      analysis.recommendedProducts.single.sourceProvider,
+      'mock-catalog',
+    );
+    expect(analysis.productRecommendations, hasLength(1));
+    expect(
+      analysis.productRecommendations.single.id,
+      'catalog-product-1',
+    );
+    expect(analysis.productRecommendations.single.price, 399);
+    expect(analysis.productRecommendations.single.commissionRate, 0.08);
   });
 
   test('normalizes the request fields before sending JSON', () async {

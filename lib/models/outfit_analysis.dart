@@ -1,5 +1,6 @@
 import 'outfit_plan.dart';
 import 'product.dart';
+import 'product_recommendation.dart';
 
 class OutfitAnalysis {
   const OutfitAnalysis({
@@ -12,6 +13,7 @@ class OutfitAnalysis {
     required this.suggestion,
     this.analysisMode = 'ai',
     this.recommendedProducts = const [],
+    this.productRecommendations = const [],
     this.outfitPlan,
   });
 
@@ -35,6 +37,9 @@ class OutfitAnalysis {
           ? json['analysis_mode'] as String
           : 'ai',
       recommendedProducts: _readProducts(json['recommended_products']),
+      productRecommendations: _readProductRecommendations(
+        json['product_recommendations'],
+      ),
       outfitPlan: _readOutfitPlan(json['outfit_plan']),
     );
   }
@@ -44,6 +49,9 @@ class OutfitAnalysis {
     if (recommendations is! Map<String, dynamic>) {
       throw const FormatException('recommendations 必须是对象');
     }
+    final productRecommendations = _readProductRecommendations(
+      recommendations['products'],
+    );
 
     return OutfitAnalysis(
       bodyAnalysis: _readAliasedString(
@@ -80,7 +88,14 @@ class OutfitAnalysis {
         const ['analysisMode', 'analysis_mode'],
         fallback: 'ai',
       ),
-      recommendedProducts: _readVisionProducts(json['products']),
+      recommendedProducts: productRecommendations.isEmpty
+          ? _readVisionProducts(json['products'])
+          : List<Product>.unmodifiable(
+              productRecommendations.map(
+                (recommendation) => recommendation.toProduct(),
+              ),
+            ),
+      productRecommendations: productRecommendations,
     );
   }
 
@@ -93,6 +108,7 @@ class OutfitAnalysis {
   final String suggestion;
   final String analysisMode;
   final List<Product> recommendedProducts;
+  final List<ProductRecommendation> productRecommendations;
   final OutfitPlan? outfitPlan;
 
   bool get isMock => analysisMode == 'mock';
@@ -107,6 +123,7 @@ class OutfitAnalysis {
     String? suggestion,
     String? analysisMode,
     List<Product>? recommendedProducts,
+    List<ProductRecommendation>? productRecommendations,
     OutfitPlan? outfitPlan,
   }) {
     return OutfitAnalysis(
@@ -119,6 +136,8 @@ class OutfitAnalysis {
       suggestion: suggestion ?? this.suggestion,
       analysisMode: analysisMode ?? this.analysisMode,
       recommendedProducts: recommendedProducts ?? this.recommendedProducts,
+      productRecommendations:
+          productRecommendations ?? this.productRecommendations,
       outfitPlan: outfitPlan ?? this.outfitPlan,
     );
   }
@@ -135,6 +154,9 @@ class OutfitAnalysis {
       'analysis_mode': analysisMode,
       'recommended_products':
           recommendedProducts.map((product) => product.toJson()).toList(),
+      'product_recommendations': productRecommendations
+          .map((recommendation) => recommendation.toJson())
+          .toList(),
       'outfit_plan': outfitPlan?.toJson(),
     };
   }
@@ -204,13 +226,38 @@ class OutfitAnalysis {
       throw const FormatException('products 必须是数组');
     }
 
+    final productMaps = value.whereType<Map<String, dynamic>>().toList();
+    if (productMaps.length != value.length ||
+        productMaps.any((item) => item['name'] is! String)) {
+      return const [];
+    }
+
     return List<Product>.unmodifiable(
-      value.indexed.map((entry) {
+      productMaps.indexed.map((entry) {
         final (index, item) = entry;
-        if (item is! Map<String, dynamic>) {
-          throw const FormatException('products 中的商品必须是对象');
-        }
         return Product.fromAiRecommendation(item, index: index);
+      }),
+    );
+  }
+
+  static List<ProductRecommendation> _readProductRecommendations(
+    dynamic value,
+  ) {
+    if (value == null) {
+      return const [];
+    }
+    if (value is! List) {
+      throw const FormatException('recommendations.products 必须是数组');
+    }
+
+    return List<ProductRecommendation>.unmodifiable(
+      value.map((item) {
+        if (item is! Map<String, dynamic>) {
+          throw const FormatException(
+            'recommendations.products 中的商品必须是对象',
+          );
+        }
+        return ProductRecommendation.fromJson(item);
       }),
     );
   }

@@ -48,6 +48,7 @@ class OutfitViewModel extends ChangeNotifier {
         suggestion: response.suggestion,
         analysisMode: response.analysisMode,
         recommendedProducts: response.recommendedProducts,
+        productRecommendations: response.productRecommendations,
       );
       return true;
     } on AIServiceException catch (error) {

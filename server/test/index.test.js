@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 process.env.AFFILIATE_POSTBACK_SECRET = "fitai-test-affiliate-secret";
+process.env.PRODUCT_PROVIDER = "mock";
 
 const {
   app,
@@ -12,6 +13,7 @@ const {
   createDiagnosticFetch,
   createAiErrorDetails,
   createMockOutfitAnalysis,
+  buildOutfitApiResponse,
   configureProxyEnvironment,
   extractAiText,
   parseOutfitAnalysis,
@@ -73,10 +75,8 @@ test("parses AI output into a structured analysis", () => {
       products: [
         {
           category: "上衣",
-          name: "短款外套",
-          color: "深灰",
-          material: "棉混纺",
-          reason: "优化比例",
+          style: "简约通勤",
+          keyword: "短款外套",
         },
       ],
     }),
@@ -95,13 +95,49 @@ test("parses AI output into a structured analysis", () => {
     products: [
       {
         category: "上衣",
-        name: "短款外套",
-        color: "深灰",
-        material: "棉混纺",
-        reason: "优化比例",
+        style: "简约通勤",
+        keyword: "短款外套",
       },
     ],
   });
+});
+
+test("adds catalog product recommendations without changing legacy products", async () => {
+  const analysis = {
+    bodyProfile: "balanced",
+    style: "minimal",
+    recommendations: {
+      top: "shirt",
+      bottom: "trousers",
+      shoes: "loafers",
+      accessories: "watch",
+      summary: "commute look",
+    },
+    products: [
+      {category: "T恤", style: "minimal", keyword: "shirt keyword"},
+    ],
+  };
+  const matchedProducts = [
+    {
+      product_id: "product-1",
+      title: "Structured Shirt",
+      brand: "Shupi Select",
+      category: "top",
+      price: 299,
+      image_url: "https://cdn.example.com/product-1.jpg",
+      detail_url: "https://shop.example.com/product-1",
+      platform: "mock-catalog",
+      commission_rate: 0.08,
+      affiliate_url: "https://shop.example.com/product-1?channel=test",
+      stock_status: "in_stock",
+    },
+  ];
+
+  const response = await buildOutfitApiResponse(analysis, matchedProducts);
+
+  assert.deepEqual(response.products, analysis.products);
+  assert.deepEqual(response.recommendations.products, matchedProducts);
+  assert.equal(response.recommendations.top, "shirt");
 });
 
 test("extracts text from DashScope compatible content parts", () => {
@@ -133,10 +169,8 @@ ${JSON.stringify({
     products: [
       {
         category: "top",
-        name: "short jacket",
-        color: "navy",
-        material: "cotton blend",
-        reason: "improves proportion",
+        style: "minimal",
+        keyword: "short jacket",
       },
     ],
   })}
@@ -160,10 +194,8 @@ test("repairs a model response missing only trailing JSON braces", () => {
     products: [
       {
         category: "top",
-        name: "jacket",
-        color: "navy",
-        material: "cotton",
-        reason: "proportion",
+        style: "minimal",
+        keyword: "jacket",
       },
     ],
   });

@@ -26,3 +26,7 @@ DiskCleanup_Candidate_Manifest_*.tsv
 DiskCleanup_Planned_Paths_*.txt
 DiskCleanup_Result_*.json
 disk_cleanup_confirmed.ps1
+
+server/node_modules/
+server/.env
+server/*.log

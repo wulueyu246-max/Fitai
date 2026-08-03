@@ -24,6 +24,16 @@ const {
   ObjectStorageError,
   SupabaseObjectStorage,
 } = require("./supabase_storage");
+const {ProductCatalog} = require("./product_catalog");
+const {
+  ProductClickStore,
+  ProductClickStoreError,
+} = require("./product_click_store");
+const {
+  ProductProviderError,
+  createProductProvider,
+} = require("./product_provider");
+const {TaobaoService} = require("./taobao_service");
 
 require("dotenv").config({
   path: path.join(__dirname, ".env"),
@@ -233,13 +243,17 @@ const recommendationKeys = Object.freeze([
 
 const productKeys = Object.freeze([
   "category",
-  "name",
-  "color",
-  "material",
-  "reason",
+  "style",
+  "keyword",
 ]);
 
 const app = express();
+const productCatalog = new ProductCatalog();
+const productProvider = createProductProvider({
+  environment: process.env,
+  catalog: productCatalog,
+});
+const taobaoService = new TaobaoService({provider: productProvider});
 const cloudPersistence = config.supabaseUrl && config.supabaseServiceRoleKey
   ? new SupabasePersistence({
     url: config.supabaseUrl,
@@ -270,6 +284,10 @@ const authStore = new AuthStore({
 const analyticsStore = new AnalyticsStore({
   filePath: config.analyticsStorePath,
   persistence: cloudAnalyticsPersistence,
+});
+const productClickStore = new ProductClickStore({
+  supabaseUrl: config.supabaseUrl,
+  serviceRoleKey: config.supabaseServiceRoleKey,
 });
 function requestUrlFromInput(input, fallbackUrl) {
   if (typeof input === "string") return input;
@@ -827,27 +845,36 @@ function createMockOutfitAnalysis(outfitRequest) {
     products: [
       {
         category: "上衣",
-        name: "结构感短款上衣",
-        color: "低饱和中性色",
-        material: "透气棉混纺",
-        reason: "清晰肩线和适中衣长有助于建立利落的上半身比例。",
+        style: "简约通勤",
+        keyword: "结构感短款T恤",
       },
       {
-        category: "下装",
-        name: "中高腰直筒裤",
-        color: "深灰或黑色",
-        material: "垂顺混纺面料",
-        reason: "顺直裤线能够增强纵向延伸感并适配多种场景。",
+        category: "裤子",
+        style: "简约通勤",
+        keyword: "中高腰直筒裤",
       },
       {
-        category: "鞋履",
-        name: "简洁低帮鞋",
-        color: "与下装接近的中性色",
-        material: "皮革或织物",
-        reason: "简洁鞋型可以让下半身线条保持连贯。",
+        category: "鞋",
+        style: "简约通勤",
+        keyword: "简洁低帮鞋",
       },
     ],
     analysisMode: "mock",
+  };
+}
+
+async function buildOutfitApiResponse(analysis, productRecommendations) {
+  const catalogProducts = productRecommendations ??
+    await productProvider.recommendForQueries(analysis.products, {
+      style: analysis.style,
+      bodyType: analysis.bodyProfile,
+    });
+  return {
+    ...analysis,
+    recommendations: {
+      ...analysis.recommendations,
+      products: catalogProducts,
+    },
   };
 }
 
@@ -1176,10 +1203,25 @@ app.delete("/auth/account", async (req, res, next) => {
 app.post("/analytics/events", async (req, res, next) => {
   try {
     const event = analyticsStore.record(req.body);
+    if (event.name === "product_click") {
+      await productClickStore.record({
+        userId: event.userId,
+        productId: event.properties.productId,
+        platform:
+          event.properties.platform ||
+          event.properties.affiliateChannelId ||
+          "unknown",
+        clickTime: event.createdAt,
+        idempotencyKey: event.id,
+      });
+    }
     await analyticsStore.flush();
     return res.status(202).json({accepted: true, eventId: event.id});
   } catch (error) {
-    if (error instanceof AnalyticsStoreError) {
+    if (
+      error instanceof AnalyticsStoreError ||
+      error instanceof ProductClickStoreError
+    ) {
       return sendError(res, error.status, error.code, error.message);
     }
     return next(error);
@@ -1282,7 +1324,61 @@ app.get("/health", (req, res) => {
       : config.analyticsStorePath ? "file" : "memory",
     admin_analytics_configured: Boolean(config.adminAnalyticsKey),
     affiliate_postback_configured: Boolean(config.affiliatePostbackSecret),
+    product_provider: productProvider.name,
   });
+});
+
+app.get("/products/recommend", async (req, res, next) => {
+  try {
+    const products = await productProvider.recommend({
+      category: req.query.category,
+      style: req.query.style,
+      color: req.query.color,
+      bodyType: req.query.bodyType,
+    });
+    return res.json({products});
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof ProductProviderError) {
+      return sendError(
+        res,
+        error.status || 400,
+        error.code || "INVALID_PRODUCT_FILTER",
+        error.message,
+      );
+    }
+    return next(error);
+  }
+});
+
+app.get("/products/search", async (req, res, next) => {
+  try {
+    const products = await taobaoService.search({
+      keyword: req.query.keyword,
+      category: req.query.category,
+      style: req.query.style,
+      color: req.query.color,
+      bodyType: req.query.bodyType,
+      limit: req.query.limit ? Number(req.query.limit) : undefined,
+    });
+    return res.json({products, provider: productProvider.name});
+  } catch (error) {
+    if (error instanceof ProductProviderError) {
+      return sendError(res, error.status, error.code, error.message);
+    }
+    return next(error);
+  }
+});
+
+app.get("/products/:id/stats", async (req, res, next) => {
+  try {
+    const clickCount = await productClickStore.countForProduct(req.params.id);
+    return res.json({click_count: clickCount});
+  } catch (error) {
+    if (error instanceof ProductClickStoreError) {
+      return sendError(res, error.status, error.code, error.message);
+    }
+    return next(error);
+  }
 });
 
 app.post("/outfit", outfitRateLimiter, async (req, res) => {
@@ -1294,7 +1390,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
 
     if (shouldUseMockAi(config, aiClient)) {
       return res.json({
-        ...createMockOutfitAnalysis(outfitRequest),
+        ...(await buildOutfitApiResponse(createMockOutfitAnalysis(outfitRequest))),
         fallbackReason: config.forceMockAi
           ? "AI_FORCE_MOCK"
           : "AI_NOT_CONFIGURED",
@@ -1303,7 +1399,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
 
     if (activeAiRequests >= config.maxConcurrentAiRequests) {
       return res.json({
-        ...createMockOutfitAnalysis(outfitRequest),
+        ...(await buildOutfitApiResponse(createMockOutfitAnalysis(outfitRequest))),
         fallbackReason: "AI_CAPACITY_REACHED",
       });
     }
@@ -1389,10 +1485,8 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
   "products": [
     {
       "category": "",
-      "name": "",
-      "color": "",
-      "material": "",
-      "reason": ""
+      "style": "",
+      "keyword": ""
     }
   ]
 }
@@ -1433,7 +1527,10 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
       productCount: analysis.products.length,
     });
 
-    return res.json({...analysis, analysisMode: "ai"});
+    return res.json({
+      ...(await buildOutfitApiResponse(analysis)),
+      analysisMode: "ai",
+    });
   } catch (error) {
     if (error instanceof RequestValidationError) {
       console.warn("/outfit 请求参数无效", {
@@ -1445,6 +1542,10 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
             : [],
       });
       return sendError(res, 400, "INVALID_REQUEST", error.message);
+    }
+
+    if (error instanceof ProductProviderError) {
+      return sendError(res, error.status, error.code, error.message);
     }
 
     const fallbackReason = resolveAiFallbackReason(error);
@@ -1472,7 +1573,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
 
     if (config.fallbackOnAiError && outfitRequest) {
       return res.json({
-        ...createMockOutfitAnalysis(outfitRequest),
+        ...(await buildOutfitApiResponse(createMockOutfitAnalysis(outfitRequest))),
         fallbackReason,
       });
     }
@@ -1568,8 +1669,13 @@ module.exports = {
   cloudPersistence,
   cloudAnalyticsPersistence,
   objectStorage,
+  productCatalog,
+  productProvider,
+  taobaoService,
+  productClickStore,
   config,
   createMockOutfitAnalysis,
+  buildOutfitApiResponse,
   extractAiText,
   parseOutfitAnalysis,
   buildAiRequestUrl,

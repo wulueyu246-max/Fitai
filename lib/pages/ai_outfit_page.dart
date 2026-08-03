@@ -520,10 +520,12 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
     });
 
     try {
-      final catalogProducts = await _productService.recommendProducts(
-        analysis: analysis,
-        request: request,
-      );
+      final catalogProducts = analysis.productRecommendations.isNotEmpty
+          ? analysis.recommendedProducts
+          : await _productService.recommendProducts(
+              analysis: analysis,
+              request: request,
+            );
       final rawProducts = catalogProducts.isEmpty
           ? analysis.recommendedProducts
           : catalogProducts;

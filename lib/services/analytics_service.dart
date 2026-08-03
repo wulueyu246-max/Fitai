@@ -49,7 +49,11 @@ class LocalAnalyticsService implements AnalyticsService {
   String? _installationIdMemory;
 
   static Uri? _environmentEndpoint() {
-    const baseUrl = String.fromEnvironment('ANALYTICS_API_BASE_URL');
+    const analyticsBaseUrl =
+        String.fromEnvironment('ANALYTICS_API_BASE_URL');
+    const apiBaseUrl = String.fromEnvironment('API_BASE_URL');
+    final baseUrl =
+        analyticsBaseUrl.isNotEmpty ? analyticsBaseUrl : apiBaseUrl;
     final normalized = baseUrl.replaceFirst(RegExp(r'/$'), '');
     final uri = Uri.tryParse('$normalized/analytics/events');
     return baseUrl.isNotEmpty &&
