@@ -22,6 +22,11 @@ const {
 const {SupabasePersistence} = require("./supabase_persistence");
 const {SupabaseUserPersistence} = require("./supabase_user_persistence");
 const {
+  createDirectSupabaseFetch,
+  diagnoseSupabaseConnection,
+  resolveSupabaseConfig,
+} = require("./supabase_network");
+const {
   ObjectStorageError,
   SupabaseObjectStorage,
 } = require("./supabase_storage");
@@ -125,6 +130,7 @@ function resolveAiConfig(environment = process.env) {
 
 const aiConfig = resolveAiConfig();
 const proxyConfig = configureProxyEnvironment();
+const supabaseConfig = resolveSupabaseConfig();
 const PORT = process.env.PORT || 3000;
 
 const config = Object.freeze({
@@ -168,7 +174,8 @@ const config = Object.freeze({
   ),
   analyticsStorePath:
     readOptionalString(process.env.ANALYTICS_STORE_PATH) || null,
-  supabaseUrl: readOptionalString(process.env.SUPABASE_URL),
+  supabaseUrl: supabaseConfig.url,
+  supabaseConfigError: supabaseConfig.errorCode,
   supabaseServiceRoleKey: readOptionalString(
     process.env.SUPABASE_SERVICE_ROLE_KEY,
   ),
@@ -237,7 +244,9 @@ function logOptionalServiceWarnings(current, logger = console) {
   }
   if (!current.supabaseUrl || !current.supabaseServiceRoleKey) {
     logger.warn(
-      "Supabase 未完整配置：云端用户持久化和照片存储已禁用",
+      current.supabaseConfigError
+        ? `Supabase URL configuration is invalid: ${current.supabaseConfigError}`
+        : "Supabase 未完整配置：云端用户持久化和照片存储已禁用",
     );
   }
   if (!current.adminAnalyticsKey) {
@@ -280,12 +289,24 @@ const productProvider = createProductProvider({
   catalog: productCatalog,
 });
 const taobaoService = new TaobaoService({provider: productProvider});
+const supabaseFetch = config.supabaseUrl && config.supabaseServiceRoleKey
+  ? createDirectSupabaseFetch()
+  : null;
+const supabaseRuntime = {
+  status: config.supabaseConfigError
+    ? "misconfigured"
+    : supabaseFetch ? "connecting" : "disabled",
+  errorCode: config.supabaseConfigError || null,
+  diagnostics: null,
+  retryTimer: null,
+};
 const runtimeAuthPersistence = config.supabaseUrl && config.supabaseServiceRoleKey
   ? new SupabasePersistence({
     url: config.supabaseUrl,
     serviceRoleKey: config.supabaseServiceRoleKey,
     table: config.supabaseStateTable,
     recordId: "auth",
+    fetchImpl: supabaseFetch,
   })
   : null;
 const cloudPersistence = runtimeAuthPersistence
@@ -293,6 +314,7 @@ const cloudPersistence = runtimeAuthPersistence
     runtimePersistence: runtimeAuthPersistence,
     url: config.supabaseUrl,
     serviceRoleKey: config.supabaseServiceRoleKey,
+    fetchImpl: supabaseFetch,
   })
   : null;
 const cloudAnalyticsPersistence = config.supabaseUrl && config.supabaseServiceRoleKey
@@ -301,6 +323,7 @@ const cloudAnalyticsPersistence = config.supabaseUrl && config.supabaseServiceRo
     serviceRoleKey: config.supabaseServiceRoleKey,
     table: config.supabaseStateTable,
     recordId: "analytics",
+    fetchImpl: supabaseFetch,
   })
   : null;
 const objectStorage = config.supabaseUrl && config.supabaseServiceRoleKey
@@ -308,6 +331,7 @@ const objectStorage = config.supabaseUrl && config.supabaseServiceRoleKey
     url: config.supabaseUrl,
     serviceRoleKey: config.supabaseServiceRoleKey,
     bucket: config.photoStorageBucket,
+    fetchImpl: supabaseFetch,
   })
   : null;
 const authStore = new AuthStore({
@@ -321,6 +345,7 @@ const analyticsStore = new AnalyticsStore({
 const productClickStore = new ProductClickStore({
   supabaseUrl: config.supabaseUrl,
   serviceRoleKey: config.supabaseServiceRoleKey,
+  fetchImpl: supabaseFetch || fetch,
 });
 function requestUrlFromInput(input, fallbackUrl) {
   if (typeof input === "string") return input;
@@ -1363,12 +1388,24 @@ app.get("/health", (req, res) => {
     ai_proxy_configured: config.useProxy && Boolean(config.aiProxyUrl),
     ai_proxy_url: sanitizeProxyUrl(config.aiProxyUrl),
     user_store: cloudPersistence
-      ? "supabase"
+      ? supabaseRuntime.status === "ready" ? "supabase" : "degraded"
       : config.userStorePath ? "file" : "memory",
-    photo_storage: objectStorage ? "supabase" : "unconfigured",
+    photo_storage: objectStorage
+      ? supabaseRuntime.status === "ready" ? "supabase" : "degraded"
+      : "unconfigured",
     analytics_store: cloudAnalyticsPersistence
-      ? "supabase"
+      ? supabaseRuntime.status === "ready" ? "supabase" : "degraded"
       : config.analyticsStorePath ? "file" : "memory",
+    supabase_status: supabaseRuntime.status,
+    supabase_error_code: supabaseRuntime.errorCode,
+    supabase_hostname: config.supabaseUrl
+      ? new URL(config.supabaseUrl).hostname
+      : null,
+    supabase_dns_ok: Boolean(supabaseRuntime.diagnostics?.dns?.length),
+    supabase_root_http_status:
+      supabaseRuntime.diagnostics?.rootStatus ?? null,
+    supabase_rest_http_status:
+      supabaseRuntime.diagnostics?.restStatus ?? null,
     admin_analytics_configured: Boolean(config.adminAnalyticsKey),
     affiliate_postback_configured: Boolean(config.affiliatePostbackSecret),
     product_provider: productProvider.name,
@@ -1706,12 +1743,102 @@ function listenForRequests(application, port) {
   });
 }
 
+async function initializeDataStores(logger = console) {
+  if (!cloudPersistence) {
+    await Promise.allSettled([
+      authStore.initialize({allowDegraded: true}),
+      analyticsStore.initialize(),
+    ]);
+    return;
+  }
+
+  supabaseRuntime.status = "connecting";
+  supabaseRuntime.diagnostics = await diagnoseSupabaseConnection({
+    url: config.supabaseUrl,
+    serviceRoleKey: config.supabaseServiceRoleKey,
+    table: config.supabaseStateTable,
+    fetchImpl: supabaseFetch,
+    logger,
+  });
+  const [, analyticsResult] = await Promise.allSettled([
+    authStore.initialize({allowDegraded: true}),
+    analyticsStore.initialize(),
+  ]);
+  const authReady = authStore.persistenceStatus === "ready";
+  const analyticsReady = analyticsResult.status === "fulfilled";
+  if (authReady && analyticsReady) {
+    supabaseRuntime.status = "ready";
+    supabaseRuntime.errorCode = null;
+  } else {
+    supabaseRuntime.status = "degraded";
+    const error = authStore.persistenceError ||
+      safeSupabaseError(analyticsResult.reason);
+    supabaseRuntime.errorCode = error?.code ||
+      supabaseRuntime.diagnostics?.errorCode ||
+      "SUPABASE_UNAVAILABLE";
+    logger.error("Supabase initialization degraded", error);
+  }
+  scheduleSupabaseRetry(logger);
+}
+
+function scheduleSupabaseRetry(logger = console) {
+  if (!cloudPersistence || supabaseRuntime.retryTimer) return;
+  supabaseRuntime.retryTimer = setInterval(async () => {
+    if (
+      supabaseRuntime.status === "ready" &&
+      authStore.persistenceStatus === "ready"
+    ) {
+      return;
+    }
+    const authReady = await authStore.retryPersistence();
+    let analyticsReady = true;
+    try {
+      await cloudAnalyticsPersistence.healthCheck();
+      if (!analyticsStore.loaded) await analyticsStore.initialize();
+    } catch (error) {
+      analyticsReady = false;
+      logger.error("Supabase analytics retry failed", safeSupabaseError(error));
+    }
+    if (authReady && analyticsReady) {
+      supabaseRuntime.status = "ready";
+      supabaseRuntime.errorCode = null;
+      logger.info("Supabase background retry succeeded", {
+        hostname: new URL(config.supabaseUrl).hostname,
+      });
+    } else {
+      supabaseRuntime.status = "degraded";
+      const error = authStore.persistenceError;
+      supabaseRuntime.errorCode = error?.code || "SUPABASE_UNAVAILABLE";
+      logger.error("Supabase background retry failed", error);
+    }
+  }, 30_000);
+  supabaseRuntime.retryTimer.unref();
+}
+
+function safeSupabaseError(error) {
+  return {
+    code: error?.code || error?.cause?.code || "SUPABASE_UNAVAILABLE",
+    name: error?.name || null,
+    message: error?.message || null,
+    causeName: error?.cause?.name || null,
+    causeMessage: error?.cause?.message || null,
+    causeCode: error?.cause?.code || null,
+    causeErrno: error?.cause?.errno || null,
+    causeHostname: error?.cause?.hostname || null,
+  };
+}
+
 if (require.main === module) {
   const start = async () => {
     logOptionalServiceWarnings(config);
-    await Promise.all([authStore.initialize(), analyticsStore.initialize()]);
     const server = await listenForRequests(app, config.port);
     console.log(`服务器启动成功 http://localhost:${config.port}`);
+    initializeDataStores().catch((error) => {
+      supabaseRuntime.status = "degraded";
+      supabaseRuntime.errorCode = error?.code || "SUPABASE_STARTUP_DIAGNOSTIC_FAILED";
+      console.error("Supabase startup diagnostic failed", safeSupabaseError(error));
+      scheduleSupabaseRetry();
+    });
 
     const shutdown = (signal) => {
       console.log(`收到 ${signal}，正在关闭服务器`);
@@ -1764,5 +1891,9 @@ module.exports = {
   validateOutfitRequest,
   validateProductionConfig,
   logOptionalServiceWarnings,
+  initializeDataStores,
+  scheduleSupabaseRetry,
+  safeSupabaseError,
+  supabaseRuntime,
   partialViewSafetyInstruction,
 };

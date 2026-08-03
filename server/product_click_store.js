@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const {normalizeSupabaseUrl} = require("./supabase_network");
 
 class ProductClickStoreError extends Error {
   constructor(message, {cause, status = 400, code = "INVALID_PRODUCT_CLICK"} = {}) {
@@ -11,7 +12,7 @@ class ProductClickStoreError extends Error {
 
 class ProductClickStore {
   constructor({supabaseUrl = "", serviceRoleKey = "", fetchImpl = fetch} = {}) {
-    this.supabaseUrl = String(supabaseUrl || "").replace(/\/$/, "");
+    this.supabaseUrl = supabaseUrl ? normalizeSupabaseUrl(supabaseUrl) : "";
     this.serviceRoleKey = String(serviceRoleKey || "");
     this.fetch = fetchImpl;
     this.clicks = [];

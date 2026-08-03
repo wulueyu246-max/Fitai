@@ -1,11 +1,12 @@
 const crypto = require("crypto");
 
 const {CloudPersistenceError} = require("./supabase_persistence");
+const {normalizeSupabaseUrl} = require("./supabase_network");
 
 class SupabaseUserPersistence {
   constructor({runtimePersistence, url, serviceRoleKey, fetchImpl = fetch}) {
     this.runtimePersistence = runtimePersistence;
-    this.url = String(url || "").replace(/\/$/, "");
+    this.url = normalizeSupabaseUrl(url);
     this.serviceRoleKey = String(serviceRoleKey || "");
     this.fetch = fetchImpl;
     this.knownUserIds = new Set();

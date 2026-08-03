@@ -21,10 +21,13 @@ class AuthStore {
     this.phoneCodes = new Map();
     this.loaded = false;
     this.pendingPersistence = Promise.resolve();
+    this.persistenceStatus = persistence ? "connecting" : "disabled";
+    this.persistenceError = null;
+    this.persistenceDirty = false;
   }
 
-  async initialize() {
-    if (this.loaded) return;
+  async initialize({allowDegraded = false} = {}) {
+    if (this.loaded) return this.persistenceStatus === "ready";
     if (this.persistence) {
       try {
         const state = await this.persistence.load();
@@ -33,9 +36,18 @@ class AuthStore {
           this.sessions = Array.isArray(state.sessions) ? state.sessions : [];
           this.loaded = true;
           this.#dropExpiredSessions();
-          return;
+          this.persistenceStatus = "ready";
+          this.persistenceError = null;
+          return true;
         }
+        this.persistenceStatus = "ready";
+        this.persistenceError = null;
       } catch (error) {
+        this.#markPersistenceDegraded(error);
+        if (allowDegraded) {
+          this.#ensureLoaded();
+          return false;
+        }
         throw new AuthStoreError(
           503,
           "CLOUD_STORE_UNAVAILABLE",
@@ -44,6 +56,33 @@ class AuthStore {
       }
     }
     this.#ensureLoaded();
+    return this.persistenceStatus === "ready";
+  }
+
+  async retryPersistence() {
+    if (!this.persistence) return false;
+    try {
+      const remote = await this.persistence.load();
+      const remoteUsers = Array.isArray(remote?.users) ? remote.users : [];
+      const remoteSessions = Array.isArray(remote?.sessions) ? remote.sessions : [];
+      if (this.persistenceDirty) {
+        this.users = mergeByKey(remoteUsers, this.users, "userId");
+        this.sessions = mergeByKey(remoteSessions, this.sessions, "tokenHash");
+        await this.persistence.save(this.#state());
+      } else if (remote) {
+        this.users = remoteUsers;
+        this.sessions = remoteSessions;
+        this.#dropExpiredSessions();
+      }
+      this.loaded = true;
+      this.persistenceDirty = false;
+      this.persistenceStatus = "ready";
+      this.persistenceError = null;
+      return true;
+    } catch (error) {
+      this.#markPersistenceDegraded(error);
+      return false;
+    }
   }
 
   async flush() {
@@ -376,14 +415,19 @@ class AuthStore {
   }
 
   #persist() {
-    const state = JSON.parse(JSON.stringify({
-      users: this.users,
-      sessions: this.sessions,
-    }));
-    if (this.persistence) {
+    const state = this.#state();
+    if (this.persistence && this.persistenceStatus === "ready") {
       this.pendingPersistence = this.pendingPersistence.catch(() => {}).then(() => {
         return this.persistence.save(state);
+      }).then(() => {
+        this.persistenceDirty = false;
+      }).catch((error) => {
+        this.persistenceDirty = true;
+        this.#markPersistenceDegraded(error);
+        throw error;
       });
+    } else if (this.persistence) {
+      this.persistenceDirty = true;
     }
     if (!this.filePath) {
       return;
@@ -398,6 +442,30 @@ class AuthStore {
     );
     fs.renameSync(temporaryPath, this.filePath);
   }
+
+  #state() {
+    return JSON.parse(JSON.stringify({
+      users: this.users,
+      sessions: this.sessions,
+    }));
+  }
+
+  #markPersistenceDegraded(error) {
+    this.persistenceStatus = "degraded";
+    this.persistenceError = {
+      code: error?.code || error?.cause?.code || "SUPABASE_UNAVAILABLE",
+      message: String(error?.message || "Supabase unavailable").slice(0, 500),
+      details: error?.details || null,
+    };
+  }
+}
+
+function mergeByKey(remote, local, key) {
+  const merged = new Map();
+  for (const item of [...remote, ...local]) {
+    if (item?.[key]) merged.set(item[key], item);
+  }
+  return [...merged.values()];
 }
 
 function emptyWardrobe() {

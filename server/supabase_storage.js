@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const {normalizeSupabaseUrl} = require("./supabase_network");
 
 class ObjectStorageError extends Error {
   constructor(status, code, message) {
@@ -11,7 +12,7 @@ class ObjectStorageError extends Error {
 
 class SupabaseObjectStorage {
   constructor({url, serviceRoleKey, bucket = "user-photos", fetchImpl = fetch}) {
-    this.url = String(url || "").replace(/\/$/, "");
+    this.url = normalizeSupabaseUrl(url);
     this.serviceRoleKey = String(serviceRoleKey || "");
     this.bucket = bucket;
     this.fetch = fetchImpl;

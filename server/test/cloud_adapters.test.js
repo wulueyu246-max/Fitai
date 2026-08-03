@@ -3,6 +3,7 @@ const test = require("node:test");
 
 const {SupabasePersistence} = require("../supabase_persistence");
 const {SupabaseUserPersistence} = require("../supabase_user_persistence");
+const {AuthStore} = require("../auth_store");
 const {
   SupabaseObjectStorage,
   parseImageDataUri,
@@ -132,4 +133,27 @@ test("normalized user persistence synchronizes profile wardrobe favorites and hi
     calls.find((call) => call.url?.includes("/users?"))?.init.headers.apikey,
     "server-only-key",
   );
+});
+
+test("auth store degrades on startup and reconnects without exiting", async () => {
+  let attempts = 0;
+  const persistence = {
+    load: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        const error = new Error("fetch failed");
+        error.code = "ENOTFOUND";
+        throw error;
+      }
+      return {users: [], sessions: []};
+    },
+    save: async () => {},
+  };
+  const store = new AuthStore({persistence});
+
+  assert.equal(await store.initialize({allowDegraded: true}), false);
+  assert.equal(store.persistenceStatus, "degraded");
+  assert.equal(store.persistenceError.code, "ENOTFOUND");
+  assert.equal(await store.retryPersistence(), true);
+  assert.equal(store.persistenceStatus, "ready");
 });
