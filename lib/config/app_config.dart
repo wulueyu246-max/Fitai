@@ -1,18 +1,24 @@
 import 'package:flutter/foundation.dart';
 
 class AppConfig {
+  static const defaultApiBaseUrl = 'https://fitai-jqtl.onrender.com';
+  static const backendTimeout = Duration(seconds: 120);
+
   const AppConfig({
     required this.apiBaseUrl,
     this.maxImageBytes = 5 * 1024 * 1024,
-    this.aiTimeout = const Duration(seconds: 90),
+    this.aiTimeout = backendTimeout,
   });
 
   factory AppConfig.fromEnvironment() {
     const timeoutMs = int.fromEnvironment(
       'AI_TIMEOUT_MS',
-      defaultValue: 90000,
+      defaultValue: 120000,
     );
-    const configuredApiBaseUrl = String.fromEnvironment('API_BASE_URL');
+    const configuredApiBaseUrl = String.fromEnvironment(
+      'API_BASE_URL',
+      defaultValue: defaultApiBaseUrl,
+    );
 
     return AppConfig(
       apiBaseUrl: resolveApiBaseUrl(configuredApiBaseUrl),
@@ -37,9 +43,7 @@ class AppConfig {
     final effectiveIsWeb = isWeb ?? kIsWeb;
     final configured = configuredValue.trim();
     final candidate = configured.isEmpty
-        ? (!effectiveIsWeb && effectivePlatform == TargetPlatform.android
-            ? 'http://10.0.2.2:3000'
-            : 'http://127.0.0.1:3000')
+        ? defaultApiBaseUrl
         : configured;
 
     if (effectiveIsWeb || effectivePlatform != TargetPlatform.android) {
@@ -57,11 +61,12 @@ class AppConfig {
         : candidate;
   }
 
-  Uri get outfitEndpoint {
+  Uri endpoint(String path) {
     final normalizedBaseUrl = apiBaseUrl.endsWith('/')
         ? apiBaseUrl.substring(0, apiBaseUrl.length - 1)
         : apiBaseUrl;
-    final uri = Uri.tryParse('$normalizedBaseUrl/outfit');
+    final normalizedPath = path.startsWith('/') ? path : '/$path';
+    final uri = Uri.tryParse('$normalizedBaseUrl$normalizedPath');
 
     if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
       throw const FormatException('API_BASE_URL 配置无效');
@@ -69,4 +74,6 @@ class AppConfig {
 
     return uri;
   }
+
+  Uri get outfitEndpoint => endpoint('/outfit');
 }

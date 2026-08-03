@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../config/app_config.dart';
 import '../models/analytics_event.dart';
 
 abstract interface class AnalyticsService {
@@ -51,7 +52,10 @@ class LocalAnalyticsService implements AnalyticsService {
   static Uri? _environmentEndpoint() {
     const analyticsBaseUrl =
         String.fromEnvironment('ANALYTICS_API_BASE_URL');
-    const apiBaseUrl = String.fromEnvironment('API_BASE_URL');
+    const apiBaseUrl = String.fromEnvironment(
+      'API_BASE_URL',
+      defaultValue: AppConfig.defaultApiBaseUrl,
+    );
     final baseUrl =
         analyticsBaseUrl.isNotEmpty ? analyticsBaseUrl : apiBaseUrl;
     final normalized = baseUrl.replaceFirst(RegExp(r'/$'), '');
@@ -261,7 +265,7 @@ class LocalAnalyticsService implements AnalyticsService {
             headers: const {'content-type': 'application/json'},
             body: jsonEncode(event.toJson()),
           )
-          .timeout(const Duration(seconds: 5));
+          .timeout(AppConfig.backendTimeout);
     } catch (_) {
       // Remote analytics is best-effort and never blocks the product flow.
     }

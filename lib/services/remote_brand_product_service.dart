@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../config/app_config.dart';
 import '../models/product.dart';
 import 'brand_product_service.dart';
 
@@ -17,10 +18,12 @@ class RemoteBrandProductService implements BrandProductService {
       'AFFILIATE_CHANNEL_ID',
       defaultValue: 'fitai-commercial-test',
     ),
+    this.timeout = AppConfig.backendTimeout,
   }) : _client = client ?? http.Client();
 
   final Uri catalogEndpoint;
   final String affiliateChannelId;
+  final Duration timeout;
   final http.Client _client;
 
   @override
@@ -30,10 +33,12 @@ class RemoteBrandProductService implements BrandProductService {
       'affiliateChannelId': affiliateChannelId,
       if (brand != null && brand.trim().isNotEmpty) 'brand': brand.trim(),
     };
-    final response = await _client.get(
-      catalogEndpoint.replace(queryParameters: query),
-      headers: _headers,
-    );
+    final response = await _client
+        .get(
+          catalogEndpoint.replace(queryParameters: query),
+          headers: _headers,
+        )
+        .timeout(timeout);
     final payload = _decode(response);
     final values = payload is List<dynamic>
         ? payload
@@ -61,7 +66,8 @@ class RemoteBrandProductService implements BrandProductService {
         'affiliateChannelId': affiliateChannelId,
       },
     );
-    final response = await _client.get(endpoint, headers: _headers);
+    final response =
+        await _client.get(endpoint, headers: _headers).timeout(timeout);
     if (response.statusCode == 404) {
       return null;
     }

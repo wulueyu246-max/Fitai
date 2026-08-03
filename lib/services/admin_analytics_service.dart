@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../config/app_config.dart';
 import '../features/user/services/user_session_controller.dart';
 import '../models/admin_analytics_snapshot.dart';
 import '../models/affiliate_revenue_summary.dart';
@@ -49,7 +50,14 @@ class AdminAnalyticsService {
   final String _adminKey;
 
   static Uri? _environmentEndpoint() {
-    const baseUrl = String.fromEnvironment('ANALYTICS_API_BASE_URL');
+    const configuredBaseUrl =
+        String.fromEnvironment('ANALYTICS_API_BASE_URL');
+    const apiBaseUrl = String.fromEnvironment(
+      'API_BASE_URL',
+      defaultValue: AppConfig.defaultApiBaseUrl,
+    );
+    final baseUrl =
+        configuredBaseUrl.isEmpty ? apiBaseUrl : configuredBaseUrl;
     final normalized = baseUrl.replaceFirst(RegExp(r'/$'), '');
     final uri = Uri.tryParse('$normalized/admin/analytics');
     return baseUrl.isNotEmpty &&
@@ -116,7 +124,7 @@ class AdminAnalyticsService {
     final response = await _client.get(
       _remoteEndpoint!,
       headers: {'x-admin-key': _adminKey},
-    ).timeout(const Duration(seconds: 8));
+    ).timeout(AppConfig.backendTimeout);
     if (response.statusCode != 200) {
       throw StateError('运营数据服务返回 ${response.statusCode}');
     }

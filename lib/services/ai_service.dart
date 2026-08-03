@@ -62,7 +62,9 @@ class AIService {
         error: error,
         stackTrace: stackTrace,
       );
-      throw const AIServiceException('AI 分析超时，请稍后重试');
+      throw const AIServiceException(
+        '云端 AI 响应超时。免费服务首次唤醒可能较慢，请稍后重试',
+      );
     } on http.ClientException catch (error, stackTrace) {
       developer.log(
         '无法连接服务器：${_config.apiBaseUrl}',

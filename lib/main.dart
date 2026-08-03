@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import 'config/shupi_theme.dart';
 import 'config/production_environment.dart';
+import 'config/app_config.dart';
 import 'core/logging/app_logger.dart';
 import 'features/user/repositories/local_auth_repository.dart';
 import 'features/user/repositories/auth_repository.dart';
@@ -139,15 +140,20 @@ class _MainPageState extends State<MainPage> {
   void initState() {
     super.initState();
     _currentIndex = widget.initialIndex.clamp(0, 3);
+    final appConfig = AppConfig.fromEnvironment();
     const catalogUrl = String.fromEnvironment('PRODUCT_CATALOG_URL');
-    final catalogUri = Uri.tryParse(catalogUrl);
+    final catalogUri = catalogUrl.isEmpty
+        ? appConfig.endpoint('/products/recommend')
+        : Uri.tryParse(catalogUrl);
     _productSource =
         catalogUri != null && catalogUri.hasScheme && catalogUri.host.isNotEmpty
             ? RemoteBrandProductService(catalogEndpoint: catalogUri)
             : const MockBrandProductService();
     _productService = CatalogProductService(source: _productSource);
     const authApiBaseUrl = String.fromEnvironment('AUTH_API_BASE_URL');
-    final authUri = Uri.tryParse(authApiBaseUrl);
+    final authUri = Uri.tryParse(
+      authApiBaseUrl.isEmpty ? appConfig.apiBaseUrl : authApiBaseUrl,
+    );
     final authRepository =
         authUri != null && authUri.hasScheme && authUri.host.isNotEmpty
             ? RemoteAuthRepository(baseUrl: authUri) as AuthRepository

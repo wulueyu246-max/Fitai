@@ -2,6 +2,18 @@ import 'package:fit_ai/config/production_environment.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('default service endpoints use the Render backend', () {
+    final environment = ProductionEnvironment.fromDartDefines();
+
+    expect(environment.apiBaseUrl, 'https://fitai-jqtl.onrender.com');
+    expect(environment.authApiBaseUrl, environment.apiBaseUrl);
+    expect(environment.analyticsApiBaseUrl, environment.apiBaseUrl);
+    expect(
+      environment.productCatalogUrl,
+      'https://fitai-jqtl.onrender.com/products/recommend',
+    );
+  });
+
   test('development environment allows local endpoints', () {
     const ProductionEnvironment(
       appEnvironment: 'development',

@@ -163,12 +163,12 @@ void main() {
     await service.generateOutfit(unnormalizedRequest);
   });
 
-  test('uses the Android emulator host bridge for local development', () {
+  test('uses the Render backend by default on Android', () {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     try {
       expect(
         AppConfig.fromEnvironment().outfitEndpoint.toString(),
-        'http://10.0.2.2:3000/outfit',
+        'https://fitai-jqtl.onrender.com/outfit',
       );
     } finally {
       debugDefaultTargetPlatformOverride = null;

@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../config/app_config.dart';
 import '../models/auth_session.dart';
 import '../models/user_account.dart';
 import 'auth_repository.dart';
@@ -18,7 +19,7 @@ class RemoteAuthRepository
     required this.baseUrl,
     http.Client? client,
     SharedPreferencesAsync? storage,
-    this.timeout = const Duration(seconds: 12),
+    this.timeout = AppConfig.backendTimeout,
   })  : _client = client ?? http.Client(),
         _storage = storage;
 

@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../config/app_config.dart';
 import '../features/user/services/user_session_controller.dart';
 import '../models/wardrobe_snapshot.dart';
 
@@ -27,7 +28,7 @@ class RemoteWardrobeSyncService implements WardrobeSyncService {
     required this.baseUrl,
     required this.sessionController,
     http.Client? client,
-    this.timeout = const Duration(seconds: 12),
+    this.timeout = AppConfig.backendTimeout,
   }) : _client = client ?? http.Client();
 
   final Uri baseUrl;

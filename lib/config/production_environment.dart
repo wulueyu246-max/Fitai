@@ -1,3 +1,5 @@
+import 'app_config.dart';
+
 class ProductionEnvironment {
   const ProductionEnvironment({
     required this.appEnvironment,
@@ -9,16 +11,29 @@ class ProductionEnvironment {
   });
 
   factory ProductionEnvironment.fromDartDefines() {
-    return const ProductionEnvironment(
+    final appConfig = AppConfig.fromEnvironment();
+    const authApiBaseUrl = String.fromEnvironment('AUTH_API_BASE_URL');
+    const analyticsApiBaseUrl =
+        String.fromEnvironment('ANALYTICS_API_BASE_URL');
+    const productCatalogUrl = String.fromEnvironment('PRODUCT_CATALOG_URL');
+    return ProductionEnvironment(
       appEnvironment: String.fromEnvironment(
         'APP_ENV',
         defaultValue: 'development',
       ),
-      apiBaseUrl: String.fromEnvironment('API_BASE_URL'),
-      authApiBaseUrl: String.fromEnvironment('AUTH_API_BASE_URL'),
-      analyticsApiBaseUrl: String.fromEnvironment('ANALYTICS_API_BASE_URL'),
-      productCatalogUrl: String.fromEnvironment('PRODUCT_CATALOG_URL'),
-      affiliateChannelId: String.fromEnvironment('AFFILIATE_CHANNEL_ID'),
+      apiBaseUrl: appConfig.apiBaseUrl,
+      authApiBaseUrl:
+          authApiBaseUrl.isEmpty ? appConfig.apiBaseUrl : authApiBaseUrl,
+      analyticsApiBaseUrl: analyticsApiBaseUrl.isEmpty
+          ? appConfig.apiBaseUrl
+          : analyticsApiBaseUrl,
+      productCatalogUrl: productCatalogUrl.isEmpty
+          ? appConfig.endpoint('/products/recommend').toString()
+          : productCatalogUrl,
+      affiliateChannelId: const String.fromEnvironment(
+        'AFFILIATE_CHANNEL_ID',
+        defaultValue: 'fitai-commercial-test',
+      ),
     );
   }
 

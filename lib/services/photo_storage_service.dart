@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../config/app_config.dart';
 import '../features/user/services/user_session_controller.dart';
 
 abstract interface class PhotoStorageService {
@@ -34,7 +35,7 @@ class RemotePhotoStorageService implements PhotoStorageService {
     required this.baseUrl,
     required this.sessionController,
     http.Client? client,
-    this.timeout = const Duration(seconds: 20),
+    this.timeout = AppConfig.backendTimeout,
   }) : _client = client ?? http.Client();
 
   final Uri baseUrl;
