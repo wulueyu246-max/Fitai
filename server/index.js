@@ -124,9 +124,10 @@ function resolveAiConfig(environment = process.env) {
 
 const aiConfig = resolveAiConfig();
 const proxyConfig = configureProxyEnvironment();
+const PORT = process.env.PORT || 3000;
 
 const config = Object.freeze({
-  port: readPositiveInteger(process.env.PORT, 3000),
+  port: readPositiveInteger(PORT, 3000),
   isProduction: process.env.NODE_ENV === "production",
   forceMockAi: readBoolean(process.env.AI_FORCE_MOCK),
   aiProvider: aiConfig.provider,
@@ -183,24 +184,19 @@ const config = Object.freeze({
   ),
 });
 
-function validateProductionConfig(current) {
+function validateProductionConfig(current, environment = process.env) {
   if (!current.isProduction) return;
-  const missing = [];
-  if (current.allowedOrigins.size === 0) missing.push("CORS_ORIGINS");
-  if (!current.adminAnalyticsKey) missing.push("ADMIN_ANALYTICS_KEY");
-  if (!current.affiliatePostbackSecret) {
-    missing.push("AFFILIATE_POSTBACK_SECRET");
-  }
-  if (!current.supabaseUrl) missing.push("SUPABASE_URL");
-  if (!current.supabaseServiceRoleKey) {
-    missing.push("SUPABASE_SERVICE_ROLE_KEY");
-  }
+  const missing = ["OPENAI_API_KEY", "AI_BASE_URL", "AI_MODEL"].filter(
+    (name) => !readOptionalString(environment[name]),
+  );
   if (missing.length > 0) {
     throw new Error(`生产环境缺少必要配置：${missing.join(", ")}`);
   }
   const httpsValues = [
     ["AI_BASE_URL", current.baseURL],
-    ["SUPABASE_URL", current.supabaseUrl],
+    ...(current.supabaseUrl && current.supabaseServiceRoleKey
+      ? [["SUPABASE_URL", current.supabaseUrl]]
+      : []),
     ...[...current.allowedOrigins].map((origin) => ["CORS_ORIGINS", origin]),
   ];
   for (const [name, value] of httpsValues) {
@@ -214,14 +210,40 @@ function validateProductionConfig(current) {
       throw new Error(`${name} 必须使用 HTTPS`);
     }
   }
+  if (current.adminAnalyticsKey && current.adminAnalyticsKey.length < 32) {
+    throw new Error("ADMIN_ANALYTICS_KEY 长度不得少于 32 个字符");
+  }
   if (
-    current.adminAnalyticsKey.length < 32 ||
+    current.affiliatePostbackSecret &&
     current.affiliatePostbackSecret.length < 32
   ) {
-    throw new Error("生产密钥长度不得少于 32 个字符");
+    throw new Error("AFFILIATE_POSTBACK_SECRET 长度不得少于 32 个字符");
   }
-  if (current.adminAnalyticsKey === current.affiliatePostbackSecret) {
+  if (
+    current.adminAnalyticsKey &&
+    current.affiliatePostbackSecret &&
+    current.adminAnalyticsKey === current.affiliatePostbackSecret
+  ) {
     throw new Error("管理密钥和联盟回传密钥必须不同");
+  }
+}
+
+function logOptionalServiceWarnings(current, logger = console) {
+  if (current.allowedOrigins.size === 0) {
+    logger.warn(
+      "CORS_ORIGINS 未配置：仅允许不携带 Origin 的移动端或服务端请求",
+    );
+  }
+  if (!current.supabaseUrl || !current.supabaseServiceRoleKey) {
+    logger.warn(
+      "Supabase 未完整配置：云端用户持久化和照片存储已禁用",
+    );
+  }
+  if (!current.adminAnalyticsKey) {
+    logger.warn("ADMIN_ANALYTICS_KEY 未配置：管理分析接口返回 503");
+  }
+  if (!current.affiliatePostbackSecret) {
+    logger.warn("AFFILIATE_POSTBACK_SECRET 未配置：联盟回调接口返回 503");
   }
 }
 
@@ -1639,6 +1661,7 @@ function listenForRequests(application, port) {
 
 if (require.main === module) {
   const start = async () => {
+    logOptionalServiceWarnings(config);
     await Promise.all([authStore.initialize(), analyticsStore.initialize()]);
     const server = await listenForRequests(app, config.port);
     console.log(`服务器启动成功 http://localhost:${config.port}`);
@@ -1692,4 +1715,6 @@ module.exports = {
   listenForRequests,
   shouldUseMockAi,
   validateOutfitRequest,
+  validateProductionConfig,
+  logOptionalServiceWarnings,
 };

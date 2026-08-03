@@ -19,11 +19,13 @@ const {
   parseOutfitAnalysis,
   readBoolean,
   listenForRequests,
+  logOptionalServiceWarnings,
   resolveAiFallbackReason,
   resolveAiModeReason,
   resolveAiConfig,
   sanitizeAiErrorMessage,
   shouldUseMockAi,
+  validateProductionConfig,
   validateOutfitRequest,
 } = require("../index");
 const {AnalyticsStore} = require("../analytics_store");
@@ -40,6 +42,56 @@ test("keeps the HTTP server listening until it is explicitly closed", async () =
     server.close((error) => (error ? reject(error) : resolve()));
   });
   assert.equal(server.listening, false);
+});
+
+test("production startup permits disabled optional services", () => {
+  const productionConfig = {
+    isProduction: true,
+    baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    allowedOrigins: new Set(),
+    adminAnalyticsKey: "",
+    affiliatePostbackSecret: "",
+    supabaseUrl: "",
+    supabaseServiceRoleKey: "",
+  };
+
+  assert.doesNotThrow(() => validateProductionConfig(productionConfig, {
+    OPENAI_API_KEY: "configured-but-not-logged",
+    AI_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    AI_MODEL: "qwen-vl-plus",
+  }));
+});
+
+test("production startup still requires the core AI configuration", () => {
+  const productionConfig = {
+    isProduction: true,
+    baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    allowedOrigins: new Set(),
+    adminAnalyticsKey: "",
+    affiliatePostbackSecret: "",
+    supabaseUrl: "",
+    supabaseServiceRoleKey: "",
+  };
+
+  assert.throws(
+    () => validateProductionConfig(productionConfig, {}),
+    /OPENAI_API_KEY, AI_BASE_URL, AI_MODEL/,
+  );
+});
+
+test("logs clear warnings for disabled optional services", () => {
+  const warnings = [];
+  logOptionalServiceWarnings({
+    allowedOrigins: new Set(),
+    adminAnalyticsKey: "",
+    affiliatePostbackSecret: "",
+    supabaseUrl: "",
+    supabaseServiceRoleKey: "",
+  }, {warn: (message) => warnings.push(message)});
+
+  assert.equal(warnings.length, 4);
+  assert.ok(warnings.some((message) => message.includes("Supabase")));
+  assert.ok(warnings.some((message) => message.includes("返回 503")));
 });
 
 test("validates a complete outfit request with three images", () => {
