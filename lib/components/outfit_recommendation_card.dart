@@ -15,6 +15,8 @@ class OutfitRecommendationCard extends StatelessWidget {
     required this.onFavorite,
     required this.onTryOn,
     this.isLoading = false,
+    this.errorMessage,
+    this.onRetry,
     this.tryingOnProductId,
     super.key,
   });
@@ -28,6 +30,8 @@ class OutfitRecommendationCard extends StatelessWidget {
   final ValueChanged<Product> onFavorite;
   final VoidCallback? onTryOn;
   final bool isLoading;
+  final String? errorMessage;
+  final VoidCallback? onRetry;
   final String? tryingOnProductId;
 
   @override
@@ -86,6 +90,7 @@ class OutfitRecommendationCard extends StatelessWidget {
           const SizedBox(height: 18),
           if (isLoading)
             const Padding(
+              key: Key('product-recommendation-loading'),
               padding: EdgeInsets.symmetric(vertical: 54),
               child: Center(
                 child: Column(
@@ -101,8 +106,38 @@ class OutfitRecommendationCard extends StatelessWidget {
                 ),
               ),
             )
+          else if (errorMessage != null)
+            Padding(
+              key: const Key('product-recommendation-error'),
+              padding: const EdgeInsets.symmetric(vertical: 38),
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.cloud_off_outlined,
+                      color: Color(0xFF8A7563),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      errorMessage!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Color(0xFF77716C)),
+                    ),
+                    const SizedBox(height: 14),
+                    OutlinedButton.icon(
+                      key: const Key('retry-product-recommendations'),
+                      onPressed: onRetry,
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: const Text('重新匹配'),
+                    ),
+                  ],
+                ),
+              ),
+            )
           else if (products.isEmpty)
             const Padding(
+              key: Key('product-recommendation-empty'),
               padding: EdgeInsets.symmetric(vertical: 42),
               child: Center(child: Text('暂时没有匹配的商品')),
             )

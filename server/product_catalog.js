@@ -32,10 +32,10 @@ function product(
   imageUrl,
   tags,
 ) {
-  const detailUrl = `https://example.com/shupi/products/${id}`;
   return Object.freeze({
     product_id: id,
     id,
+    source: "mock",
     title,
     brand,
     category,
@@ -43,13 +43,20 @@ function product(
     size,
     price,
     image_url: imageUrl,
-    detail_url: detailUrl,
+    original_price: null,
+    coupon_amount: 0,
+    shop_name: "",
+    recommendation_reason: "根据本次 AI 穿搭关键词匹配的测试商品",
+    match_explanation: "用于验证商品推荐展示，暂不代表真实在售商品",
+    detail_url: "",
+    purchase_url: "",
     platform: "mock-catalog",
-    commission_rate: 0.08,
-    affiliate_url: `${detailUrl}?channel=shupi-test`,
+    commission_rate: 0,
+    affiliate_url: "",
     stock_status: "in_stock",
-    pid: "shupi-test",
+    pid: "",
     coupon_url: "",
+    is_mock: true,
     tags: Object.freeze(tags),
   });
 }
@@ -104,6 +111,10 @@ class ProductCatalog {
     const style = validateFilter(filters.style, "style");
     const color = validateFilter(filters.color, "color");
     const bodyType = validateFilter(filters.bodyType, "bodyType");
+    const scene = validateFilter(filters.scene, "scene");
+    const gender = validateFilter(filters.gender, "gender");
+    const fit = validateFilter(filters.fit, "fit");
+    const budget = Number(filters.budget);
     const keyword = validateFilter(filters.keyword, "keyword");
     const limit = Number.isInteger(filters.limit)
       ? Math.min(Math.max(filters.limit, 1), 20)
@@ -112,11 +123,15 @@ class ProductCatalog {
       ...searchTerms(style),
       ...searchTerms(color),
       ...searchTerms(bodyType),
+      ...searchTerms(scene),
+      ...searchTerms(gender),
+      ...searchTerms(fit),
       ...searchTerms(keyword),
     ];
 
     return this.products
-      .filter((item) => !category || item.category === category)
+      .filter((item) => (!category || item.category === category) &&
+        (!Number.isFinite(budget) || budget <= 0 || item.price <= budget))
       .map((item) => {
         const searchable = searchableText(item);
         const score = terms.reduce(
@@ -129,17 +144,35 @@ class ProductCatalog {
         right.score - left.score || left.item.id.localeCompare(right.item.id),
       )
       .slice(0, limit)
-      .map(({item}) => toRecommendation(item));
+      .map(({item}) => toRecommendation(item, {
+        style,
+        color,
+        bodyType,
+        scene,
+        gender,
+        fit,
+        keyword,
+      }));
   }
 
   recommendForQueries(queries, context = {}) {
     const matched = new Map();
-    for (const query of Array.isArray(queries) ? queries : []) {
+    const normalizedQueries = Array.isArray(queries) ? queries : [];
+    const totalBudget = Number(context.budget);
+    const perItemBudget = Number.isFinite(totalBudget) && totalBudget > 0 &&
+      normalizedQueries.length > 0
+      ? totalBudget / normalizedQueries.length
+      : 0;
+    for (const query of normalizedQueries) {
       const results = this.recommend({
         category: query.category,
         style: query.style || context.style,
         color: context.color,
         bodyType: context.bodyType,
+        scene: context.scene,
+        gender: context.gender,
+        fit: context.fit,
+        budget: perItemBudget,
         keyword: query.keyword,
         limit: 3,
       });
@@ -153,21 +186,39 @@ class ProductCatalog {
   }
 }
 
-function toRecommendation(productItem) {
+function toRecommendation(productItem, filters = {}) {
+  const matchedTerms = [
+    ...searchTerms(filters.style),
+    ...searchTerms(filters.color),
+    ...searchTerms(filters.bodyType),
+    ...searchTerms(filters.keyword),
+  ].filter((term) => searchableText(productItem).includes(term));
+  const matchExplanation = matchedTerms.length > 0
+    ? `匹配关键词：${[...new Set(matchedTerms)].slice(0, 4).join("、")}`
+    : "匹配当前穿搭所需品类";
   return {
     product_id: productItem.product_id,
+    source: productItem.source,
     title: productItem.title,
     brand: productItem.brand,
     category: productItem.category,
     price: productItem.price,
     image_url: productItem.image_url,
+    original_price: productItem.original_price,
+    coupon_amount: productItem.coupon_amount,
+    shop_name: productItem.shop_name,
+    recommendation_reason: productItem.recommendation_reason,
+    match_explanation: matchExplanation,
     detail_url: productItem.detail_url,
+    purchase_url: productItem.purchase_url,
     platform: productItem.platform,
     commission_rate: productItem.commission_rate,
     affiliate_url: productItem.affiliate_url,
     stock_status: productItem.stock_status,
     pid: productItem.pid,
     coupon_url: productItem.coupon_url,
+    is_mock: productItem.is_mock,
+    tags: productItem.tags,
   };
 }
 

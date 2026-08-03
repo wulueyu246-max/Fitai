@@ -10,12 +10,21 @@ const {
 const {TaobaoService} = require("../taobao_service");
 
 test("uses MockProductProvider when Taobao credentials are absent", async () => {
-  const provider = createProductProvider({environment: {}});
+  const warnings = [];
+  const provider = createProductProvider({
+    environment: {},
+    logger: {warn: (message) => warnings.push(message)},
+  });
   const products = await provider.recommend({category: "外套"});
 
   assert.ok(provider instanceof MockProductProvider);
   assert.ok(products.length > 0);
   assert.ok(products.every((product) => product.platform === "mock-catalog"));
+  assert.ok(products.every((product) => product.is_mock === true));
+  assert.ok(products.every((product) => product.purchase_url === ""));
+  assert.ok(products.every((product) => product.affiliate_url === ""));
+  assert.ok(products.every((product) => product.commission_rate === 0));
+  assert.equal(warnings.length, 1);
 });
 
 test("maps a signed Taobao response into the stable product contract", async () => {
@@ -56,21 +65,13 @@ test("maps a signed Taobao response into the stable product contract", async () 
 
   assert.equal(sign, signTaobaoRequest(unsigned, "test-app-secret"));
   assert.equal(requestBody.includes("test-app-secret"), false);
-  assert.deepEqual(products, [{
-    product_id: "123456",
-    title: "测试通勤外套",
-    brand: "测试品牌店",
-    category: "外套",
-    price: 399,
-    image_url: "https://img.example.com/coat.jpg",
-    detail_url: "https://item.example.com/123456",
-    platform: "taobao",
-    commission_rate: 0.155,
-    affiliate_url: "https://s.click.taobao.com/affiliate",
-    stock_status: "in_stock",
-    pid: "mm_100_200_300",
-    coupon_url: "https://uland.taobao.com/coupon",
-  }]);
+  assert.equal(products.length, 1);
+  assert.equal(products[0].product_id, "123456");
+  assert.equal(products[0].source, "taobao");
+  assert.equal(products[0].shop_name, "测试品牌店");
+  assert.equal(products[0].purchase_url, "https://s.click.taobao.com/affiliate");
+  assert.equal(products[0].is_mock, false);
+  assert.equal(products[0].commission_rate, 0.155);
 });
 
 test("selects TaobaoProductProvider only with complete credentials", () => {
@@ -86,14 +87,45 @@ test("selects TaobaoProductProvider only with complete credentials", () => {
   assert.ok(provider instanceof TaobaoProductProvider);
 });
 
-test("allows real catalog search before an affiliate PID is approved", () => {
+test("keeps Mock Provider until affiliate PID is approved", () => {
+  const warnings = [];
   const provider = createProductProvider({
     environment: {
       TAOBAO_APP_KEY: "app-key",
       TAOBAO_APP_SECRET: "app-secret",
     },
+    logger: {warn: (message) => warnings.push(message)},
   });
-  assert.ok(provider instanceof TaobaoProductProvider);
+  assert.ok(provider instanceof MockProductProvider);
+  assert.equal(warnings.length, 1);
+});
+
+test("rejects non-HTTPS commerce URLs returned by Taobao", async () => {
+  const provider = new TaobaoProductProvider({
+    appKey: "test-app-key",
+    appSecret: "test-app-secret",
+    pid: "mm_100_200_300",
+    fetchImpl: async () => new Response(JSON.stringify({
+      tbk_dg_material_optional_upgrade_response: {
+        result_list: {
+          map_data: [{
+            item_id: "http-product",
+            title: "测试商品",
+            zk_final_price: "99",
+            pict_url: "http://img.example.com/product.jpg",
+            item_url: "http://item.example.com/product",
+            click_url: "http://click.example.com/product",
+          }],
+        },
+      },
+    }), {status: 200}),
+  });
+
+  const [product] = await provider.recommend({category: "T恤"});
+  assert.equal(product.image_url, "");
+  assert.equal(product.detail_url, "");
+  assert.equal(product.affiliate_url, "");
+  assert.equal(product.purchase_url, "");
 });
 
 test("TaobaoService keeps the search boundary independent of the provider", async () => {

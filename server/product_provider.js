@@ -23,6 +23,10 @@ class ProductProvider {
         style: query.style || context.style,
         color: context.color,
         bodyType: context.bodyType,
+        scene: context.scene,
+        gender: context.gender,
+        fit: context.fit,
+        budget: context.budget,
         keyword: query.keyword,
         limit: 3,
       })),
@@ -135,11 +139,16 @@ class TaobaoProductProvider extends ProductProvider {
       .map((item) => mapTaobaoProduct(item, {
         pid: this.pid,
         fallbackCategory: normalized.category,
+        filters: normalized,
       }));
   }
 }
 
-function createProductProvider({environment = process.env, catalog} = {}) {
+function createProductProvider({
+  environment = process.env,
+  catalog,
+  logger = console,
+} = {}) {
   const requested = String(environment.PRODUCT_PROVIDER || "auto")
     .trim()
     .toLowerCase();
@@ -148,7 +157,9 @@ function createProductProvider({environment = process.env, catalog} = {}) {
     appSecret: String(environment.TAOBAO_APP_SECRET || "").trim(),
     pid: String(environment.TAOBAO_PID || "").trim(),
   };
-  const configured = Boolean(credentials.appKey && credentials.appSecret);
+  const configured = Boolean(
+    credentials.appKey && credentials.appSecret && credentials.pid,
+  );
   if (requested !== "mock" && configured) {
     return new TaobaoProductProvider({
       ...credentials,
@@ -156,6 +167,11 @@ function createProductProvider({environment = process.env, catalog} = {}) {
       method: environment.TAOBAO_API_METHOD || undefined,
       timeoutMs: positiveInteger(environment.PRODUCT_PROVIDER_TIMEOUT_MS, 10_000),
     });
+  }
+  if (requested !== "mock") {
+    logger.warn?.(
+      "淘宝联盟凭证未完整配置，商品服务使用 Mock Provider；需要 TAOBAO_APP_KEY、TAOBAO_APP_SECRET、TAOBAO_PID。",
+    );
   }
   return new MockProductProvider({catalog: catalog || new ProductCatalog()});
 }
@@ -177,6 +193,10 @@ function normalizeFilters(filters) {
     style: text(filters.style, "style"),
     color: text(filters.color, "color"),
     bodyType: text(filters.bodyType, "bodyType"),
+    scene: text(filters.scene, "scene"),
+    gender: text(filters.gender, "gender"),
+    fit: text(filters.fit, "fit"),
+    budget: nonNegativeNumber(filters.budget),
     keyword: text(filters.keyword, "keyword"),
     limit: Number.isInteger(requestedLimit)
       ? Math.min(Math.max(requestedLimit, 1), 20)
@@ -206,23 +226,24 @@ function extractTaobaoItems(payload) {
   return raw && typeof raw === "object" ? [raw] : [];
 }
 
-function mapTaobaoProduct(item, {pid, fallbackCategory = ""}) {
+function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}}) {
   const productId = String(item.item_id || item.itemId || "").trim();
   if (!productId) {
     throw new ProductProviderError("淘宝联盟商品缺少 item_id");
   }
-  const detailUrl = normalizeUrl(
+  const detailUrl = normalizeHttpsUrl(
     item.item_url || item.url ||
       `https://item.taobao.com/item.htm?id=${encodeURIComponent(productId)}`,
   );
-  const couponUrl = normalizeUrl(
+  const couponUrl = normalizeHttpsUrl(
     item.coupon_share_url || item.coupon_click_url || "",
   );
-  const affiliateUrl = normalizeUrl(
-    item.click_url || item.clickUrl || couponUrl || detailUrl,
+  const affiliateUrl = normalizeHttpsUrl(
+    item.click_url || item.clickUrl || couponUrl,
   );
   return {
     product_id: productId,
+    source: "taobao",
     title: String(item.short_title || item.title || "淘宝精选商品").trim(),
     brand: String(item.brand_name || item.shop_title || "淘宝精选").trim(),
     category: String(
@@ -231,15 +252,42 @@ function mapTaobaoProduct(item, {pid, fallbackCategory = ""}) {
     price: nonNegativeNumber(
       item.price_after_coupon || item.zk_final_price || item.reserve_price,
     ),
-    image_url: normalizeUrl(item.pict_url || item.white_image || ""),
+    image_url: normalizeHttpsUrl(item.pict_url || item.white_image || ""),
+    original_price: nonNegativeNumber(
+      item.reserve_price || item.zk_final_price || item.price_after_coupon,
+    ),
+    coupon_amount: nonNegativeNumber(item.coupon_amount),
+    shop_name: String(item.shop_title || item.seller_nick || "").trim(),
+    recommendation_reason: buildRecommendationReason(filters),
+    match_explanation: buildMatchExplanation(filters),
     detail_url: detailUrl,
+    purchase_url: affiliateUrl,
     platform: "taobao",
     commission_rate: normalizeCommissionRate(item.commission_rate),
     affiliate_url: affiliateUrl,
     stock_status: "in_stock",
     pid,
     coupon_url: couponUrl,
+    is_mock: false,
+    tags: [filters.style, filters.color, filters.keyword].filter(Boolean),
   };
+}
+
+function buildRecommendationReason(filters = {}) {
+  const style = String(filters.style || "").trim();
+  const category = String(filters.category || "").trim();
+  return [style, category].filter(Boolean).length > 0
+    ? `根据你的${style || "当前"}穿搭方案推荐${category || "该商品"}`
+    : "根据当前 AI 穿搭方案推荐";
+}
+
+function buildMatchExplanation(filters = {}) {
+  const values = [filters.color, filters.bodyType, filters.keyword]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return values.length > 0
+    ? `匹配需求：${values.join("、")}`
+    : "匹配当前穿搭品类与风格";
 }
 
 function normalizeCommissionRate(value) {
@@ -254,9 +302,16 @@ function nonNegativeNumber(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }
 
-function normalizeUrl(value) {
+function normalizeHttpsUrl(value) {
   const text = String(value || "").trim();
-  return text.startsWith("//") ? `https:${text}` : text;
+  if (!text) return "";
+  const candidate = text.startsWith("//") ? `https:${text}` : text;
+  try {
+    const url = new URL(candidate);
+    return url.protocol === "https:" ? url.toString() : "";
+  } catch (_) {
+    return "";
+  }
 }
 
 function adzoneIdFromPid(pid) {
@@ -313,5 +368,6 @@ module.exports = {
   TaobaoProductProvider,
   createProductProvider,
   mapTaobaoProduct,
+  normalizeHttpsUrl,
   signTaobaoRequest,
 };

@@ -129,8 +129,33 @@ class ProductCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      if (product.isMock) ...[
+                        Container(
+                          key: Key('mock-notice-${product.id}'),
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 9,
+                            vertical: 7,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFFF3D8),
+                            borderRadius: BorderRadius.circular(9),
+                          ),
+                          child: const Text(
+                            '测试商品数据，淘宝联盟功能审核中',
+                            style: TextStyle(
+                              color: Color(0xFF765516),
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 9),
+                      ],
                       Text(
-                        product.brand,
+                        product.shopName.isEmpty
+                            ? product.brand
+                            : '${product.brand} · ${product.shopName}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
@@ -172,16 +197,66 @@ class ProductCard extends StatelessWidget {
                               ),
                             ),
                           ),
-                          Text(
-                            product.displayPrice,
-                            style: const TextStyle(
-                              color: Color(0xFF201E1C),
-                              fontSize: 13,
-                              fontWeight: FontWeight.w800,
-                            ),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text(
+                                product.displayPrice,
+                                style: const TextStyle(
+                                  color: Color(0xFF201E1C),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              if (product.displayOriginalPrice
+                                  case final value?)
+                                Text(
+                                  value,
+                                  style: const TextStyle(
+                                    color: Color(0xFF99918A),
+                                    fontSize: 10,
+                                    decoration: TextDecoration.lineThrough,
+                                  ),
+                                ),
+                            ],
                           ),
                         ],
                       ),
+                      if (product.couponAmount > 0) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          '优惠券 ¥${product.couponAmount.toStringAsFixed(0)}',
+                          style: const TextStyle(
+                            color: Color(0xFF9C493E),
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ],
+                      if (!compact &&
+                          product.recommendationReason.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          product.recommendationReason,
+                          style: const TextStyle(
+                            color: Color(0xFF5F5954),
+                            fontSize: 11.5,
+                            height: 1.4,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                      if (!compact && product.matchExplanation.isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          product.matchExplanation,
+                          style: const TextStyle(
+                            color: Color(0xFF627066),
+                            fontSize: 10.5,
+                            height: 1.4,
+                          ),
+                        ),
+                      ],
                       if (!compact) ...[
                         const SizedBox(height: 12),
                         Text(
@@ -322,7 +397,7 @@ class ProductCard extends StatelessWidget {
                             Expanded(
                               child: FilledButton.icon(
                                 key: Key('buy-${product.id}'),
-                                onPressed: product.inStock
+                                onPressed: product.isPurchasable
                                     ? (onBuy ?? onViewDetails)
                                     : null,
                                 style: FilledButton.styleFrom(
@@ -335,9 +410,9 @@ class ProductCard extends StatelessWidget {
                                   Icons.shopping_bag_outlined,
                                   size: 15,
                                 ),
-                                label: const Text(
-                                  '立即购买',
-                                  style: TextStyle(
+                                label: Text(
+                                  product.isMock ? '商品功能审核中' : '立即购买',
+                                  style: const TextStyle(
                                     fontSize: 10.5,
                                     fontWeight: FontWeight.w800,
                                   ),

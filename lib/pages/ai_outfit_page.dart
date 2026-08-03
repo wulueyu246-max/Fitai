@@ -136,6 +136,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
   OutfitRequest? _lastRequest;
   Set<String> _selectedProductIds = {};
   bool _isLoadingProducts = false;
+  String? _productLoadError;
   bool _isRegeneratingPlan = false;
   bool _isGenerating = false;
   String? _tryingOnProductId;
@@ -619,6 +620,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
 
     setState(() {
       _isLoadingProducts = true;
+      _productLoadError = null;
       _selectedProductIds = {};
     });
 
@@ -701,6 +703,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       setState(() {
         _selectedProductIds = selectedProductIds;
         _isLoadingProducts = false;
+        _productLoadError = null;
       });
     } catch (_) {
       if (!mounted) {
@@ -709,6 +712,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
 
       setState(() {
         _isLoadingProducts = false;
+        _productLoadError = '商品匹配失败，请检查网络后重试';
       });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('商品匹配失败，请稍后重试')),
@@ -1475,6 +1479,10 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
               ? null
               : _openVirtualTryOn,
           isLoading: _isLoadingProducts,
+          errorMessage: _productLoadError,
+          onRetry: _lastRequest == null
+              ? null
+              : () => _loadProductRecommendations(_lastRequest!),
           tryingOnProductId: _tryingOnProductId,
         ),
         if (analysis.outfitPlan case final plan?) ...[

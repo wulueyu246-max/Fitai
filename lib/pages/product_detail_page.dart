@@ -261,6 +261,25 @@ class _ProductDetailPageState extends State<ProductDetailPage> {
                     ),
                   ),
                   const SizedBox(height: 22),
+                  if (product.isMock) ...[
+                    Container(
+                      key: const Key('product-detail-mock-notice'),
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFF3D8),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: const Text(
+                        '测试商品数据，淘宝联盟功能审核中',
+                        style: TextStyle(
+                          color: Color(0xFF765516),
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                  ],
                   if (!product.isAvailable) ...[
                     Container(
                       width: double.infinity,
@@ -280,7 +299,9 @@ class _ProductDetailPageState extends State<ProductDetailPage> {
                     const SizedBox(height: 16),
                   ],
                   Text(
-                    product.brand,
+                    product.shopName.isEmpty
+                        ? product.brand
+                        : '${product.brand} · ${product.shopName}',
                     style: const TextStyle(
                       color: Color(0xFF695777),
                       fontWeight: FontWeight.w900,
@@ -302,12 +323,25 @@ class _ProductDetailPageState extends State<ProductDetailPage> {
                         ),
                       ),
                       const SizedBox(width: 14),
-                      Text(
-                        product.displayPrice,
-                        style: const TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.w900,
-                        ),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Text(
+                            product.displayPrice,
+                            style: const TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          if (product.displayOriginalPrice case final value?)
+                            Text(
+                              value,
+                              style: const TextStyle(
+                                color: Color(0xFF99918A),
+                                decoration: TextDecoration.lineThrough,
+                              ),
+                            ),
+                        ],
                       ),
                     ],
                   ),
@@ -318,6 +352,16 @@ class _ProductDetailPageState extends State<ProductDetailPage> {
                     style: const TextStyle(color: Color(0xFF817A74)),
                   ),
                   const SizedBox(height: 14),
+                  if (product.couponAmount > 0) ...[
+                    Text(
+                      '优惠券 ¥${product.couponAmount.toStringAsFixed(0)}',
+                      style: const TextStyle(
+                        color: Color(0xFF9C493E),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
                   Wrap(
                     spacing: 8,
                     runSpacing: 8,
@@ -358,9 +402,21 @@ class _ProductDetailPageState extends State<ProductDetailPage> {
                         ),
                         const SizedBox(height: 7),
                         Text(
-                          product.aiReason,
+                          product.recommendationReason.isEmpty
+                              ? product.aiReason
+                              : product.recommendationReason,
                           style: const TextStyle(height: 1.55),
                         ),
+                        if (product.matchExplanation.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            product.matchExplanation,
+                            style: const TextStyle(
+                              color: Color(0xFF655F67),
+                              height: 1.5,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -406,9 +462,9 @@ class _ProductDetailPageState extends State<ProductDetailPage> {
                         padding: const EdgeInsets.symmetric(vertical: 16),
                       ),
                       icon: const Icon(Icons.shopping_bag_outlined),
-                      label: const Text(
-                        '立即购买',
-                        style: TextStyle(fontWeight: FontWeight.w900),
+                      label: Text(
+                        product.isMock ? '商品功能审核中' : '立即购买',
+                        style: const TextStyle(fontWeight: FontWeight.w900),
                       ),
                     ),
                   ),

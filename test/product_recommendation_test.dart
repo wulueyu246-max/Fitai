@@ -14,10 +14,16 @@ void main() {
       'price': '399',
       'image_url': 'https://cdn.example.com/product-1.jpg',
       'detail_url': 'https://shop.example.com/product-1',
-      'platform': 'mock-catalog',
+      'platform': 'taobao',
       'commission_rate': 0.08,
       'affiliate_url': 'https://shop.example.com/product-1?channel=test',
       'stock_status': 'in_stock',
+      'is_mock': false,
+      'original_price': 499,
+      'coupon_amount': 20,
+      'shop_name': '测试店铺',
+      'recommendation_reason': '根据通勤场景推荐',
+      'match_explanation': '匹配短款外套需求',
     });
 
     expect(recommendation.price, 399);
@@ -38,10 +44,16 @@ void main() {
         'commission_rate',
         'affiliate_url',
         'stock_status',
+        'original_price',
+        'coupon_amount',
+        'shop_name',
+        'recommendation_reason',
+        'match_explanation',
+        'is_mock',
       },
     );
     expect(recommendation.toProduct().name, '结构感短款外套');
-    expect(recommendation.toProduct().sourceProvider, 'mock-catalog');
+    expect(recommendation.toProduct().sourceProvider, 'taobao');
   });
 
   test('rejects negative prices and incomplete products', () {

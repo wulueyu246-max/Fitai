@@ -51,6 +51,12 @@ class Product {
     this.isAvailable = true,
     this.affiliateChannelId = 'fitai-mvp',
     this.sourceProvider = 'mock-catalog',
+    this.originalPrice,
+    this.couponAmount = 0,
+    this.shopName = '',
+    this.recommendationReason = '',
+    this.matchExplanation = '',
+    this.isMock = false,
     String? purchaseUrl,
     double? commission,
     double? commissionRate,
@@ -59,14 +65,18 @@ class Product {
 
   factory Product.fromJson(Map<String, dynamic> json) {
     return Product(
-      id: _readString(json, 'id'),
+      id: _readAliasedString(json, ['id', 'product_id', 'productId']),
       sku: _readOptionalAliasedString(
         json,
         ['sku', 'sku_id'],
-        fallback: _readString(json, 'id'),
+        fallback: _readAliasedString(json, ['id', 'product_id', 'productId']),
       ),
-      brand: _readString(json, 'brand'),
-      name: _readString(json, 'name'),
+      brand: _readOptionalAliasedString(
+        json,
+        ['brand'],
+        fallback: '精选商品',
+      ),
+      name: _readAliasedString(json, ['name', 'title']),
       category: _readString(json, 'category'),
       imageUrl: _readAliasedString(json, ['imageUrl', 'image_url', 'image']),
       color: _readOptionalAliasedString(
@@ -84,16 +94,24 @@ class Product {
         ['material', 'fabric'],
         fallback: '混合材质',
       ),
-      price: _readString(json, 'price'),
+      price: _readPrice(json, 'price'),
       buyUrl: _readOptionalAliasedString(
         json,
-        ['purchaseUrl', 'purchase_url', 'buyUrl', 'buy_url'],
+        [
+          'purchaseUrl',
+          'purchase_url',
+          'affiliate_url',
+          'affiliateUrl',
+          'buyUrl',
+          'buy_url',
+        ],
         fallback: '',
       ),
       stock: _readOptionalInt(
         json,
         ['stock', 'inventory'],
-        fallback: 1,
+        fallback:
+            _isInStock(json['stock_status'] ?? json['stockStatus']) ? 1 : 0,
       ),
       description: _readOptionalAliasedString(
         json,
@@ -128,9 +146,35 @@ class Product {
       ),
       sourceProvider: _readOptionalAliasedString(
         json,
-        ['sourceProvider', 'source_provider', 'provider'],
+        ['sourceProvider', 'source_provider', 'source', 'provider', 'platform'],
         fallback: 'remote-catalog',
       ),
+      originalPrice: _readOptionalPrice(
+        json,
+        ['originalPrice', 'original_price'],
+      ),
+      couponAmount: _readOptionalDouble(
+        json,
+        ['couponAmount', 'coupon_amount'],
+      ),
+      shopName: _readOptionalAliasedString(
+        json,
+        ['shopName', 'shop_name'],
+        fallback: '',
+      ),
+      recommendationReason: _readOptionalAliasedString(
+        json,
+        ['recommendationReason', 'recommendation_reason'],
+        fallback: '',
+      ),
+      matchExplanation: _readOptionalAliasedString(
+        json,
+        ['matchExplanation', 'match_explanation'],
+        fallback: '',
+      ),
+      isMock: json['isMock'] as bool? ??
+          json['is_mock'] as bool? ??
+          _looksLikeMockSource(json),
       tryOnAvailable: json['tryOnAvailable'] as bool? ??
           json['try_on_available'] as bool? ??
           true,
@@ -198,6 +242,12 @@ class Product {
   final double commissionRate;
   final String affiliateChannelId;
   final String sourceProvider;
+  final String? originalPrice;
+  final double couponAmount;
+  final String shopName;
+  final String recommendationReason;
+  final String matchExplanation;
+  final bool isMock;
   final int stock;
   final String description;
   final String style;
@@ -209,6 +259,11 @@ class Product {
   final bool isAvailable;
 
   String get displayPrice => numericPrice <= 0 ? '价格待匹配' : '¥$price';
+  String? get displayOriginalPrice {
+    final value = _numericValue(originalPrice ?? '');
+    return value > numericPrice ? '¥$originalPrice' : null;
+  }
+
   String get image => imageUrl;
   String get buyUrl => purchaseUrl;
   double get commission => commissionRate;
@@ -222,7 +277,16 @@ class Product {
 
   double get estimatedCommission => numericPrice * commissionRate;
   bool get inStock => stock > 0;
-  bool get isPurchasable => isAvailable && inStock && purchaseUrl.isNotEmpty;
+  bool get isPurchasable {
+    final uri = Uri.tryParse(purchaseUrl);
+    return !isMock &&
+        isAvailable &&
+        inStock &&
+        uri != null &&
+        uri.scheme == 'https' &&
+        uri.host.isNotEmpty;
+  }
+
   List<String> get effectiveStyleTags => styleTags.isEmpty
       ? List<String>.unmodifiable({style, fitType, season})
       : styleTags;
@@ -240,7 +304,7 @@ class Product {
 
   bool get isNetworkImage {
     final uri = Uri.tryParse(imageUrl);
-    return uri != null && (uri.scheme == 'http' || uri.scheme == 'https');
+    return uri != null && uri.scheme == 'https' && uri.host.isNotEmpty;
   }
 
   Product copyWith({
@@ -267,6 +331,12 @@ class Product {
     bool? isAvailable,
     String? affiliateChannelId,
     String? sourceProvider,
+    String? originalPrice,
+    double? couponAmount,
+    String? shopName,
+    String? recommendationReason,
+    String? matchExplanation,
+    bool? isMock,
     double? commission,
     double? commissionRate,
   }) {
@@ -293,6 +363,12 @@ class Product {
       isAvailable: isAvailable ?? this.isAvailable,
       affiliateChannelId: affiliateChannelId ?? this.affiliateChannelId,
       sourceProvider: sourceProvider ?? this.sourceProvider,
+      originalPrice: originalPrice ?? this.originalPrice,
+      couponAmount: couponAmount ?? this.couponAmount,
+      shopName: shopName ?? this.shopName,
+      recommendationReason: recommendationReason ?? this.recommendationReason,
+      matchExplanation: matchExplanation ?? this.matchExplanation,
+      isMock: isMock ?? this.isMock,
       commissionRate: commissionRate ?? commission ?? this.commissionRate,
     );
   }
@@ -316,6 +392,12 @@ class Product {
       'commissionRate': commissionRate,
       'affiliateChannelId': affiliateChannelId,
       'sourceProvider': sourceProvider,
+      'originalPrice': originalPrice,
+      'couponAmount': couponAmount,
+      'shopName': shopName,
+      'recommendationReason': recommendationReason,
+      'matchExplanation': matchExplanation,
+      'isMock': isMock,
       'stock': stock,
       'description': description,
       'style': style,
@@ -336,6 +418,54 @@ class Product {
     }
 
     return value;
+  }
+
+  static String _readPrice(Map<String, dynamic> json, String key) {
+    final value = json[key];
+    if (value is num && value.isFinite && value >= 0) {
+      return value == value.roundToDouble()
+          ? value.toStringAsFixed(0)
+          : value.toStringAsFixed(2);
+    }
+    if (value is String && value.trim().isNotEmpty) {
+      return value.trim();
+    }
+    throw FormatException('缺少价格字段：$key');
+  }
+
+  static String? _readOptionalPrice(
+    Map<String, dynamic> json,
+    List<String> keys,
+  ) {
+    for (final key in keys) {
+      final value = json[key];
+      if (value is num && value.isFinite && value > 0) {
+        return value == value.roundToDouble()
+            ? value.toStringAsFixed(0)
+            : value.toStringAsFixed(2);
+      }
+      if (value is String && _numericValue(value) > 0) {
+        return value.trim();
+      }
+    }
+    return null;
+  }
+
+  static double _numericValue(String value) {
+    return double.tryParse(value.replaceAll(RegExp(r'[^0-9.]'), '')) ?? 0;
+  }
+
+  static bool _isInStock(Object? value) {
+    final status = value?.toString().trim().toLowerCase();
+    return !{'out_of_stock', 'sold_out', 'unavailable'}.contains(status);
+  }
+
+  static bool _looksLikeMockSource(Map<String, dynamic> json) {
+    final source = json['source'] ??
+        json['sourceProvider'] ??
+        json['source_provider'] ??
+        json['platform'];
+    return source?.toString().toLowerCase().contains('mock') ?? false;
   }
 
   static String _aiPlaceholderImage(String category) {

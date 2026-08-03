@@ -16,6 +16,12 @@ class ProductRecommendation {
     required this.detailUrl,
     required this.affiliateUrl,
     required this.stockStatus,
+    this.originalPrice,
+    this.couponAmount = 0,
+    this.shopName = '',
+    this.recommendationReason = '',
+    this.matchExplanation = '',
+    this.isMock = false,
     this.tags = const [],
   });
 
@@ -49,12 +55,17 @@ class ProductRecommendation {
       commissionRate: commissionRate.clamp(0, 1).toDouble(),
       detailUrl: _readAliasedString(
         json,
-        const ['detail_url', 'detailUrl', 'purchaseUrl'],
+        const ['detail_url', 'detailUrl', 'purchase_url', 'purchaseUrl'],
         fallback: '',
       ),
       affiliateUrl: _readAliasedString(
         json,
-        const ['affiliate_url', 'affiliateUrl', 'purchaseUrl'],
+        const [
+          'affiliate_url',
+          'affiliateUrl',
+          'purchase_url',
+          'purchaseUrl',
+        ],
         fallback: '',
       ),
       stockStatus: _readOptionalString(
@@ -66,6 +77,37 @@ class ProductRecommendation {
           fallback: 'in_stock',
         ),
       ),
+      originalPrice: _readOptionalNumber(json, 'original_price') ??
+          _readOptionalNumber(json, 'originalPrice'),
+      couponAmount: _readOptionalNumber(json, 'coupon_amount') ??
+          _readOptionalNumber(json, 'couponAmount') ??
+          0,
+      shopName: _readOptionalString(
+        json,
+        'shop_name',
+        fallback: _readOptionalString(json, 'shopName', fallback: ''),
+      ),
+      recommendationReason: _readOptionalString(
+        json,
+        'recommendation_reason',
+        fallback: _readOptionalString(
+          json,
+          'recommendationReason',
+          fallback: '',
+        ),
+      ),
+      matchExplanation: _readOptionalString(
+        json,
+        'match_explanation',
+        fallback: _readOptionalString(
+          json,
+          'matchExplanation',
+          fallback: '',
+        ),
+      ),
+      isMock: json['is_mock'] as bool? ??
+          json['isMock'] as bool? ??
+          _readString(json, 'platform').toLowerCase().contains('mock'),
       tags: (json['tags'] as List<dynamic>? ?? const [])
           .whereType<String>()
           .map((tag) => tag.trim())
@@ -88,6 +130,12 @@ class ProductRecommendation {
   final String detailUrl;
   final String affiliateUrl;
   final String stockStatus;
+  final double? originalPrice;
+  final double couponAmount;
+  final String shopName;
+  final String recommendationReason;
+  final String matchExplanation;
+  final bool isMock;
   final List<String> tags;
 
   // Compatibility aliases used by the existing Product and analytics layers.
@@ -100,7 +148,8 @@ class ProductRecommendation {
     final uri = Uri.tryParse(purchaseUrl);
     return isInStock &&
         uri != null &&
-        (uri.scheme == 'http' || uri.scheme == 'https') &&
+        !isMock &&
+        uri.scheme == 'https' &&
         uri.host.isNotEmpty;
   }
 
@@ -129,13 +178,25 @@ class ProductRecommendation {
       style: tags.isEmpty ? keyword : tags.first,
       season: '四季',
       fitType: keyword,
-      aiReason: '根据本次 AI 穿搭关键词“$keyword”匹配',
+      aiReason: recommendationReason.isEmpty
+          ? '根据本次 AI 穿搭关键词“$keyword”匹配'
+          : recommendationReason,
       styleTags: tags,
       tryOnAvailable: isInStock,
       isAvailable: isInStock,
       affiliateChannelId: platform,
       sourceProvider: platform,
       commissionRate: commissionRate,
+      originalPrice: originalPrice == null
+          ? null
+          : originalPrice == originalPrice!.roundToDouble()
+              ? originalPrice!.toStringAsFixed(0)
+              : originalPrice!.toStringAsFixed(2),
+      couponAmount: couponAmount,
+      shopName: shopName,
+      recommendationReason: recommendationReason,
+      matchExplanation: matchExplanation,
+      isMock: isMock,
     );
   }
 
@@ -152,6 +213,12 @@ class ProductRecommendation {
       'commission_rate': commissionRate,
       'affiliate_url': affiliateUrl,
       'stock_status': stockStatus,
+      'original_price': originalPrice,
+      'coupon_amount': couponAmount,
+      'shop_name': shopName,
+      'recommendation_reason': recommendationReason,
+      'match_explanation': matchExplanation,
+      'is_mock': isMock,
     };
   }
 

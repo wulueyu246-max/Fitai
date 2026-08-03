@@ -111,9 +111,10 @@ class RemoteBrandProductService implements BrandProductService {
   Product _parseProduct(Map<String, dynamic> json) {
     final product = Product.fromJson(json);
     final purchaseUri = Uri.tryParse(product.purchaseUrl);
-    if (purchaseUri == null ||
-        purchaseUri.scheme != 'https' ||
-        purchaseUri.host.isEmpty) {
+    if (product.purchaseUrl.isNotEmpty &&
+        (purchaseUri == null ||
+            purchaseUri.scheme != 'https' ||
+            purchaseUri.host.isEmpty)) {
       throw const ProductSourceException('商品源返回了无效的 HTTPS 购买链接');
     }
     final hasChannel = json.containsKey('affiliateChannelId') ||

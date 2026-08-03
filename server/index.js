@@ -888,11 +888,23 @@ function createMockOutfitAnalysis(outfitRequest) {
   };
 }
 
-async function buildOutfitApiResponse(analysis, productRecommendations) {
+async function buildOutfitApiResponse(
+  analysis,
+  productRecommendations,
+  outfitRequest = {},
+) {
+  const requestText = String(outfitRequest.request || "");
+  const budgetMatch = requestText.match(/(?:预算|不超过|以内)\s*[¥￥]?\s*(\d+(?:\.\d+)?)/);
+  const gender = /(?:男士|男生|男性)/.test(requestText)
+    ? "男"
+    : /(?:女士|女生|女性)/.test(requestText) ? "女" : "";
   const catalogProducts = productRecommendations ??
     await productProvider.recommendForQueries(analysis.products, {
       style: analysis.style,
       bodyType: analysis.bodyProfile,
+      scene: outfitRequest.scene,
+      gender,
+      budget: budgetMatch ? Number(budgetMatch[1]) : 0,
     });
   return {
     ...analysis,
@@ -1360,6 +1372,11 @@ app.get("/products/recommend", async (req, res, next) => {
       style: req.query.style,
       color: req.query.color,
       bodyType: req.query.bodyType,
+      scene: req.query.scene,
+      gender: req.query.gender,
+      fit: req.query.fit,
+      budget: req.query.budget,
+      keyword: req.query.keyword,
     });
     return res.json({products});
   } catch (error) {
@@ -1415,7 +1432,11 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
 
     if (shouldUseMockAi(config, aiClient)) {
       return res.json({
-        ...(await buildOutfitApiResponse(createMockOutfitAnalysis(outfitRequest))),
+        ...(await buildOutfitApiResponse(
+          createMockOutfitAnalysis(outfitRequest),
+          undefined,
+          outfitRequest,
+        )),
         fallbackReason: config.forceMockAi
           ? "AI_FORCE_MOCK"
           : "AI_NOT_CONFIGURED",
@@ -1424,7 +1445,11 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
 
     if (activeAiRequests >= config.maxConcurrentAiRequests) {
       return res.json({
-        ...(await buildOutfitApiResponse(createMockOutfitAnalysis(outfitRequest))),
+        ...(await buildOutfitApiResponse(
+          createMockOutfitAnalysis(outfitRequest),
+          undefined,
+          outfitRequest,
+        )),
         fallbackReason: "AI_CAPACITY_REACHED",
       });
     }
@@ -1499,7 +1524,8 @@ ${partialViewSafetyInstruction}
 3. 建议必须具体，说明适合的版型、颜色、鞋子和配饰。
 4. 只返回一个 JSON 对象，不使用 Markdown、代码块或额外解释。
 5. products 只描述适合用户的商品类型和检索条件，不得编造品牌、SKU、价格或购买链接；真实商品由商品数据库另行匹配。
-6. 必须严格使用以下结构；除 products 外的末级字段均为字符串：
+6. products.keyword 应包含有助于检索的推荐颜色、版型和场景词；每个所需品类分别给出一项。
+7. 必须严格使用以下结构；除 products 外的末级字段均为字符串：
 
 {
   "bodyProfile": "",
@@ -1557,7 +1583,7 @@ ${partialViewSafetyInstruction}
     });
 
     return res.json({
-      ...(await buildOutfitApiResponse(analysis)),
+      ...(await buildOutfitApiResponse(analysis, undefined, outfitRequest)),
       analysisMode: "ai",
     });
   } catch (error) {
@@ -1602,7 +1628,11 @@ ${partialViewSafetyInstruction}
 
     if (config.fallbackOnAiError && outfitRequest) {
       return res.json({
-        ...(await buildOutfitApiResponse(createMockOutfitAnalysis(outfitRequest))),
+        ...(await buildOutfitApiResponse(
+          createMockOutfitAnalysis(outfitRequest),
+          undefined,
+          outfitRequest,
+        )),
         fallbackReason,
       });
     }

@@ -31,8 +31,12 @@ test("matches products by category, style, color and body type", () => {
   assert.ok(products.every((item) => item.category === "外套"));
   assert.equal(products[0].product_id, "coat-001");
   assert.equal(products[0].platform, "mock-catalog");
-  assert.match(products[0].affiliate_url, /^https:\/\//);
-  assert.equal(products[0].pid, "shupi-test");
+  assert.equal(products[0].is_mock, true);
+  assert.equal(products[0].affiliate_url, "");
+  assert.equal(products[0].purchase_url, "");
+  assert.equal(products[0].detail_url, "");
+  assert.equal(products[0].commission_rate, 0);
+  assert.equal(products[0].pid, "");
   assert.equal(products[0].coupon_url, "");
 });
 
@@ -46,6 +50,21 @@ test("matches AI query objects to catalog-backed recommendations", () => {
 
   assert.ok(products.length >= 3);
   assert.ok(products.every((item) => item.product_id && item.title && item.price >= 0));
+  assert.deepEqual(
+    new Set(products.map((item) => item.category)),
+    new Set(["T恤", "裤子", "鞋"]),
+  );
+});
+
+test("respects an explicit total outfit budget without inventing one", () => {
+  const catalog = new ProductCatalog();
+  const products = catalog.recommendForQueries([
+    {category: "T恤", keyword: "透气"},
+    {category: "裤子", keyword: "直筒"},
+  ], {budget: 500});
+
+  assert.ok(products.length >= 2);
+  assert.ok(products.every((item) => item.price <= 250));
 });
 
 test("GET /products/recommend returns matched catalog products", async () => {

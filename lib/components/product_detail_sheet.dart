@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/product.dart';
+import 'product_image.dart';
 
 Future<void> showProductDetailSheet(
   BuildContext context, {
@@ -64,16 +65,11 @@ Future<void> showProductDetailSheet(
                         borderRadius: BorderRadius.circular(22),
                         child: AspectRatio(
                           aspectRatio: 4 / 3,
-                          child: product.isNetworkImage
-                              ? Image.network(
-                                  product.imageUrl,
-                                  fit: BoxFit.cover,
-                                )
-                              : Image.asset(
-                                  product.imageUrl,
-                                  fit: BoxFit.cover,
-                                  cacheWidth: 1200,
-                                ),
+                          child: ProductImage(
+                            product: product,
+                            fit: BoxFit.cover,
+                            cacheWidth: 1200,
+                          ),
                         ),
                       ),
                       const SizedBox(height: 20),
@@ -181,20 +177,31 @@ Future<void> showProductDetailSheet(
                         ),
                       ),
                       const SizedBox(height: 16),
-                      const Text(
-                        '当前为商业流程 Demo，商品数据来自本地 Mock，暂不提供真实购买。',
-                        style: TextStyle(
-                          color: Color(0xFF8A837C),
-                          fontSize: 11.5,
-                          height: 1.5,
+                      if (product.isMock)
+                        Container(
+                          key: const Key('product-sheet-mock-notice'),
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFFF3D8),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Text(
+                            '测试商品数据，淘宝联盟功能审核中',
+                            style: TextStyle(
+                              color: Color(0xFF765516),
+                              fontSize: 11.5,
+                              height: 1.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
                         ),
-                      ),
                       const SizedBox(height: 14),
                       SizedBox(
                         width: double.infinity,
                         child: FilledButton.icon(
                           key: const Key('mock-buy-product'),
-                          onPressed: product.inStock
+                          onPressed: product.isPurchasable
                               ? () async {
                                   await onPurchaseIntent?.call();
                                   if (!context.mounted) {
@@ -224,9 +231,9 @@ Future<void> showProductDetailSheet(
                             Icons.shopping_bag_outlined,
                             size: 18,
                           ),
-                          label: const Text(
-                            '立即购买（Demo）',
-                            style: TextStyle(fontWeight: FontWeight.w800),
+                          label: Text(
+                            product.isMock ? '商品功能审核中' : '立即购买',
+                            style: const TextStyle(fontWeight: FontWeight.w800),
                           ),
                         ),
                       ),
