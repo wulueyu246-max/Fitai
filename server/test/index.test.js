@@ -20,6 +20,7 @@ const {
   readBoolean,
   listenForRequests,
   logOptionalServiceWarnings,
+  partialViewSafetyInstruction,
   resolveAiFallbackReason,
   resolveAiModeReason,
   resolveAiConfig,
@@ -110,6 +111,38 @@ test("validates a complete outfit request with three images", () => {
   assert.equal(result.height, 170);
   assert.equal(result.weight, 60);
   assert.deepEqual(Object.keys(result.images), ["front", "side", "back"]);
+});
+
+test("accepts a front-only outfit request without optional photo fields", () => {
+  const result = validateOutfitRequest({
+    height: 170,
+    weight: 60,
+    scene: "日常",
+    request: "简约穿搭",
+    images: {front: imageDataUrl},
+  });
+
+  assert.deepEqual(Object.keys(result.images), ["front"]);
+  assert.equal(result.images.front, imageDataUrl);
+});
+
+test("rejects an outfit request without a front photo", () => {
+  assert.throws(
+    () => validateOutfitRequest({
+      height: 170,
+      weight: 60,
+      scene: "日常",
+      request: "简约穿搭",
+      images: {side: imageDataUrl},
+    }),
+    /请上传正面全身照/,
+  );
+});
+
+test("vision prompt only analyzes photo angles that were provided", () => {
+  assert.match(partialViewSafetyInstruction, /仅提供正面照/);
+  assert.match(partialViewSafetyInstruction, /不得假装已观察到侧面或背面/);
+  assert.match(partialViewSafetyInstruction, /实际可见信息/);
 });
 
 test("parses AI output into a structured analysis", () => {

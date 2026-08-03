@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -27,6 +26,7 @@ import '../services/analytics_service.dart';
 import '../services/favorite_service.dart';
 import '../services/feedback_event_service.dart';
 import '../services/body_profile_service.dart';
+import '../services/body_photo_picker.dart';
 import '../services/consent_service.dart';
 import '../services/image_data_service.dart';
 import '../services/product_service.dart';
@@ -49,6 +49,7 @@ class AiOutfitPage extends StatefulWidget {
     super.key,
     this.repository,
     this.imageDataService,
+    this.bodyPhotoPicker,
     this.productService,
     this.tryOnService,
     this.wardrobeRepository,
@@ -68,6 +69,7 @@ class AiOutfitPage extends StatefulWidget {
 
   final OutfitRepository? repository;
   final ImageDataService? imageDataService;
+  final BodyPhotoPicker? bodyPhotoPicker;
   final ProductService? productService;
   final VirtualTryOnService? tryOnService;
   final WardrobeRepository? wardrobeRepository;
@@ -95,8 +97,12 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
 
   final TextEditingController _requestController = TextEditingController();
   static const _sceneOptions = ['日常', '工作', '约会', '聚会', '旅行'];
+  static const _photoRoleLabels = {
+    'front': '正面照',
+    'side': '侧面照',
+    'back': '背面照',
+  };
   late String _scene;
-  final ImagePicker _imagePicker = ImagePicker();
 
   XFile? _frontImage;
 
@@ -107,6 +113,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
 
   late final OutfitViewModel _viewModel;
   late final ImageDataService _imageDataService;
+  late final BodyPhotoPicker _bodyPhotoPicker;
   late final ProductService _productService;
   late final VirtualTryOnService _tryOnService;
   late final WardrobeRepository _wardrobeRepository;
@@ -152,6 +159,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       repository: widget.repository ?? RemoteOutfitRepository(),
     );
     _imageDataService = widget.imageDataService ?? ImageDataService();
+    _bodyPhotoPicker = widget.bodyPhotoPicker ?? SystemGalleryBodyPhotoPicker();
     _productService = widget.productService ?? const MockProductService();
     _tryOnService = widget.tryOnService ?? const MockVirtualTryOnService();
     _wardrobeRepository =
@@ -169,7 +177,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       ..addListener(_onFavoritesChanged)
       ..ensureLoaded();
     unawaited(_loadWeather());
-    unawaited(_recoverLostImage());
+    unawaited(_recoverLostImages());
   }
 
   Future<void> _loadWeather() async {
@@ -184,15 +192,11 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
     }
   }
 
-  Future<void> _recoverLostImage() async {
+  Future<void> _recoverLostImages() async {
     try {
-      final response = await _imagePicker.retrieveLostData();
-      if (!response.isEmpty && response.files?.isNotEmpty == true && mounted) {
-        final image = response.files!.first;
-        final bytes = await _imageDataService.readValidatedBytes(image);
-        if (mounted) {
-          _setSelectedImage('front', image, bytes);
-        }
+      final images = await _bodyPhotoPicker.retrieveLostGalleryImages();
+      if (images.isNotEmpty && mounted) {
+        await _handlePickedImages(images);
       }
     } catch (_) {
       // Lost-data recovery is Android-only and best effort.
@@ -227,116 +231,215 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
     }
   }
 
-  Future<void> _pickImage(String type) async {
+  Future<void> _pickPhotos() async {
     if (!await _ensurePhotoConsent()) {
       return;
     }
     if (!mounted) return;
-    final useAndroidFilePicker =
-        !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
-    final source = await showModalBottomSheet<ImageSource>(
-      context: context,
-      showDragHandle: true,
-      useSafeArea: true,
-      builder: (context) => Padding(
-        padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.photo_camera_outlined),
-              title: const Text('拍照上传'),
-              subtitle: const Text('建议保持全身入镜、光线均匀'),
-              onTap: () => Navigator.pop(context, ImageSource.camera),
-            ),
-            ListTile(
-              leading: Icon(
-                useAndroidFilePicker
-                    ? Icons.folder_open_outlined
-                    : Icons.photo_library_outlined,
-              ),
-              title: Text(
-                useAndroidFilePicker ? '从文件选择' : '从相册选择',
-              ),
-              subtitle: useAndroidFilePicker
-                  ? const Text('支持 JPG、JPEG、PNG，可从 Pictures 或 Downloads 选择')
-                  : null,
-              onTap: () => Navigator.pop(context, ImageSource.gallery),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (source == null) return;
-    XFile? image;
 
     try {
-      if (source == ImageSource.gallery && useAndroidFilePicker) {
-        final selectedFile = await FilePicker.pickFile(
-          type: FileType.custom,
-          allowedExtensions: const ['jpg', 'jpeg', 'png'],
-        );
-        image = selectedFile?.xFile;
-      } else {
-        image = await _imagePicker.pickImage(
-          source: source,
-          imageQuality: 72,
-          maxWidth: 1440,
-          maxHeight: 2160,
-          preferredCameraDevice: CameraDevice.rear,
-        );
-      }
+      final images = await _bodyPhotoPicker.pickFromGallery(limit: 3);
+      if (!mounted || images.isEmpty) return;
+      await _handlePickedImages(images);
     } catch (error, stackTrace) {
       AppLogger.instance.error(
         'photo_picker_failed',
         error: error,
         stackTrace: stackTrace,
-        metadata: {'photoRole': type},
+        metadata: const {'source': 'system_gallery'},
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text("无法读取图片，请检查照片访问权限")),
         );
       }
-      return;
+    }
+  }
+
+  Future<void> _handlePickedImages(List<XFile> pickedImages) async {
+    final wasLimited = pickedImages.length > 3;
+    final selectedImages = pickedImages.take(3).toList(growable: false);
+    if (wasLimited && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('最多选择3张照片，已保留前3张')),
+      );
     }
 
-    if (image == null) {
-      return;
-    }
-
+    final candidates = <_PendingBodyPhoto>[];
     try {
-      final bytes = await _imageDataService.readValidatedBytes(image);
-      if (!mounted) return;
-      _setSelectedImage(type, image, bytes);
+      for (final image in selectedImages) {
+        candidates.add(
+          _PendingBodyPhoto(
+            image: image,
+            bytes: await _imageDataService.readValidatedBytes(image),
+          ),
+        );
+      }
     } on ImageDataException catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(error.message)),
         );
       }
+      return;
+    }
+
+    if (!mounted || candidates.isEmpty) return;
+
+    if (candidates.length == 1) {
+      _applyPhotoAssignments({'front': candidates.single});
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已将所选照片设为正面照')),
+      );
+      return;
+    }
+
+    final assignments = await _confirmPhotoRoles(candidates);
+    if (assignments != null && mounted) {
+      _applyPhotoAssignments(assignments);
     }
   }
 
-  void _setSelectedImage(String type, XFile image, Uint8List bytes) {
-    final previousBytes = _previewBytes[type];
-    if (previousBytes != null && !identical(previousBytes, bytes)) {
-      unawaited(MemoryImage(previousBytes).evict());
+  Future<Map<String, _PendingBodyPhoto>?> _confirmPhotoRoles(
+    List<_PendingBodyPhoto> photos,
+  ) {
+    final assignments = List<String>.filled(photos.length, '');
+
+    return showModalBottomSheet<Map<String, _PendingBodyPhoto>>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          final isValid = assignments.every((role) => role.isNotEmpty) &&
+              assignments.contains('front') &&
+              assignments.toSet().length == assignments.length;
+          return SingleChildScrollView(
+            padding: EdgeInsets.fromLTRB(
+              20,
+              0,
+              20,
+              20 + MediaQuery.viewInsetsOf(context).bottom,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '确认照片角度',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  '请为每张照片选择不同角度，并至少指定一张正面照。',
+                  style: TextStyle(color: Colors.black54),
+                ),
+                const SizedBox(height: 16),
+                for (final (index, photo) in photos.indexed)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 14),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.memory(
+                            photo.bytes,
+                            width: 64,
+                            height: 88,
+                            fit: BoxFit.cover,
+                            cacheWidth: 256,
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: DropdownButton<String>(
+                            key: Key('photo-role-$index'),
+                            value: assignments[index],
+                            isExpanded: true,
+                            items: [
+                              const DropdownMenuItem(
+                                value: '',
+                                child: Text('选择照片角度'),
+                              ),
+                              for (final entry in _photoRoleLabels.entries)
+                                if (!assignments.contains(entry.key) ||
+                                    assignments[index] == entry.key)
+                                  DropdownMenuItem(
+                                    value: entry.key,
+                                    child: Text(entry.value),
+                                  ),
+                            ],
+                            onChanged: (role) {
+                              if (role == null) return;
+                              setSheetState(() => assignments[index] = role);
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                if (!isValid)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      '每张照片需选择不同角度，且正面照必填。',
+                      style: TextStyle(color: Color(0xFF9A4F38)),
+                    ),
+                  ),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    key: const Key('confirm-photo-roles'),
+                    onPressed: isValid
+                        ? () => Navigator.pop(
+                              context,
+                              {
+                                for (final (index, role) in assignments.indexed)
+                                  role: photos[index],
+                              },
+                            )
+                        : null,
+                    child: const Text('确认照片角度'),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  void _applyPhotoAssignments(Map<String, _PendingBodyPhoto> assignments) {
+    for (final bytes in _previewBytes.values) {
+      unawaited(MemoryImage(bytes).evict());
     }
 
     setState(() {
-      _previewBytes[type] = bytes;
-      if (type == "front") {
-        _frontImage = image;
-      }
+      _previewBytes
+        ..clear()
+        ..addEntries(
+          assignments.entries.map(
+            (entry) => MapEntry(entry.key, entry.value.bytes),
+          ),
+        );
+      _frontImage = assignments['front']?.image;
+      _sideImage = assignments['side']?.image;
+      _backImage = assignments['back']?.image;
+    });
+  }
 
-      if (type == "side") {
-        _sideImage = image;
-      }
-
-      if (type == "back") {
-        _backImage = image;
-      }
+  void _removeSelectedImage(String role) {
+    final bytes = _previewBytes.remove(role);
+    if (bytes != null) {
+      unawaited(MemoryImage(bytes).evict());
+    }
+    setState(() {
+      if (role == 'front') _frontImage = null;
+      if (role == 'side') _sideImage = null;
+      if (role == 'back') _backImage = null;
     });
   }
 
@@ -1032,14 +1135,16 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       padding: const EdgeInsets.only(bottom: 16),
       child: Semantics(
         button: true,
-        label: image == null ? "上传$title，$description" : "已选择$title，点击可重新选择",
+        label: image == null
+            ? "上传$title，$description"
+            : "已选择$title，可删除或使用上方按钮重新选择",
         child: Material(
           color: Colors.transparent,
           borderRadius: BorderRadius.circular(22),
           child: InkWell(
             key: Key('photo-upload-$type'),
             borderRadius: BorderRadius.circular(22),
-            onTap: _isGenerating ? null : () => _pickImage(type),
+            onTap: _isGenerating || image != null ? null : _pickPhotos,
             child: Ink(
               width: double.infinity,
               height: 150,
@@ -1074,19 +1179,35 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
                         ),
                       ],
                     )
-                  : ClipRRect(
-                      borderRadius: BorderRadius.circular(22),
-                      child: previewBytes != null
-                          ? AspectRatio(
-                              aspectRatio: 9 / 16,
-                              child: Image.memory(
-                                previewBytes,
-                                fit: BoxFit.contain,
-                                cacheWidth: 720,
-                                gaplessPlayback: true,
-                              ),
-                            )
-                          : const Center(child: CircularProgressIndicator()),
+                  : Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(22),
+                          child: previewBytes != null
+                              ? Image.memory(
+                                  previewBytes,
+                                  fit: BoxFit.contain,
+                                  cacheWidth: 720,
+                                  gaplessPlayback: true,
+                                )
+                              : const Center(
+                                  child: CircularProgressIndicator(),
+                                ),
+                        ),
+                        Positioned(
+                          top: 8,
+                          right: 8,
+                          child: IconButton.filled(
+                            key: Key('remove-photo-$type'),
+                            tooltip: '删除$title',
+                            onPressed: _isGenerating
+                                ? null
+                                : () => _removeSelectedImage(type),
+                            icon: const Icon(Icons.close, size: 18),
+                          ),
+                        ),
+                      ],
                     ),
             ),
           ),
@@ -1108,27 +1229,37 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         ),
         const SizedBox(height: 8),
         const Text(
-          "建议上传全身照片，AI 将分析你的身体比例和穿搭适配方向",
+          "可一次选择1至3张照片。仅上传正面照也可生成结果，补充侧面照和背面照可提升体型分析准确度。",
           style: TextStyle(
             fontSize: 14,
             color: Colors.black54,
           ),
         ),
-        const SizedBox(height: 20),
+        const SizedBox(height: 14),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.tonalIcon(
+            key: const Key('photo-gallery-picker'),
+            onPressed: _isGenerating ? null : _pickPhotos,
+            icon: const Icon(Icons.photo_library_outlined),
+            label: const Text('从相册选择照片'),
+          ),
+        ),
+        const SizedBox(height: 16),
         _buildPhotoCard(
-          "正面全身照",
+          "正面照：必填",
           "分析肩宽、头身比、身体比例",
           "front",
           _frontImage,
         ),
         _buildPhotoCard(
-          "侧面全身照",
+          "侧面照：可选",
           "分析体态、身体厚度",
           "side",
           _sideImage,
         ),
         _buildPhotoCard(
-          "背面全身照",
+          "背面照：可选",
           "分析肩型和整体轮廓",
           "back",
           _backImage,
@@ -1203,6 +1334,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
     return SizedBox(
       width: double.infinity,
       child: FilledButton(
+        key: const Key('generate-outfit'),
         onPressed: isBusy ? null : _generateOutfit,
         style: FilledButton.styleFrom(
           backgroundColor: Colors.black,
@@ -1486,4 +1618,11 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       },
     );
   }
+}
+
+class _PendingBodyPhoto {
+  const _PendingBodyPhoto({required this.image, required this.bytes});
+
+  final XFile image;
+  final Uint8List bytes;
 }

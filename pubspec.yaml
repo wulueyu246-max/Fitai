@@ -12,9 +12,8 @@ dependencies:
   cupertino_icons: ^1.0.8
   http: ^1.6.0
   image_picker: ^1.2.3
-  # Stable 11.x requires win32 5.x, while the existing geolocator stack uses
-  # win32 6.x. This is the first upstream version compatible with both.
-  file_picker: 12.0.0-beta.7
+  image_picker_android: ^0.8.13+19
+  image_picker_platform_interface: ^2.11.1
   shared_preferences: ^2.5.5
   file_saver: ^0.4.0
   share_plus: ^13.3.0

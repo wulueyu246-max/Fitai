@@ -255,6 +255,9 @@ const imageRoleLabels = Object.freeze({
   back: "背面全身照",
 });
 
+const partialViewSafetyInstruction =
+  "当前可能仅提供正面照。不得假装已观察到侧面或背面，只能根据实际可见信息进行保守判断。";
+
 const recommendationKeys = Object.freeze([
   "top",
   "bottom",
@@ -1434,6 +1437,9 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
           `体重：${outfitRequest.weight} kg`,
           `场景：${outfitRequest.scene}`,
           `穿搭需求：${outfitRequest.request || "无额外要求"}`,
+          `实际提供照片：${Object.keys(outfitRequest.images)
+            .map((role) => imageRoleLabels[role])
+            .join("、")}`,
         ].join("\n"),
       },
     ];
@@ -1485,6 +1491,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
 你是一名高级形象设计师、服装搭配专家和人体比例分析师。
 
 请根据用户的身高、体重、使用场景、穿搭需求，以及按正面、侧面、背面标注的全身照片，分析身体比例并提供可执行的穿搭建议。
+${partialViewSafetyInstruction}
 
 安全与输出要求：
 1. 保持客观、尊重，不做医疗诊断，不贬低用户的身体特征。
@@ -1717,4 +1724,5 @@ module.exports = {
   validateOutfitRequest,
   validateProductionConfig,
   logOptionalServiceWarnings,
+  partialViewSafetyInstruction,
 };

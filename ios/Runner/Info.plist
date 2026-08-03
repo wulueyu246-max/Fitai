@@ -28,8 +28,6 @@
 	<true/>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>树皮需要访问你选择的照片，以分析身体比例并生成穿搭建议。</string>
-	<key>NSCameraUsageDescription</key>
-	<string>树皮需要使用相机拍摄全身照，用于生成你的穿搭分析。</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>树皮会使用你所在的城市获取实时天气，让穿搭建议更准确。</string>
 	<key>UIApplicationSceneManifest</key>

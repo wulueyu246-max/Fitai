@@ -114,6 +114,8 @@ void main() {
       request: ' 生成通勤穿搭 ',
       images: {
         'front': ' data:image/jpeg;base64,AA== ',
+        'side': '',
+        'back': '   ',
         'unknown': 'data:image/jpeg;base64,AA==',
       },
     );
