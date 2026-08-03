@@ -1,4 +1,8 @@
+import 'dart:async';
+
 import 'package:fit_ai/main.dart';
+import 'package:fit_ai/models/first_launch_profile.dart';
+import 'package:fit_ai/pages/first_run_gate.dart';
 import 'package:fit_ai/services/onboarding_service.dart';
 import 'package:fit_ai/models/app_location.dart';
 import 'package:fit_ai/services/location_service.dart';
@@ -57,6 +61,37 @@ void main() {
       '173',
     );
   });
+
+  testWidgets('startup leaves loading screen when local state load stalls', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: FirstRunGate(
+          service: _StalledOnboardingService(),
+          locationService: _TestLocationService(),
+          loadTimeout: const Duration(milliseconds: 1),
+          builder: (_, __) => const Text('main experience'),
+        ),
+      ),
+    );
+
+    await tester.pump(const Duration(milliseconds: 2));
+    await tester.pump();
+
+    expect(find.byKey(const Key('manual-city-input')), findsOneWidget);
+  });
+}
+
+class _StalledOnboardingService implements OnboardingService {
+  @override
+  Future<OnboardingState> load() => Completer<OnboardingState>().future;
+
+  @override
+  Future<void> complete({
+    required String firstScene,
+    FirstLaunchProfile? profile,
+  }) async {}
 }
 
 class _TestLocationService implements LocationService {

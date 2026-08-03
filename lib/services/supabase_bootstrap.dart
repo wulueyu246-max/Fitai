@@ -2,6 +2,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../core/logging/app_logger.dart';
 
+typedef SupabaseInitializer = Future<void> Function(
+  SupabaseBootstrapConfig config,
+);
+
 class SupabaseBootstrapConfig {
   const SupabaseBootstrapConfig({required this.url, required this.anonKey});
 
@@ -29,7 +33,11 @@ class SupabaseBootstrap {
 
   static bool _initialized = false;
 
-  static Future<bool> initialize({SupabaseBootstrapConfig? config}) async {
+  static Future<bool> initialize({
+    SupabaseBootstrapConfig? config,
+    SupabaseInitializer? initializer,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
     if (_initialized) return true;
     final current = config ?? SupabaseBootstrapConfig.fromEnvironment();
     if (!current.isConfigured) {
@@ -37,10 +45,7 @@ class SupabaseBootstrap {
       return false;
     }
     try {
-      await Supabase.initialize(
-        url: current.url,
-        publishableKey: current.anonKey,
-      );
+      await (initializer ?? _initializeClient)(current).timeout(timeout);
       _initialized = true;
       AppLogger.instance.info('supabase_flutter_initialized');
       return true;
@@ -52,5 +57,12 @@ class SupabaseBootstrap {
       );
       return false;
     }
+  }
+
+  static Future<void> _initializeClient(SupabaseBootstrapConfig config) async {
+    await Supabase.initialize(
+      url: config.url,
+      publishableKey: config.anonKey,
+    );
   }
 }

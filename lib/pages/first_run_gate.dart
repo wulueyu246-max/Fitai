@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/first_launch_profile.dart';
+import '../core/logging/app_logger.dart';
 import '../services/analytics_service.dart';
 import '../services/onboarding_service.dart';
 import '../services/location_service.dart';
@@ -20,6 +21,7 @@ class FirstRunGate extends StatefulWidget {
     this.service,
     this.analyticsService,
     this.locationService,
+    this.loadTimeout = const Duration(seconds: 10),
     super.key,
   });
 
@@ -27,6 +29,7 @@ class FirstRunGate extends StatefulWidget {
   final OnboardingService? service;
   final AnalyticsService? analyticsService;
   final LocationService? locationService;
+  final Duration loadTimeout;
 
   @override
   State<FirstRunGate> createState() => _FirstRunGateState();
@@ -52,15 +55,27 @@ class _FirstRunGateState extends State<FirstRunGate> {
   }
 
   Future<void> _load() async {
-    final results = await Future.wait([
-      _service.load(),
-      _locationService.load(),
-    ]);
-    final state = results[0] as OnboardingState;
+    OnboardingState state;
+    Object? location;
+    try {
+      final results = await Future.wait([
+        _service.load(),
+        _locationService.load(),
+      ]).timeout(widget.loadTimeout);
+      state = results[0] as OnboardingState;
+      location = results[1];
+    } catch (error, stackTrace) {
+      AppLogger.instance.error(
+        'first_run_state_load_failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      state = const OnboardingState(completed: false);
+    }
     if (mounted) {
       setState(() {
         _state = state;
-        _needsLocation = results[1] == null;
+        _needsLocation = location == null;
         _locationChecked = true;
       });
     }

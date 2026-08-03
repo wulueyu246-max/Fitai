@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -30,17 +31,6 @@ import 'services/supabase_bootstrap.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  ProductionEnvironment.fromDartDefines().validate();
-  await SupabaseBootstrap.initialize();
-  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-  SystemChrome.setSystemUIOverlayStyle(
-    const SystemUiOverlayStyle(
-      statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.dark,
-      systemNavigationBarColor: ShupiColors.surface,
-      systemNavigationBarIconBrightness: Brightness.dark,
-    ),
-  );
   FlutterError.onError = (details) {
     AppLogger.instance.error(
       'flutter_framework_error',
@@ -58,7 +48,70 @@ Future<void> main() async {
     );
     return true;
   };
+
+  try {
+    ProductionEnvironment.fromDartDefines().validate();
+  } catch (error, stackTrace) {
+    AppLogger.instance.error(
+      'startup_configuration_failed',
+      error: error,
+      stackTrace: stackTrace,
+    );
+    runApp(FitAIStartupFailure(error: error));
+    return;
+  }
+
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: Brightness.dark,
+      systemNavigationBarColor: ShupiColors.surface,
+      systemNavigationBarIconBrightness: Brightness.dark,
+    ),
+  );
   runApp(const FitAIApp());
+  unawaited(SupabaseBootstrap.initialize());
+}
+
+class FitAIStartupFailure extends StatelessWidget {
+  const FitAIStartupFailure({required this.error, super.key});
+
+  final Object error;
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Shupi',
+      debugShowCheckedModeBanner: false,
+      theme: ShupiTheme.light(),
+      home: Scaffold(
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.error_outline_rounded, size: 40),
+                  const SizedBox(height: 16),
+                  const Text(
+                    '应用启动失败',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    error.toString(),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class FitAIApp extends StatelessWidget {
