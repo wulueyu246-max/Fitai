@@ -129,7 +129,7 @@ class ProductCatalog {
       ...searchTerms(keyword),
     ];
 
-    return this.products
+    const rankedProducts = this.products
       .filter((item) => (!category || item.category === category) &&
         (!Number.isFinite(budget) || budget <= 0 || item.price <= budget))
       .map((item) => {
@@ -143,8 +143,12 @@ class ProductCatalog {
       .sort((left, right) =>
         right.score - left.score || left.item.id.localeCompare(right.item.id),
       )
-      .slice(0, limit)
-      .map(({item}) => toRecommendation(item, {
+      .map(({item}) => item);
+    const selectedProducts = category
+      ? rankedProducts.slice(0, limit)
+      : selectBalancedProducts(rankedProducts, limit);
+
+    return selectedProducts.map((item) => toRecommendation(item, {
         style,
         color,
         bodyType,
@@ -184,6 +188,28 @@ class ProductCatalog {
     }
     return [...matched.values()].slice(0, 12);
   }
+}
+
+function selectBalancedProducts(products, limit) {
+  const selected = [];
+  const selectedIds = new Set();
+
+  for (const category of ["T恤", "裤子", "鞋", "外套"]) {
+    const match = products.find((item) => item.category === category);
+    if (match && selected.length < limit) {
+      selected.push(match);
+      selectedIds.add(match.product_id);
+    }
+  }
+
+  for (const item of products) {
+    if (selected.length >= limit) break;
+    if (selectedIds.add(item.product_id)) {
+      selected.push(item);
+    }
+  }
+
+  return selected;
 }
 
 function toRecommendation(productItem, filters = {}) {

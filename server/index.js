@@ -1434,18 +1434,20 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.get("/products/recommend", async (req, res, next) => {
+async function handleProductRecommendations(req, res, next) {
   try {
+    const input = req.method === "POST" ? req.body : req.query;
     const products = await productProvider.recommend({
-      category: req.query.category,
-      style: req.query.style,
-      color: req.query.color,
-      bodyType: req.query.bodyType,
-      scene: req.query.scene,
-      gender: req.query.gender,
-      fit: req.query.fit,
-      budget: req.query.budget,
-      keyword: req.query.keyword,
+      category: input?.category,
+      style: input?.style,
+      color: input?.color,
+      bodyType: input?.bodyType,
+      scene: input?.scene,
+      gender: input?.gender,
+      fit: input?.fit,
+      budget: input?.budget,
+      keyword: input?.keyword,
+      limit: input?.limit == null ? undefined : Number(input.limit),
     });
     return res.json({products});
   } catch (error) {
@@ -1459,7 +1461,10 @@ app.get("/products/recommend", async (req, res, next) => {
     }
     return next(error);
   }
-});
+}
+
+app.get("/products/recommend", handleProductRecommendations);
+app.post("/products/recommend", handleProductRecommendations);
 
 app.get("/products/search", async (req, res, next) => {
   try {

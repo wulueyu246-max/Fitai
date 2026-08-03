@@ -67,6 +67,16 @@ test("respects an explicit total outfit budget without inventing one", () => {
   assert.ok(products.every((item) => item.price <= 250));
 });
 
+test("unfiltered recommendations keep every outfit category available", () => {
+  const products = new ProductCatalog().recommend({limit: 12});
+
+  assert.equal(products.length, 12);
+  assert.deepEqual(
+    new Set(products.map((item) => item.category)),
+    new Set(["T恤", "裤子", "鞋", "外套"]),
+  );
+});
+
 test("GET /products/recommend returns matched catalog products", async () => {
   const server = await listenForRequests(app, 0);
   try {
@@ -81,6 +91,32 @@ test("GET /products/recommend returns matched catalog products", async () => {
     assert.ok(body.products.length > 0);
     assert.ok(body.products.every((item) => item.category === "鞋"));
     assert.ok(body.products.every((item) => item.product_id && item.stock_status));
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test("POST /products/recommend returns Mock Provider products", async () => {
+  const server = await listenForRequests(app, 0);
+  try {
+    const {port} = server.address();
+    const response = await fetch(
+      `http://127.0.0.1:${port}/products/recommend`,
+      {
+        method: "POST",
+        headers: {"content-type": "application/json"},
+        body: JSON.stringify({category: "外套", style: "通勤"}),
+      },
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.ok(Array.isArray(body.products));
+    assert.ok(body.products.length > 0);
+    assert.ok(body.products.every((item) => item.category === "外套"));
+    assert.ok(body.products.every((item) => item.is_mock === true));
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
