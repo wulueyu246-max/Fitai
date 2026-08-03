@@ -20,6 +20,7 @@ const {
   AnalyticsStoreError,
 } = require("./analytics_store");
 const {SupabasePersistence} = require("./supabase_persistence");
+const {SupabaseUserPersistence} = require("./supabase_user_persistence");
 const {
   ObjectStorageError,
   SupabaseObjectStorage,
@@ -279,12 +280,19 @@ const productProvider = createProductProvider({
   catalog: productCatalog,
 });
 const taobaoService = new TaobaoService({provider: productProvider});
-const cloudPersistence = config.supabaseUrl && config.supabaseServiceRoleKey
+const runtimeAuthPersistence = config.supabaseUrl && config.supabaseServiceRoleKey
   ? new SupabasePersistence({
     url: config.supabaseUrl,
     serviceRoleKey: config.supabaseServiceRoleKey,
     table: config.supabaseStateTable,
     recordId: "auth",
+  })
+  : null;
+const cloudPersistence = runtimeAuthPersistence
+  ? new SupabaseUserPersistence({
+    runtimePersistence: runtimeAuthPersistence,
+    url: config.supabaseUrl,
+    serviceRoleKey: config.supabaseServiceRoleKey,
   })
   : null;
 const cloudAnalyticsPersistence = config.supabaseUrl && config.supabaseServiceRoleKey
@@ -1200,6 +1208,8 @@ app.post("/user/photos", async (req, res, next) => {
       kind,
       dataUri: req.body?.image_data,
     });
+    authStore.updatePhotoReference(token, kind, result.imageUrl);
+    await authStore.flush();
     return res.status(201).json(result);
   } catch (error) {
     if (error instanceof ObjectStorageError) {

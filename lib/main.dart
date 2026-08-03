@@ -26,10 +26,12 @@ import 'services/product_service.dart';
 import 'services/remote_brand_product_service.dart';
 import 'services/wardrobe_sync_service.dart';
 import 'services/location_service.dart';
+import 'services/supabase_bootstrap.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   ProductionEnvironment.fromDartDefines().validate();
+  await SupabaseBootstrap.initialize();
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(

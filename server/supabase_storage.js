@@ -45,7 +45,11 @@ class SupabaseObjectStorage {
         `照片存储失败（HTTP ${response.status}）`,
       );
     }
-    return {bucket: this.bucket, objectPath};
+    return {
+      bucket: this.bucket,
+      objectPath,
+      imageUrl: `supabase://${this.bucket}/${objectPath}`,
+    };
   }
 
   async deleteUserObjects(userId) {

@@ -241,6 +241,30 @@ class AuthStore {
     return cloneWardrobe(user.wardrobe);
   }
 
+  updatePhotoReference(token, kind, imageUrl) {
+    this.#ensureLoaded();
+    const user = this.#userForToken(token);
+    if (!["front", "side", "back", "avatar"].includes(kind)) {
+      throw new AuthStoreError(400, "INVALID_PHOTO_KIND", "照片类型无效");
+    }
+    if (
+      typeof imageUrl !== "string" ||
+      !imageUrl.startsWith("supabase://user-photos/") ||
+      imageUrl.length > 2048
+    ) {
+      throw new AuthStoreError(400, "INVALID_PHOTO_URL", "照片地址无效");
+    }
+    if (kind === "avatar") {
+      user.avatar = imageUrl;
+    } else {
+      user.bodyPhotos = {...(user.bodyPhotos || {}), [kind]: imageUrl};
+    }
+    user.updatedAt = new Date().toISOString();
+    user.lastActiveAt = user.updatedAt;
+    this.#persist();
+    return imageUrl;
+  }
+
   logout(token) {
     this.#ensureLoaded();
     const tokenHash = hashToken(token);

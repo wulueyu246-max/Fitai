@@ -6,5 +6,7 @@
   "PRODUCT_CATALOG_URL": "https://commerce.example.com/products",
   "AFFILIATE_CHANNEL_ID": "replace-with-real-channel-id",
   "AI_TIMEOUT_MS": "90000",
-  "MAX_IMAGE_BYTES": "5242880"
+  "MAX_IMAGE_BYTES": "5242880",
+  "SUPABASE_URL": "https://your-project.supabase.co",
+  "SUPABASE_ANON_KEY": "replace-with-public-anon-key"
 }

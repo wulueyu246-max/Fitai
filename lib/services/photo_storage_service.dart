@@ -13,7 +13,9 @@ abstract interface class PhotoStorageService {
     UserSessionController sessionController,
   ) {
     const baseValue = String.fromEnvironment('AUTH_API_BASE_URL');
-    final baseUrl = Uri.tryParse(baseValue);
+    final baseUrl = Uri.tryParse(
+      baseValue.isEmpty ? AppConfig.fromEnvironment().apiBaseUrl : baseValue,
+    );
     return baseUrl != null && baseUrl.hasScheme && baseUrl.host.isNotEmpty
         ? RemotePhotoStorageService(
             baseUrl: baseUrl,

@@ -8,6 +8,78 @@ alter table public.shupi_runtime_state enable row level security;
 revoke all on table public.shupi_runtime_state from anon, authenticated;
 grant select, insert, update, delete on table public.shupi_runtime_state to service_role;
 
+create table if not exists public.users (
+  id text primary key,
+  email text,
+  nickname text not null,
+  avatar text,
+  gender text,
+  phone text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.body_profiles (
+  id text primary key,
+  user_id text not null unique references public.users(id) on delete cascade,
+  height numeric(6, 2),
+  weight numeric(6, 2),
+  shoulder_width numeric(6, 2),
+  waist numeric(6, 2),
+  hip numeric(6, 2),
+  body_type text,
+  front_image_url text,
+  side_image_url text,
+  back_image_url text,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.wardrobe (
+  id text primary key,
+  user_id text not null references public.users(id) on delete cascade,
+  image_url text,
+  category text,
+  color text,
+  season text,
+  brand text,
+  item_json jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.favorites (
+  id text primary key,
+  user_id text not null references public.users(id) on delete cascade,
+  product_id text not null,
+  product_json jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  unique (user_id, product_id)
+);
+
+create table if not exists public.history (
+  id text primary key,
+  user_id text not null references public.users(id) on delete cascade,
+  prompt text not null default '',
+  result_json jsonb not null default '{}'::jsonb,
+  history_type text not null default 'outfit_plan',
+  created_at timestamptz not null default now()
+);
+
+create index if not exists body_profiles_user_id_idx on public.body_profiles(user_id);
+create index if not exists wardrobe_user_created_idx on public.wardrobe(user_id, created_at desc);
+create index if not exists favorites_user_created_idx on public.favorites(user_id, created_at desc);
+create index if not exists history_user_created_idx on public.history(user_id, created_at desc);
+
+alter table public.users enable row level security;
+alter table public.body_profiles enable row level security;
+alter table public.wardrobe enable row level security;
+alter table public.favorites enable row level security;
+alter table public.history enable row level security;
+
+revoke all on table public.users, public.body_profiles, public.wardrobe,
+  public.favorites, public.history from anon, authenticated;
+grant select, insert, update, delete on table public.users, public.body_profiles,
+  public.wardrobe, public.favorites, public.history to service_role;
+
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values (
   'user-photos',
