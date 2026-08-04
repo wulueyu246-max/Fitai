@@ -1,6 +1,16 @@
-const crypto = require("crypto");
-
 const {ProductCatalog, canonicalCategory} = require("./product_catalog");
+const {
+  TAOBAO_MATERIAL_SAMPLE_METHOD,
+  TAOBAO_MATERIAL_SEARCH_METHOD,
+  TaobaoApiClient,
+  TaobaoApiError,
+  signTaobaoRequest,
+} = require("./taobao_client");
+
+const PRODUCT_CATEGORIES = Object.freeze([
+  "top", "bottom", "shoes", "outerwear", "accessories",
+]);
+const DEFAULT_SAMPLE_MATERIAL_ID = "28029";
 
 class ProductProviderError extends Error {
   constructor(message, {status = 502, code = "PRODUCT_PROVIDER_FAILED", cause} = {}) {
@@ -17,28 +27,10 @@ class ProductProvider {
   }
 
   async recommendForQueries(queries, context = {}) {
-    const batches = await Promise.all(
-      (Array.isArray(queries) ? queries : []).map((query) => this.recommend({
-        category: query.category,
-        style: query.style || context.style,
-        color: context.color,
-        bodyType: context.bodyType,
-        scene: context.scene,
-        gender: context.gender,
-        fit: context.fit,
-        season: context.season,
-        budget: context.budget,
-        keyword: query.keyword,
-        limit: 3,
-      })),
-    );
-    const matched = new Map();
-    for (const product of batches.flat()) {
-      if (!matched.has(product.product_id)) {
-        matched.set(product.product_id, product);
-      }
-    }
-    return [...matched.values()].slice(0, 12);
+    const batches = await Promise.all((Array.isArray(queries) ? queries : []).map(
+      (query) => this.recommend({...context, ...query, limit: 2}),
+    ));
+    return uniqueProducts(batches.flat()).slice(0, 12);
   }
 }
 
@@ -63,128 +55,167 @@ class TaobaoProductProvider extends ProductProvider {
     appKey,
     appSecret,
     pid,
-    endpoint = "https://eco.taobao.com/router/rest",
-    method = "taobao.tbk.dg.material.optional.upgrade",
-    fetchImpl = fetch,
-    timeoutMs = 10_000,
+    adzoneId,
+    client,
+    catalog = new ProductCatalog(),
+    endpoint,
+    fetchImpl,
+    connectTimeoutMs,
+    timeoutMs,
+    maxRetries,
+    sampleMaterialId = DEFAULT_SAMPLE_MATERIAL_ID,
+    logger = console,
   }) {
     super();
-    this.appKey = requireConfig(appKey, "TAOBAO_APP_KEY");
-    this.appSecret = requireConfig(appSecret, "TAOBAO_APP_SECRET");
-    this.pid = String(pid || "").trim();
-    this.endpoint = requireHttpsUrl(endpoint, "TAOBAO_API_URL");
-    this.method = requireConfig(method, "TAOBAO_API_METHOD");
-    this.fetch = fetchImpl;
-    this.timeoutMs = timeoutMs;
+    this.pid = requireConfig(pid, "TAOBAO_PID");
+    this.adzoneId = requireConfig(adzoneId, "TAOBAO_ADZONE_ID");
+    this.sampleMaterialId = String(sampleMaterialId || DEFAULT_SAMPLE_MATERIAL_ID);
+    this.logger = logger;
+    this.mock = new MockProductProvider({catalog});
+    this.client = client || new TaobaoApiClient({
+      appKey,
+      appSecret,
+      endpoint,
+      fetchImpl,
+      connectTimeoutMs,
+      totalTimeoutMs: timeoutMs,
+      maxRetries,
+      logger,
+    });
     this.name = "taobao";
+  }
+
+  async healthCheck() {
+    await this.#search(normalizeFilters({category: "top", keyword: "上衣", limit: 1}));
+    return true;
   }
 
   async recommend(filters = {}) {
     const normalized = normalizeFilters(filters);
-    const params = {
-      app_key: this.appKey,
-      format: "json",
-      method: this.method,
-      sign_method: "md5",
-      simplify: "true",
-      timestamp: taobaoTimestamp(),
-      v: "2.0",
-      page_size: String(normalized.limit),
+    const categories = normalized.category
+      ? [normalized.category]
+      : PRODUCT_CATEGORIES;
+    const settled = await Promise.all(categories.map(async (category) => {
+      const scoped = {...normalized, category, limit: Math.min(normalized.limit, 2)};
+      try {
+        let products = await this.#search(scoped);
+        if (products.length < scoped.limit) {
+          const sampled = await this.#sample(scoped);
+          products = uniqueProducts([...products, ...sampled]);
+        }
+        if (products.length === 0) return this.#mockFallback(scoped);
+        return products.slice(0, scoped.limit);
+      } catch (error) {
+        this.logger.warn?.("淘宝分类商品降级", {
+          category,
+          errorCode: safeProviderCode(error),
+        });
+        return this.#mockFallback(scoped);
+      }
+    }));
+    return uniqueProducts(settled.flat()).slice(0, normalized.category ? normalized.limit : 10);
+  }
+
+  async #search(filters) {
+    const payload = await this.client.call(TAOBAO_MATERIAL_SEARCH_METHOD, {
+      adzone_id: this.adzoneId,
+      q: buildSearchKeyword(filters),
+      page_no: "1",
+      page_size: String(filters.limit),
       platform: "2",
-      q: [
-        normalized.category,
-        normalized.style,
-        normalized.color,
-        normalized.bodyType,
-        normalized.keyword,
-      ].filter(Boolean).join(" ") || "服装",
-      ...(this.pid ? {adzone_id: adzoneIdFromPid(this.pid)} : {}),
-    };
-    params.sign = signTaobaoRequest(params, this.appSecret);
+      ...(filters.budget > 0 ? {end_price: String(Math.round(filters.budget * 100))} : {}),
+    });
+    return mapPayload(payload, filters, this.pid, "search");
+  }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    timer.unref?.();
-    let response;
-    try {
-      response = await this.fetch(this.endpoint, {
-        method: "POST",
-        headers: {"content-type": "application/x-www-form-urlencoded"},
-        body: new URLSearchParams(params).toString(),
-        signal: controller.signal,
-      });
-    } catch (error) {
-      throw new ProductProviderError("淘宝联盟商品请求失败", {cause: error});
-    } finally {
-      clearTimeout(timer);
-    }
+  async #sample(filters) {
+    const payload = await this.client.call(TAOBAO_MATERIAL_SAMPLE_METHOD, {
+      adzone_id: this.adzoneId,
+      material_id: this.sampleMaterialId,
+      page_no: "1",
+      page_size: String(filters.limit),
+    });
+    return mapPayload(payload, filters, this.pid, "sample");
+  }
 
-    if (!response.ok) {
-      throw new ProductProviderError(
-        `淘宝联盟商品请求失败（HTTP ${response.status}）`,
-      );
-    }
-    const payload = await response.json();
-    if (payload.error_response) {
-      throw new ProductProviderError(
-        String(payload.error_response.sub_msg ||
-          payload.error_response.msg || "淘宝联盟返回错误"),
-        {
-          status: 502,
-          code: String(payload.error_response.code || "TAOBAO_API_ERROR"),
-        },
-      );
-    }
-    return extractTaobaoItems(payload)
-      .slice(0, normalized.limit)
-      .map((item) => mapTaobaoProduct(item, {
-        pid: this.pid,
-        fallbackCategory: normalized.category,
-        filters: normalized,
-      }));
+  async #mockFallback(filters) {
+    return (await this.mock.recommend(filters)).slice(0, filters.limit);
   }
 }
 
-function createProductProvider({
-  environment = process.env,
-  catalog,
-  logger = console,
-} = {}) {
-  const requested = String(environment.PRODUCT_PROVIDER || "auto")
-    .trim()
-    .toLowerCase();
-  const credentials = {
+class AutoProductProvider extends ProductProvider {
+  constructor({taobao, mock, logger = console}) {
+    super();
+    this.taobao = taobao;
+    this.mock = mock;
+    this.logger = logger;
+    this.name = "auto";
+    this.health = null;
+  }
+
+  async recommend(filters = {}) {
+    if (this.health !== true) {
+      try {
+        await this.taobao.healthCheck();
+        this.health = true;
+        this.logger.info?.("淘宝 Provider 健康检查通过", {configured: true});
+      } catch (error) {
+        this.health = false;
+        this.logger.warn?.("淘宝 Provider 不可用，使用 Mock", {
+          configured: true,
+          errorCode: safeProviderCode(error),
+        });
+        return this.mock.recommend(filters);
+      }
+    }
+    return this.taobao.recommend(filters);
+  }
+}
+
+function createProductProvider({environment = process.env, catalog, logger = console, client} = {}) {
+  const mode = String(environment.PRODUCT_PROVIDER || "auto").trim().toLowerCase();
+  if (!new Set(["mock", "taobao", "auto"]).has(mode)) {
+    throw new ProductProviderError("PRODUCT_PROVIDER 必须为 mock、taobao 或 auto", {
+      status: 500,
+      code: "INVALID_PRODUCT_PROVIDER_MODE",
+    });
+  }
+  const productCatalog = catalog || new ProductCatalog();
+  const values = {
     appKey: String(environment.TAOBAO_APP_KEY || "").trim(),
     appSecret: String(environment.TAOBAO_APP_SECRET || "").trim(),
     pid: String(environment.TAOBAO_PID || "").trim(),
+    adzoneId: String(environment.TAOBAO_ADZONE_ID || "").trim(),
   };
-  const configured = Boolean(
-    credentials.appKey && credentials.appSecret && credentials.pid,
-  );
-  if (requested !== "mock" && configured) {
-    return new TaobaoProductProvider({
-      ...credentials,
-      endpoint: environment.TAOBAO_API_URL || undefined,
-      method: environment.TAOBAO_API_METHOD || undefined,
-      timeoutMs: positiveInteger(environment.PRODUCT_PROVIDER_TIMEOUT_MS, 10_000),
-    });
+  const configured = Object.values(values).every(Boolean);
+  if (mode === "mock" || !configured) {
+    if (mode !== "mock") logger.warn?.("淘宝 Provider 未完整配置，使用 Mock", {configured: false});
+    return new MockProductProvider({catalog: productCatalog});
   }
-  if (requested !== "mock") {
-    logger.warn?.(
-      "淘宝联盟凭证未完整配置，商品服务使用 Mock Provider；需要 TAOBAO_APP_KEY、TAOBAO_APP_SECRET、TAOBAO_PID。",
-    );
-  }
-  return new MockProductProvider({catalog: catalog || new ProductCatalog()});
+  const taobao = new TaobaoProductProvider({
+    ...values,
+    client,
+    catalog: productCatalog,
+    endpoint: environment.TAOBAO_API_URL,
+    connectTimeoutMs: positiveInteger(environment.TAOBAO_CONNECT_TIMEOUT_MS, 5_000),
+    timeoutMs: positiveInteger(environment.PRODUCT_PROVIDER_TIMEOUT_MS, 12_000),
+    maxRetries: positiveInteger(environment.TAOBAO_MAX_RETRIES, 1),
+    sampleMaterialId: environment.TAOBAO_SAMPLE_MATERIAL_ID || DEFAULT_SAMPLE_MATERIAL_ID,
+    logger,
+  });
+  if (mode === "taobao") return taobao;
+  return new AutoProductProvider({
+    taobao,
+    mock: new MockProductProvider({catalog: productCatalog}),
+    logger,
+  });
 }
 
-function normalizeFilters(filters) {
+function normalizeFilters(filters = {}) {
   const text = (value, field) => {
     if (value == null || value === "") return "";
     if (typeof value !== "string" || value.trim().length > 100) {
-      throw new ProductProviderError(`${field} 参数无效`, {
-        status: 400,
-        code: "INVALID_PRODUCT_FILTER",
-      });
+      throw new ProductProviderError(`${field} 参数无效`, {status: 400, code: "INVALID_PRODUCT_FILTER"});
     }
     return value.trim();
   };
@@ -198,113 +229,145 @@ function normalizeFilters(filters) {
     gender: text(filters.gender, "gender"),
     fit: text(filters.fit, "fit"),
     season: text(filters.season, "season"),
-    budget: nonNegativeNumber(filters.budget),
+    budget: optionalNumber(filters.budget) || 0,
     keyword: text(filters.keyword, "keyword"),
-    limit: Number.isInteger(requestedLimit)
-      ? Math.min(Math.max(requestedLimit, 1), 20)
-      : 12,
+    limit: Number.isInteger(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 20) : 2,
   };
 }
 
-function signTaobaoRequest(params, appSecret) {
-  const content = Object.keys(params)
-    .filter((key) => key !== "sign")
-    .sort()
-    .map((key) => `${key}${params[key]}`)
-    .join("");
-  return crypto
-    .createHash("md5")
-    .update(`${appSecret}${content}${appSecret}`, "utf8")
-    .digest("hex")
-    .toUpperCase();
+function buildSearchKeyword(filters) {
+  const categoryNames = {
+    top: "上衣", bottom: "裤子 裙子", shoes: "鞋", outerwear: "外套", accessories: "配饰",
+  };
+  return [filters.gender, filters.scene, filters.style, categoryNames[filters.category],
+    filters.color, filters.season, filters.fit, filters.keyword].filter(Boolean).join(" ") || "服饰";
 }
 
 function extractTaobaoItems(payload) {
-  const response = payload.tbk_dg_material_optional_upgrade_response ||
-    payload.tbk_dg_material_optional_response || {};
-  const raw = response.result_list?.map_data ||
-    response.result_list?.mapData || [];
-  if (Array.isArray(raw)) return raw;
-  return raw && typeof raw === "object" ? [raw] : [];
+  const response = payload?.tbk_dg_material_optional_upgrade_response ||
+    payload?.tbk_dg_material_optional_response ||
+    payload?.tbk_dg_material_recommend_response || {};
+  const raw = response.result_list?.map_data || response.result_list?.mapData ||
+    response.result_list || response.results?.map_data || [];
+  return Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
 }
 
-function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}}) {
-  const productId = String(item.item_id || item.itemId || "").trim();
-  if (!productId) {
-    throw new ProductProviderError("淘宝联盟商品缺少 item_id");
-  }
-  const detailUrl = normalizeHttpsUrl(
-    item.item_url || item.url ||
-      `https://item.taobao.com/item.htm?id=${encodeURIComponent(productId)}`,
+function mapPayload(payload, filters, pid, origin) {
+  return extractTaobaoItems(payload).map((item) => {
+    try {
+      return mapTaobaoProduct(item, {pid, fallbackCategory: filters.category, filters, origin});
+    } catch (_) {
+      return null;
+    }
+  }).filter((product) => product && (
+    !filters.category || product.category === filters.category
+  ));
+}
+
+function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}, origin = "search"} = {}) {
+  const basic = item.item_basic_info || item.itemBasicInfo || item;
+  const priceInfo = item.price_promotion_info || item.pricePromotionInfo || item;
+  const publish = item.publish_info || item.publishInfo || item;
+  const income = publish.income_info || publish.incomeInfo || publish;
+  const productId = firstText(basic.item_id, basic.itemId, item.item_id, item.itemId);
+  if (!productId) throw new ProductProviderError("淘宝商品缺少 item_id");
+  const title = firstText(basic.short_title, basic.title, item.short_title, item.title);
+  if (!title) throw new ProductProviderError("淘宝商品缺少标题");
+  const couponUrl = firstHttps(
+    publish.coupon_share_url, publish.coupon_click_url, item.coupon_share_url, item.coupon_click_url,
   );
-  const couponUrl = normalizeHttpsUrl(
-    item.coupon_share_url || item.coupon_click_url || "",
+  const affiliateUrl = firstHttps(
+    publish.click_url, publish.clickUrl, publish.coupon_share_url,
+    item.click_url, item.clickUrl, item.coupon_share_url,
   );
-  const affiliateUrl = normalizeHttpsUrl(
-    item.click_url || item.clickUrl || couponUrl,
+  const rawCategory = firstText(
+    basic.category_name, basic.level_one_category_name, item.category_name,
+    item.level_one_category_name, fallbackCategory,
   );
-  const rawCategory = String(
-    item.category_name || item.level_one_category_name || fallbackCategory || "",
-  ).trim();
-  const category = canonicalCategory(`${rawCategory} ${item.title || ""}`) ||
-    canonicalCategory(fallbackCategory) || "top";
-  return {
+  const category = canonicalCategory(`${rawCategory} ${title}`) || canonicalCategory(fallbackCategory) || "top";
+  const price = firstNumber(
+    priceInfo.final_promotion_price, priceInfo.price_after_coupon,
+    item.final_promotion_price, item.price_after_coupon, basic.zk_final_price,
+    item.zk_final_price, basic.reserve_price, item.reserve_price,
+  ) ?? 0;
+  const originalPrice = firstNumber(priceInfo.reserve_price, basic.reserve_price, item.reserve_price);
+  const commissionRate = normalizeCommissionRate(firstNumber(income.commission_rate, item.commission_rate));
+  return compact({
     product_id: productId,
     source: "taobao",
-    title: String(item.short_title || item.title || "淘宝精选商品").trim(),
-    brand: String(item.brand_name || item.shop_title || "淘宝精选").trim(),
+    title,
+    brand: firstText(basic.brand_name, item.brand_name),
     category,
-    price: nonNegativeNumber(
-      item.price_after_coupon || item.zk_final_price || item.reserve_price,
-    ),
-    image_url: normalizeHttpsUrl(item.pict_url || item.white_image || ""),
-    original_price: nonNegativeNumber(
-      item.reserve_price || item.zk_final_price || item.price_after_coupon,
-    ),
-    coupon_amount: nonNegativeNumber(item.coupon_amount),
-    shop_name: String(item.shop_title || item.seller_nick || "").trim(),
+    price,
+    image_url: firstHttps(basic.pict_url, basic.white_image, item.pict_url, item.white_image),
+    original_price: originalPrice != null && originalPrice > price ? originalPrice : undefined,
+    coupon_amount: firstNumber(priceInfo.coupon_amount, item.coupon_amount),
+    shop_name: firstText(basic.shop_title, basic.seller_nick, item.shop_title, item.seller_nick),
+    sales: firstText(
+      basic.annual_vol,
+      basic.volume,
+      item.annual_vol,
+      item.volume,
+      item.tk_total_sales,
+    ) || undefined,
     recommendation_reason: buildRecommendationReason(filters),
     match_explanation: buildMatchExplanation(filters),
-    detail_url: detailUrl,
+    detail_url: firstHttps(basic.item_url, item.item_url, item.url),
     purchase_url: affiliateUrl,
     platform: "taobao",
-    commission_rate: normalizeCommissionRate(item.commission_rate),
+    commission_rate: commissionRate,
     affiliate_url: affiliateUrl,
-    stock_status: "in_stock",
+    stock_status: "unknown",
     pid,
     coupon_url: couponUrl,
     is_mock: false,
-    tags: [filters.style, filters.color, filters.keyword].filter(Boolean),
-  };
+    tags: [filters.style, filters.color, filters.keyword, origin].filter(Boolean),
+  });
 }
 
 function buildRecommendationReason(filters = {}) {
-  const style = String(filters.style || "").trim();
-  const category = String(filters.category || "").trim();
-  return [style, category].filter(Boolean).length > 0
-    ? `根据你的${style || "当前"}穿搭方案推荐${category || "该商品"}`
-    : "根据当前 AI 穿搭方案推荐";
+  const values = [filters.style, filters.scene, filters.category].filter(Boolean);
+  return values.length ? `根据本次${values.join("、")}穿搭方案匹配` : "根据当前 AI 穿搭方案匹配";
 }
 
 function buildMatchExplanation(filters = {}) {
-  const values = [filters.color, filters.bodyType, filters.keyword]
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
-  return values.length > 0
-    ? `匹配需求：${values.join("、")}`
-    : "匹配当前穿搭品类与风格";
+  const values = [filters.gender, filters.color, filters.season, filters.fit, filters.keyword].filter(Boolean);
+  return values.length ? `匹配需求：${values.join("、")}` : "匹配当前穿搭品类与风格";
 }
 
 function normalizeCommissionRate(value) {
-  const rate = nonNegativeNumber(value);
-  if (rate > 100) return Math.min(rate / 10_000, 1);
-  if (rate > 1) return Math.min(rate / 100, 1);
-  return Math.min(rate, 1);
+  if (value == null) return undefined;
+  if (value > 100) return Math.min(value / 10_000, 1);
+  if (value > 1) return Math.min(value / 100, 1);
+  return Math.min(Math.max(value, 0), 1);
 }
 
-function nonNegativeNumber(value) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+function firstNumber(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (value !== "" && value != null && Number.isFinite(number) && number >= 0) return number;
+  }
+  return undefined;
+}
+
+function optionalNumber(value) {
+  return firstNumber(value);
+}
+
+function firstText(...values) {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function firstHttps(...values) {
+  for (const value of values) {
+    const normalized = normalizeHttpsUrl(value);
+    if (normalized) return normalized;
+  }
+  return "";
 }
 
 function normalizeHttpsUrl(value) {
@@ -313,65 +376,51 @@ function normalizeHttpsUrl(value) {
   const candidate = text.startsWith("//") ? `https:${text}` : text;
   try {
     const url = new URL(candidate);
-    return url.protocol === "https:" ? url.toString() : "";
+    return url.protocol === "https:" && url.host ? url.toString() : "";
   } catch (_) {
     return "";
   }
 }
 
-function adzoneIdFromPid(pid) {
-  const parts = pid.split("_").filter(Boolean);
-  return parts.at(-1) || pid;
+function compact(object) {
+  return Object.fromEntries(Object.entries(object).filter(([, value]) =>
+    value !== undefined && value !== null));
 }
 
-function taobaoTimestamp(now = new Date()) {
-  const chinaTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-  return chinaTime.toISOString().slice(0, 19).replace("T", " ");
+function uniqueProducts(products) {
+  const seen = new Set();
+  return products.filter((product) => {
+    const id = product?.product_id || product?.id;
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
 }
 
 function requireConfig(value, field) {
-  const normalized = String(value || "").trim();
-  if (!normalized) {
-    throw new ProductProviderError(`${field} 未配置`, {
-      status: 503,
-      code: "PRODUCT_PROVIDER_NOT_CONFIGURED",
-    });
-  }
-  return normalized;
-}
-
-function requireHttpsUrl(value, field) {
-  const normalized = requireConfig(value, field);
-  let url;
-  try {
-    url = new URL(normalized);
-  } catch (error) {
-    throw new ProductProviderError(`${field} 不是有效地址`, {
-      status: 500,
-      code: "INVALID_PRODUCT_PROVIDER_CONFIG",
-      cause: error,
-    });
-  }
-  if (url.protocol !== "https:") {
-    throw new ProductProviderError(`${field} 必须使用 HTTPS`, {
-      status: 500,
-      code: "INVALID_PRODUCT_PROVIDER_CONFIG",
-    });
-  }
-  return url.toString();
+  const text = String(value || "").trim();
+  if (!text) throw new ProductProviderError(`${field} 未配置`, {status: 503, code: "PRODUCT_PROVIDER_NOT_CONFIGURED"});
+  return text;
 }
 
 function positiveInteger(value, fallback) {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : fallback;
+}
+
+function safeProviderCode(error) {
+  if (error instanceof TaobaoApiError || error instanceof ProductProviderError) return error.code;
+  return "TAOBAO_UNKNOWN_ERROR";
 }
 
 module.exports = {
+  AutoProductProvider,
   MockProductProvider,
   ProductProvider,
   ProductProviderError,
   TaobaoProductProvider,
   createProductProvider,
+  extractTaobaoItems,
   mapTaobaoProduct,
   normalizeHttpsUrl,
   signTaobaoRequest,

@@ -233,6 +233,18 @@ class ProductCard extends StatelessWidget {
                           ),
                         ),
                       ],
+                      if (product.sales case final sales?
+                          when sales.trim().isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          '销量 $sales',
+                          style: const TextStyle(
+                            color: Color(0xFF68625D),
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
                       if (!compact &&
                           product.recommendationReason.isNotEmpty) ...[
                         const SizedBox(height: 8),
@@ -411,7 +423,11 @@ class ProductCard extends StatelessWidget {
                                   size: 15,
                                 ),
                                 label: Text(
-                                  product.isMock ? '商品功能审核中' : '立即购买',
+                                  product.isMock
+                                      ? '商品功能审核中'
+                                      : product.isPurchasable
+                                          ? '立即购买'
+                                          : '推广链接暂未开通',
                                   style: const TextStyle(
                                     fontSize: 10.5,
                                     fontWeight: FontWeight.w800,

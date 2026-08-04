@@ -232,7 +232,11 @@ Future<void> showProductDetailSheet(
                             size: 18,
                           ),
                           label: Text(
-                            product.isMock ? '商品功能审核中' : '立即购买',
+                            product.isMock
+                                ? '商品功能审核中'
+                                : product.isPurchasable
+                                    ? '立即购买'
+                                    : '推广链接暂未开通',
                             style: const TextStyle(fontWeight: FontWeight.w800),
                           ),
                         ),

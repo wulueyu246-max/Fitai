@@ -2,138 +2,194 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  AutoProductProvider,
   MockProductProvider,
   TaobaoProductProvider,
   createProductProvider,
-  signTaobaoRequest,
+  mapTaobaoProduct,
 } = require("../product_provider");
+const {
+  TAOBAO_MATERIAL_SAMPLE_METHOD,
+  TAOBAO_MATERIAL_SEARCH_METHOD,
+  TaobaoApiError,
+} = require("../taobao_client");
 const {TaobaoService} = require("../taobao_service");
+
+function taobaoItem(overrides = {}) {
+  return {
+    item_basic_info: {
+      item_id: "123456",
+      title: "通勤外套",
+      shop_title: "示例店铺",
+      category_name: "外套",
+      pict_url: "//img.example.com/coat.jpg",
+      ...overrides.item_basic_info,
+    },
+    price_promotion_info: {
+      final_promotion_price: "399",
+      ...overrides.price_promotion_info,
+    },
+    publish_info: {...overrides.publish_info},
+  };
+}
+
+function response(method, items) {
+  const key = method === TAOBAO_MATERIAL_SAMPLE_METHOD
+    ? "tbk_dg_material_recommend_response"
+    : "tbk_dg_material_optional_upgrade_response";
+  return {[key]: {result_list: {map_data: items}}};
+}
+
+function providerWithClient(client) {
+  return new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client,
+  });
+}
 
 test("uses MockProductProvider when Taobao credentials are absent", async () => {
   const warnings = [];
   const provider = createProductProvider({
-    environment: {},
-    logger: {warn: (message) => warnings.push(message)},
+    environment: {PRODUCT_PROVIDER: "auto"},
+    logger: {warn: (...args) => warnings.push(args)},
   });
   const products = await provider.recommend({category: "外套"});
-
   assert.ok(provider instanceof MockProductProvider);
   assert.ok(products.length > 0);
-  assert.ok(products.every((product) => product.platform === "mock-catalog"));
   assert.ok(products.every((product) => product.is_mock === true));
   assert.ok(products.every((product) => product.purchase_url === ""));
-  assert.ok(products.every((product) => product.affiliate_url === ""));
-  assert.ok(products.every((product) => product.commission_rate === 0));
-  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0][1].configured, false);
 });
 
-test("maps a signed Taobao response into the stable product contract", async () => {
-  let requestBody = "";
-  const provider = new TaobaoProductProvider({
-    appKey: "test-app-key",
-    appSecret: "test-app-secret",
-    pid: "mm_100_200_300",
-    fetchImpl: async (_url, options) => {
-      requestBody = options.body;
-      return new Response(JSON.stringify({
-        tbk_dg_material_optional_upgrade_response: {
-          result_list: {
-            map_data: [{
-              item_id: "123456",
-              title: "测试通勤外套",
-              shop_title: "测试品牌店",
-              category_name: "外套",
-              zk_final_price: "399.00",
-              pict_url: "//img.example.com/coat.jpg",
-              item_url: "//item.example.com/123456",
-              click_url: "//s.click.taobao.com/affiliate",
-              coupon_share_url: "//uland.taobao.com/coupon",
-              commission_rate: "1550",
-            }],
-          },
+test("16516 material search maps only fields actually returned", async () => {
+  const calls = [];
+  const provider = providerWithClient({
+    call: async (method, params) => {
+      calls.push({method, params});
+      return response(method, [taobaoItem({
+        item_basic_info: {annual_vol: "268"},
+        price_promotion_info: {reserve_price: "499", coupon_amount: "20"},
+        publish_info: {
+          click_url: "//s.click.taobao.com/promotion",
+          income_info: {commission_rate: "1550"},
         },
-      }), {status: 200, headers: {"content-type": "application/json"}});
+      })]);
     },
   });
-
-  const products = await provider.recommend({
-    category: "外套",
-    style: "通勤",
-  });
-  const body = Object.fromEntries(new URLSearchParams(requestBody));
-  const {sign, ...unsigned} = body;
-
-  assert.equal(sign, signTaobaoRequest(unsigned, "test-app-secret"));
-  assert.equal(requestBody.includes("test-app-secret"), false);
+  const products = await provider.recommend({category: "外套", style: "通勤", limit: 1});
+  assert.equal(calls[0].method, TAOBAO_MATERIAL_SEARCH_METHOD);
+  assert.equal(calls[0].params.adzone_id, "300");
   assert.equal(products.length, 1);
-  assert.equal(products[0].product_id, "123456");
-  assert.equal(products[0].source, "taobao");
   assert.equal(products[0].category, "outerwear");
-  assert.equal(products[0].shop_name, "测试品牌店");
-  assert.equal(products[0].purchase_url, "https://s.click.taobao.com/affiliate");
-  assert.equal(products[0].is_mock, false);
+  assert.equal(products[0].purchase_url, "https://s.click.taobao.com/promotion");
+  assert.equal(products[0].original_price, 499);
+  assert.equal(products[0].coupon_amount, 20);
+  assert.equal(products[0].sales, "268");
   assert.equal(products[0].commission_rate, 0.155);
+  assert.equal(products[0].is_mock, false);
 });
 
-test("selects TaobaoProductProvider only with complete credentials", () => {
+test("empty 16516 result uses 27399 material sample before Mock", async () => {
+  const calls = [];
+  const provider = providerWithClient({
+    call: async (method) => {
+      calls.push(method);
+      if (method === TAOBAO_MATERIAL_SEARCH_METHOD) return response(method, []);
+      return response(method, [taobaoItem()]);
+    },
+  });
+  const products = await provider.recommend({category: "outerwear", limit: 1});
+  assert.deepEqual(calls, [TAOBAO_MATERIAL_SEARCH_METHOD, TAOBAO_MATERIAL_SAMPLE_METHOD]);
+  assert.equal(products[0].source, "taobao");
+  assert.ok(products[0].tags.includes("sample"));
+});
+
+test("one Taobao category failure does not block other categories", async () => {
+  const provider = providerWithClient({
+    call: async (method, params) => {
+      if (params.q?.includes("上衣")) throw new TaobaoApiError("denied", {code: "TAOBAO_PERMISSION_DENIED"});
+      if (method === TAOBAO_MATERIAL_SAMPLE_METHOD) return response(method, []);
+      return response(method, [taobaoItem({
+        item_basic_info: {item_id: `item-${params.q}`, category_name: "鞋", title: params.q},
+      })]);
+    },
+  });
+  const products = await provider.recommend({limit: 1});
+  assert.ok(products.some((product) => product.is_mock === true && product.category === "top"));
+  assert.ok(products.some((product) => product.source === "taobao"));
+});
+
+test("missing optional Taobao fields neither throw nor fabricate commerce facts", () => {
+  const product = mapTaobaoProduct({item_id: "minimal", title: "基础上衣"}, {fallbackCategory: "top"});
+  assert.equal(product.purchase_url, "");
+  assert.equal(product.detail_url, "");
+  assert.equal("original_price" in product, false);
+  assert.equal("coupon_amount" in product, false);
+  assert.equal("commission_rate" in product, false);
+  assert.equal("sales" in product, false);
+  assert.equal(product.stock_status, "unknown");
+});
+
+test("non-HTTPS URLs never become purchase links", () => {
+  const product = mapTaobaoProduct({
+    item_id: "unsafe",
+    title: "基础上衣",
+    click_url: "http://example.com/promotion",
+    item_url: "http://example.com/item",
+  }, {fallbackCategory: "top"});
+  assert.equal(product.purchase_url, "");
+  assert.equal(product.detail_url, "");
+});
+
+test("auto mode requires PID and Adzone and gates Taobao with health check", async () => {
+  const client = {call: async (method) => response(method, [taobaoItem()])};
   const provider = createProductProvider({
     environment: {
       PRODUCT_PROVIDER: "auto",
       TAOBAO_APP_KEY: "app-key",
       TAOBAO_APP_SECRET: "app-secret",
       TAOBAO_PID: "mm_1_2_3",
+      TAOBAO_ADZONE_ID: "3",
     },
+    client,
+    logger: {info() {}, warn() {}},
   });
+  assert.ok(provider instanceof AutoProductProvider);
+  const products = await provider.recommend({category: "outerwear", limit: 1});
+  assert.equal(provider.health, true);
+  assert.equal(products[0].source, "taobao");
 
-  assert.ok(provider instanceof TaobaoProductProvider);
-});
-
-test("keeps Mock Provider until affiliate PID is approved", () => {
-  const warnings = [];
-  const provider = createProductProvider({
+  const missingAdzone = createProductProvider({
     environment: {
+      PRODUCT_PROVIDER: "auto",
       TAOBAO_APP_KEY: "app-key",
       TAOBAO_APP_SECRET: "app-secret",
+      TAOBAO_PID: "mm_1_2_3",
     },
-    logger: {warn: (message) => warnings.push(message)},
+    logger: {warn() {}},
   });
-  assert.ok(provider instanceof MockProductProvider);
-  assert.equal(warnings.length, 1);
+  assert.ok(missingAdzone instanceof MockProductProvider);
 });
 
-test("rejects non-HTTPS commerce URLs returned by Taobao", async () => {
-  const provider = new TaobaoProductProvider({
-    appKey: "test-app-key",
-    appSecret: "test-app-secret",
-    pid: "mm_100_200_300",
-    fetchImpl: async () => new Response(JSON.stringify({
-      tbk_dg_material_optional_upgrade_response: {
-        result_list: {
-          map_data: [{
-            item_id: "http-product",
-            title: "测试商品",
-            zk_final_price: "99",
-            pict_url: "http://img.example.com/product.jpg",
-            item_url: "http://item.example.com/product",
-            click_url: "http://click.example.com/product",
-          }],
-        },
-      },
-    }), {status: 200}),
+test("permission failure in auto health check safely falls back to Mock", async () => {
+  const provider = createProductProvider({
+    environment: {
+      PRODUCT_PROVIDER: "auto",
+      TAOBAO_APP_KEY: "app-key",
+      TAOBAO_APP_SECRET: "app-secret",
+      TAOBAO_PID: "mm_1_2_3",
+      TAOBAO_ADZONE_ID: "3",
+    },
+    client: {call: async () => { throw new TaobaoApiError("denied", {code: "TAOBAO_PERMISSION_DENIED"}); }},
+    logger: {warn() {}},
   });
-
-  const [product] = await provider.recommend({category: "T恤"});
-  assert.equal(product.image_url, "");
-  assert.equal(product.detail_url, "");
-  assert.equal(product.affiliate_url, "");
-  assert.equal(product.purchase_url, "");
+  const products = await provider.recommend({category: "top"});
+  assert.equal(provider.health, false);
+  assert.ok(products.every((product) => product.is_mock === true));
 });
 
-test("TaobaoService keeps the search boundary independent of the provider", async () => {
-  const service = new TaobaoService({
-    provider: {recommend: async () => [{product_id: "product-1"}]},
-  });
-  assert.deepEqual(await service.search({keyword: "外套"}), [
-    {product_id: "product-1"},
-  ]);
+test("TaobaoService keeps provider implementation server-side", async () => {
+  const service = new TaobaoService({provider: {recommend: async () => [{product_id: "p1"}]}});
+  assert.deepEqual(await service.search({keyword: "外套"}), [{product_id: "p1"}]);
 });

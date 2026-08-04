@@ -19,6 +19,7 @@ class ProductRecommendation {
     this.originalPrice,
     this.couponAmount = 0,
     this.shopName = '',
+    this.sales,
     this.recommendationReason = '',
     this.matchExplanation = '',
     this.isMock = false,
@@ -87,6 +88,29 @@ class ProductRecommendation {
         'shop_name',
         fallback: _readOptionalString(json, 'shopName', fallback: ''),
       ),
+      sales: _readOptionalString(
+        json,
+        'sales',
+        fallback: _readOptionalString(
+          json,
+          'volume',
+          fallback: _readOptionalString(json, 'annual_vol', fallback: ''),
+        ),
+      ).trim().isEmpty
+          ? null
+          : _readOptionalString(
+              json,
+              'sales',
+              fallback: _readOptionalString(
+                json,
+                'volume',
+                fallback: _readOptionalString(
+                  json,
+                  'annual_vol',
+                  fallback: '',
+                ),
+              ),
+            ),
       recommendationReason: _readOptionalString(
         json,
         'recommendation_reason',
@@ -133,6 +157,7 @@ class ProductRecommendation {
   final double? originalPrice;
   final double couponAmount;
   final String shopName;
+  final String? sales;
   final String recommendationReason;
   final String matchExplanation;
   final bool isMock;
@@ -194,6 +219,7 @@ class ProductRecommendation {
               : originalPrice!.toStringAsFixed(2),
       couponAmount: couponAmount,
       shopName: shopName,
+      sales: sales,
       recommendationReason: recommendationReason,
       matchExplanation: matchExplanation,
       isMock: isMock,
@@ -216,6 +242,7 @@ class ProductRecommendation {
       'original_price': originalPrice,
       'coupon_amount': couponAmount,
       'shop_name': shopName,
+      'sales': sales,
       'recommendation_reason': recommendationReason,
       'match_explanation': matchExplanation,
       'is_mock': isMock,

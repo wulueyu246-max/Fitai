@@ -47,6 +47,7 @@ void main() {
         'original_price',
         'coupon_amount',
         'shop_name',
+        'sales',
         'recommendation_reason',
         'match_explanation',
         'is_mock',

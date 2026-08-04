@@ -92,6 +92,7 @@ class Product {
     this.originalPrice,
     this.couponAmount = 0,
     this.shopName = '',
+    this.sales,
     this.recommendationReason = '',
     this.matchExplanation = '',
     this.isMock = false,
@@ -201,6 +202,17 @@ class Product {
         ['shopName', 'shop_name'],
         fallback: '',
       ),
+      sales: _readOptionalAliasedString(
+        json,
+        ['sales', 'volume', 'annual_vol', 'tk_total_sales'],
+        fallback: '',
+      ).trim().isEmpty
+          ? null
+          : _readOptionalAliasedString(
+              json,
+              ['sales', 'volume', 'annual_vol', 'tk_total_sales'],
+              fallback: '',
+            ),
       recommendationReason: _readOptionalAliasedString(
         json,
         ['recommendationReason', 'recommendation_reason'],
@@ -284,6 +296,7 @@ class Product {
   final String? originalPrice;
   final double couponAmount;
   final String shopName;
+  final String? sales;
   final String recommendationReason;
   final String matchExplanation;
   final bool isMock;
@@ -368,6 +381,7 @@ class Product {
     String? originalPrice,
     double? couponAmount,
     String? shopName,
+    String? sales,
     String? recommendationReason,
     String? matchExplanation,
     bool? isMock,
@@ -400,6 +414,7 @@ class Product {
       originalPrice: originalPrice ?? this.originalPrice,
       couponAmount: couponAmount ?? this.couponAmount,
       shopName: shopName ?? this.shopName,
+      sales: sales ?? this.sales,
       recommendationReason: recommendationReason ?? this.recommendationReason,
       matchExplanation: matchExplanation ?? this.matchExplanation,
       isMock: isMock ?? this.isMock,
@@ -429,6 +444,7 @@ class Product {
       'originalPrice': originalPrice,
       'couponAmount': couponAmount,
       'shopName': shopName,
+      'sales': sales,
       'recommendationReason': recommendationReason,
       'matchExplanation': matchExplanation,
       'isMock': isMock,

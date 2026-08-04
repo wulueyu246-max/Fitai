@@ -11,6 +11,7 @@ void main() {
     bool isMock = false,
     String purchaseUrl = 'https://shop.example.com/item',
     String imageUrl = 'assets/images/products/structured_shirt.jpg',
+    String? sales,
   }) {
     return Product(
       id: id,
@@ -33,6 +34,7 @@ void main() {
       originalPrice: '399',
       couponAmount: 20,
       shopName: '测试店铺',
+      sales: sales,
       recommendationReason: '根据通勤场景与简约风格推荐',
       matchExplanation: '匹配上衣、森林绿和合体版型',
       isMock: isMock,
@@ -113,6 +115,52 @@ void main() {
       find.byKey(const Key('buy-product-1')),
     );
     expect(button.onPressed, isNull);
+  });
+
+  testWidgets('real product without promotion URL is clearly disabled', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: SizedBox(
+              width: 390,
+              child: ProductCard(
+                product: product(purchaseUrl: ''),
+                selected: false,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('推广链接暂未开通'), findsOneWidget);
+    final button = tester.widget<FilledButton>(
+      find.byKey(const Key('buy-product-1')),
+    );
+    expect(button.onPressed, isNull);
+  });
+
+  testWidgets('real product displays sales only when supplied', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: SizedBox(
+              width: 390,
+              child: ProductCard(
+                product: product(sales: '268'),
+                selected: false,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(find.text('销量 268'), findsOneWidget);
+    expect(find.text('立即购买'), findsOneWidget);
   });
 
   testWidgets('product recommendation states support loading empty and retry', (
