@@ -60,6 +60,28 @@ test("uses MockProductProvider when Taobao credentials are absent", async () => 
   assert.ok(products.every((product) => product.is_mock === true));
   assert.ok(products.every((product) => product.purchase_url === ""));
   assert.equal(warnings[0][1].configured, false);
+  assert.deepEqual(warnings[0][1].missingVariables, [
+    "TAOBAO_APP_KEY",
+    "TAOBAO_APP_SECRET",
+    "TAOBAO_PID",
+    "TAOBAO_ADZONE_ID",
+  ]);
+});
+
+test("missing secret is named safely without logging configured values", () => {
+  const warnings = [];
+  createProductProvider({
+    environment: {
+      PRODUCT_PROVIDER: "auto",
+      TAOBAO_APP_KEY: "sensitive-app-key-value",
+      TAOBAO_PID: "mm_1_2_3",
+      TAOBAO_ADZONE_ID: "3",
+    },
+    logger: {info() {}, warn: (...args) => warnings.push(args)},
+  });
+  assert.deepEqual(warnings[0][1].missingVariables, ["TAOBAO_APP_SECRET"]);
+  assert.equal(JSON.stringify(warnings).includes("mm_1_2_3"), false);
+  assert.equal(JSON.stringify(warnings).includes("sensitive-app-key-value"), false);
 });
 
 test("16516 material search maps only fields actually returned", async () => {

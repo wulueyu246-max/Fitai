@@ -212,10 +212,24 @@ function createProductProvider({environment = process.env, catalog, logger = con
     pid: String(environment.TAOBAO_PID || "").trim(),
     adzoneId: String(environment.TAOBAO_ADZONE_ID || "").trim(),
   };
-  const configured = Object.values(values).every(Boolean);
+  const requiredVariables = {
+    TAOBAO_APP_KEY: values.appKey,
+    TAOBAO_APP_SECRET: values.appSecret,
+    TAOBAO_PID: values.pid,
+    TAOBAO_ADZONE_ID: values.adzoneId,
+  };
+  const missingVariables = Object.entries(requiredVariables)
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
+  const configured = missingVariables.length === 0;
   logger.info?.("淘宝 Provider 配置状态", {configured, mode});
   if (mode === "mock" || !configured) {
-    if (mode !== "mock") logger.warn?.("淘宝 Provider 未完整配置，使用 Mock", {configured: false});
+    if (mode !== "mock") {
+      logger.warn?.("淘宝 Provider 未完整配置，使用 Mock", {
+        configured: false,
+        missingVariables,
+      });
+    }
     return new MockProductProvider({catalog: productCatalog});
   }
   const placementError = validatePlacement(values.pid, values.adzoneId);
