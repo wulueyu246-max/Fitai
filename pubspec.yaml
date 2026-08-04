@@ -1,7 +1,7 @@
 name: fit_ai
 description: Shupi - AI intelligent styling assistant.
 publish_to: "none"
-version: 1.5.0+5
+version: 1.0.0+1
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
