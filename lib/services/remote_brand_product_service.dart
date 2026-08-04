@@ -1,9 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
-import '../config/app_config.dart';
+import '../core/logging/app_logger.dart';
 import '../models/product.dart';
 import 'brand_product_service.dart';
 
@@ -19,7 +20,7 @@ class RemoteBrandProductService implements BrandProductService {
       'AFFILIATE_CHANNEL_ID',
       defaultValue: 'fitai-commercial-test',
     ),
-    this.timeout = AppConfig.backendTimeout,
+    this.timeout = const Duration(seconds: 30),
   }) : _client = client ?? http.Client();
 
   final Uri catalogEndpoint;
@@ -34,12 +35,9 @@ class RemoteBrandProductService implements BrandProductService {
       'affiliateChannelId': affiliateChannelId,
       if (brand != null && brand.trim().isNotEmpty) 'brand': brand.trim(),
     };
-    final response = await _client
-        .get(
-          catalogEndpoint.replace(queryParameters: query),
-          headers: _headers,
-        )
-        .timeout(timeout);
+    final response = await _get(
+      catalogEndpoint.replace(queryParameters: query),
+    );
     final payload = _decode(response);
     final values = _extractProducts(payload);
     _debugProductsLength(values.length);
@@ -68,8 +66,7 @@ class RemoteBrandProductService implements BrandProductService {
         'affiliateChannelId': affiliateChannelId,
       },
     );
-    final response =
-        await _client.get(endpoint, headers: _headers).timeout(timeout);
+    final response = await _get(endpoint);
     if (response.statusCode == 404) {
       return null;
     }
@@ -109,6 +106,43 @@ class RemoteBrandProductService implements BrandProductService {
         'X-FitAI-Affiliate-Channel': affiliateChannelId,
         'X-Shupi-Affiliate-Channel': affiliateChannelId,
       };
+
+  Future<http.Response> _get(Uri endpoint) async {
+    final stopwatch = Stopwatch()..start();
+    Object? lastError;
+    for (var attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        final response =
+            await _client.get(endpoint, headers: _headers).timeout(timeout);
+        AppLogger.instance.info(
+          'product_http_completed',
+          metadata: {
+            'statusCode': response.statusCode,
+            'durationMs': stopwatch.elapsedMilliseconds,
+            'attempt': attempt,
+            'requestId': response.headers['x-request-id'],
+            'serverTiming': response.headers['server-timing'] ?? '',
+          },
+        );
+        return response;
+      } on TimeoutException catch (error) {
+        lastError = error;
+      } on http.ClientException catch (error) {
+        lastError = error;
+      }
+    }
+    AppLogger.instance.error(
+      'product_http_failed',
+      error: lastError,
+      metadata: {
+        'durationMs': stopwatch.elapsedMilliseconds,
+        'attempts': 2,
+      },
+    );
+    throw ProductSourceException(
+      lastError is TimeoutException ? '商品匹配响应超时，请重试' : '商品服务暂时无法连接，请重试',
+    );
+  }
 
   Product _parseProduct(Map<String, dynamic> json) {
     final product = Product.fromJson(json);

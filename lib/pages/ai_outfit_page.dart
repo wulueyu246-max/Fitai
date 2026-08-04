@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../core/logging/app_logger.dart';
+import '../components/ai_generation_loading_panel.dart';
 import '../components/ai_outfit_report.dart';
 import '../components/outfit_plan_card.dart';
 import '../components/outfit_recommendation_card.dart';
@@ -14,6 +15,7 @@ import '../models/ai_recommendation_record.dart';
 import '../models/app_location.dart';
 import '../models/outfit.dart';
 import '../models/outfit_request.dart';
+import '../models/outfit_generation_state.dart';
 import '../models/product.dart';
 import '../models/product_analytics.dart';
 import '../models/recommendation_feedback.dart';
@@ -23,6 +25,7 @@ import '../repositories/outfit_repository.dart';
 import '../repositories/wardrobe_repository.dart';
 import '../services/affiliate_service.dart';
 import '../services/analytics_service.dart';
+import '../services/backend_warmup_service.dart';
 import '../services/favorite_service.dart';
 import '../services/feedback_event_service.dart';
 import '../services/body_profile_service.dart';
@@ -64,6 +67,7 @@ class AiOutfitPage extends StatefulWidget {
     this.locationService,
     this.weatherService,
     this.photoStorageService,
+    this.backendWarmupService,
     this.onTryOn,
   });
 
@@ -84,6 +88,7 @@ class AiOutfitPage extends StatefulWidget {
   final LocationService? locationService;
   final WeatherService? weatherService;
   final PhotoStorageService? photoStorageService;
+  final BackendWarmupService? backendWarmupService;
   final ValueChanged<TryOnRequest>? onTryOn;
 
   @override
@@ -96,6 +101,8 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
   final TextEditingController _weightController = TextEditingController();
 
   final TextEditingController _requestController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  final GlobalKey _resultKey = GlobalKey();
   static const _sceneOptions = ['日常', '工作', '约会', '聚会', '旅行'];
   static const _photoRoleLabels = {
     'front': '正面照',
@@ -110,6 +117,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
 
   XFile? _backImage;
   final Map<String, Uint8List> _previewBytes = {};
+  final Map<String, String> _encodedImages = {};
 
   late final OutfitViewModel _viewModel;
   late final ImageDataService _imageDataService;
@@ -124,6 +132,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
   late final LocationService _locationService;
   late final WeatherService _weatherService;
   late final PhotoStorageService _photoStorageService;
+  BackendWarmupService? _backendWarmupService;
   static const WeatherOutfitAdvisor _weatherAdvisor = WeatherOutfitAdvisor();
   final FavoriteService _favoriteService = FavoriteService.instance;
   final RecommendationFeedbackService _feedbackService =
@@ -138,10 +147,16 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
   bool _isLoadingProducts = false;
   String? _productLoadError;
   bool _isRegeneratingPlan = false;
-  bool _isGenerating = false;
+  OutfitGenerationState _generationState = OutfitGenerationState.idle;
+  String _generationDetail = '';
+  Timer? _stageTimer;
+  int _generationSequence = 0;
+  int _photoReadDurationMs = 0;
   String? _tryingOnProductId;
   WeatherSnapshot? _weather;
   AppLocation? _location;
+
+  bool get _isGenerating => _generationState.isBusy;
 
   @override
   void initState() {
@@ -174,6 +189,8 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
     _weatherService = widget.weatherService ?? WeatherService();
     _photoStorageService = widget.photoStorageService ??
         PhotoStorageService.fromEnvironment(_session);
+    _backendWarmupService = widget.backendWarmupService ??
+        (widget.repository == null ? BackendWarmupService() : null);
     _favoriteService
       ..addListener(_onFavoritesChanged)
       ..ensureLoaded();
@@ -210,6 +227,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       unawaited(MemoryImage(bytes).evict());
     }
     _previewBytes.clear();
+    _encodedImages.clear();
     _frontImage = null;
     _sideImage = null;
     _backImage = null;
@@ -219,6 +237,9 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
     _weightController.dispose();
 
     _requestController.dispose();
+    _scrollController.dispose();
+    _stageTimer?.cancel();
+    _backendWarmupService?.close();
 
     _viewModel.dispose();
     _favoriteService.removeListener(_onFavoritesChanged);
@@ -258,6 +279,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
   }
 
   Future<void> _handlePickedImages(List<XFile> pickedImages) async {
+    final readStopwatch = Stopwatch()..start();
     final wasLimited = pickedImages.length > 3;
     final selectedImages = pickedImages.take(3).toList(growable: false);
     if (wasLimited && mounted) {
@@ -284,6 +306,15 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       }
       return;
     }
+
+    _photoReadDurationMs = readStopwatch.elapsedMilliseconds;
+    AppLogger.instance.info(
+      'photo_read_completed',
+      metadata: {
+        'durationMs': _photoReadDurationMs,
+        'imageCount': candidates.length,
+      },
+    );
 
     if (!mounted || candidates.isEmpty) return;
 
@@ -419,6 +450,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
     }
 
     setState(() {
+      _encodedImages.clear();
       _previewBytes
         ..clear()
         ..addEntries(
@@ -438,10 +470,93 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       unawaited(MemoryImage(bytes).evict());
     }
     setState(() {
+      _encodedImages.remove(role);
       if (role == 'front') _frontImage = null;
       if (role == 'side') _sideImage = null;
       if (role == 'back') _backImage = null;
     });
+  }
+
+  void _setGenerationState(
+    OutfitGenerationState state, {
+    String? detail,
+  }) {
+    if (!mounted) {
+      _generationState = state;
+      _generationDetail = detail ?? state.label;
+      return;
+    }
+    setState(() {
+      _generationState = state;
+      _generationDetail = detail ?? state.label;
+    });
+  }
+
+  void _startGenerationStageTicker() {
+    _stageTimer?.cancel();
+    var index = 0;
+    const messages = [
+      '正在分析身材与需求',
+      '正在生成穿搭方案',
+      '正在检查搭配细节',
+      '即将完成',
+    ];
+    _stageTimer = Timer.periodic(const Duration(seconds: 8), (_) {
+      if (!mounted ||
+          _generationState != OutfitGenerationState.generatingOutfit) {
+        return;
+      }
+      if (index < messages.length - 1) index += 1;
+      setState(() => _generationDetail = messages[index]);
+    });
+  }
+
+  void _stopGenerationStageTicker() {
+    _stageTimer?.cancel();
+    _stageTimer = null;
+  }
+
+  void _scrollToResult() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final resultContext = _resultKey.currentContext;
+      if (resultContext != null) {
+        Scrollable.ensureVisible(
+          resultContext,
+          duration: const Duration(milliseconds: 480),
+          curve: Curves.easeOutCubic,
+          alignment: 0.04,
+        );
+      }
+    });
+  }
+
+  Future<void> _storePhotosWithoutBlocking(
+    Map<String, String> images,
+    int generationId,
+  ) async {
+    final stopwatch = Stopwatch()..start();
+    try {
+      await _photoStorageService.storePhotos(images);
+      AppLogger.instance.info(
+        'photo_upload_completed',
+        metadata: {
+          'generationId': generationId,
+          'durationMs': stopwatch.elapsedMilliseconds,
+          'imageCount': images.length,
+        },
+      );
+    } catch (error, stackTrace) {
+      AppLogger.instance.error(
+        'photo_upload_failed',
+        error: error,
+        stackTrace: stackTrace,
+        metadata: {
+          'generationId': generationId,
+          'durationMs': stopwatch.elapsedMilliseconds,
+        },
+      );
+    }
   }
 
   Future<void> _generateOutfit() async {
@@ -449,8 +564,18 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       return;
     }
 
-    setState(() => _isGenerating = true);
+    final generationId = ++_generationSequence;
+    final totalStopwatch = Stopwatch()..start();
+    var handedOffToProducts = false;
+    _setGenerationState(OutfitGenerationState.preparingImages);
     FocusScope.of(context).unfocus();
+    AppLogger.instance.info(
+      'outfit_request_started',
+      metadata: {
+        'generationId': generationId,
+        'requestStartedAt': DateTime.now().toUtc().toIso8601String(),
+      },
+    );
 
     try {
       final height = double.tryParse(_heightController.text.trim());
@@ -468,12 +593,19 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
             content: Text("请填写有效的身高体重，并上传正面全身照"),
           ),
         );
+        _setGenerationState(OutfitGenerationState.idle);
         return;
       }
 
       if (!await _ensurePhotoConsent()) {
+        _setGenerationState(OutfitGenerationState.idle);
         return;
       }
+
+      final warmupFuture = _backendWarmupService?.wake() ??
+          Future.value(
+            const BackendWarmupResult(durationMs: 0, isReady: true),
+          );
 
       final selectedImages = <String, XFile>{
         "front": _frontImage!,
@@ -491,11 +623,33 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         for (final role in selectedImages.keys)
           if (_previewBytes[role] case final bytes?) role: bytes,
       };
-      final images = await _imageDataService.encodeImages(
-        selectedImages,
-        cachedBytes: selectedBytes,
+      _setGenerationState(OutfitGenerationState.compressingImages);
+      final imagePreparation = Stopwatch()..start();
+      final canReuseEncoded = _encodedImages.length == selectedImages.length &&
+          selectedImages.keys.every(_encodedImages.containsKey);
+      final images = canReuseEncoded
+          ? Map<String, String>.from(_encodedImages)
+          : await _imageDataService.encodeImages(
+              selectedImages,
+              cachedBytes: selectedBytes,
+            );
+      if (!canReuseEncoded) {
+        _encodedImages
+          ..clear()
+          ..addAll(images);
+      }
+      AppLogger.instance.info(
+        'photo_preparation_completed',
+        metadata: {
+          'generationId': generationId,
+          'readDurationMs': _photoReadDurationMs,
+          'compressionDurationMs': imagePreparation.elapsedMilliseconds,
+          'imageCount': images.length,
+          'reusedPreparedImages': canReuseEncoded,
+        },
       );
-      await _photoStorageService.storePhotos(images);
+      _setGenerationState(OutfitGenerationState.uploading);
+      unawaited(_storePhotosWithoutBlocking(images, generationId));
       unawaited(
         _analytics.track(
           'photo_upload_completed',
@@ -526,7 +680,22 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
             .join(' '),
         images: images,
       );
+      _setGenerationState(OutfitGenerationState.wakingServer);
+      final warmup = await warmupFuture;
+      AppLogger.instance.info(
+        'backend_warmup_completed',
+        metadata: {
+          'generationId': generationId,
+          'durationMs': warmup.durationMs,
+          'statusCode': warmup.statusCode,
+          'ready': warmup.isReady,
+        },
+      );
+      _setGenerationState(OutfitGenerationState.generatingOutfit);
+      _startGenerationStageTicker();
+      final aiStopwatch = Stopwatch()..start();
       final succeeded = await _viewModel.generateOutfit(outfitRequest);
+      _stopGenerationStageTicker();
 
       if (!mounted) {
         return;
@@ -540,9 +709,36 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
             properties: {'scene': _scene},
           ),
         );
-        _lastRequest = outfitRequest;
-        await _loadProductRecommendations(outfitRequest);
-        _requestController.clear();
+        setState(() {
+          _lastRequest = outfitRequest;
+          _requestController.clear();
+          _generationState = OutfitGenerationState.loadingProducts;
+          _generationDetail = OutfitGenerationState.loadingProducts.label;
+          _isLoadingProducts = true;
+          _productLoadError = null;
+        });
+        final aiCompletedAtMs = totalStopwatch.elapsedMilliseconds;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          AppLogger.instance.info(
+            'outfit_result_rendered',
+            metadata: {
+              'generationId': generationId,
+              'aiDurationMs': aiStopwatch.elapsedMilliseconds,
+              'flutterRenderDurationMs':
+                  totalStopwatch.elapsedMilliseconds - aiCompletedAtMs,
+              'totalDurationMs': totalStopwatch.elapsedMilliseconds,
+            },
+          );
+        });
+        _scrollToResult();
+        handedOffToProducts = true;
+        unawaited(
+          _loadProductRecommendations(
+            outfitRequest,
+            generationId: generationId,
+            totalStopwatch: totalStopwatch,
+          ),
+        );
       } else {
         final requestId = _viewModel.requestId;
         final supportReference = requestId == null ? "" : "\n请求编号：$requestId";
@@ -552,6 +748,12 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
               "${_viewModel.errorMessage ?? "生成失败，请稍后重试"}$supportReference",
             ),
           ),
+        );
+        final isTimeout = (_viewModel.errorMessage ?? '').contains('超时');
+        _setGenerationState(
+          isTimeout
+              ? OutfitGenerationState.timeout
+              : OutfitGenerationState.error,
         );
       }
     } on ImageDataException catch (error, stackTrace) {
@@ -569,6 +771,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(error.message)),
       );
+      _setGenerationState(OutfitGenerationState.error);
     } catch (error, stackTrace) {
       AppLogger.instance.error(
         'outfit_generation_failed',
@@ -583,11 +786,18 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("生成失败，请稍后重试")),
       );
+      _setGenerationState(OutfitGenerationState.error);
     } finally {
-      if (mounted) {
-        setState(() => _isGenerating = false);
-      } else {
-        _isGenerating = false;
+      if (!handedOffToProducts) {
+        _stopGenerationStageTicker();
+        AppLogger.instance.info(
+          'outfit_request_finished',
+          metadata: {
+            'generationId': generationId,
+            'totalDurationMs': totalStopwatch.elapsedMilliseconds,
+            'state': _generationState.name,
+          },
+        );
       }
     }
   }
@@ -611,19 +821,26 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
     return granted == true;
   }
 
-  Future<void> _loadProductRecommendations(OutfitRequest request) async {
+  Future<void> _loadProductRecommendations(
+    OutfitRequest request, {
+    required int generationId,
+    required Stopwatch totalStopwatch,
+  }) async {
     final analysis = _viewModel.analysis;
 
-    if (analysis == null) {
+    if (analysis == null || generationId != _generationSequence) {
       return;
     }
 
     setState(() {
+      _generationState = OutfitGenerationState.loadingProducts;
+      _generationDetail = OutfitGenerationState.loadingProducts.label;
       _isLoadingProducts = true;
       _productLoadError = null;
       _selectedProductIds = {};
     });
 
+    final productStopwatch = Stopwatch()..start();
     late final List<Product> products;
     try {
       final catalogProducts = analysis.productRecommendations.isNotEmpty
@@ -646,7 +863,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         throw StateError('商品接口返回的 products 数组为空');
       }
 
-      if (!mounted) {
+      if (!mounted || generationId != _generationSequence) {
         return;
       }
 
@@ -664,7 +881,18 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         _selectedProductIds = selectedProductIds;
         _isLoadingProducts = false;
         _productLoadError = null;
+        _generationState = OutfitGenerationState.success;
+        _generationDetail = OutfitGenerationState.success.label;
       });
+      AppLogger.instance.info(
+        'product_recommendations_completed',
+        metadata: {
+          'generationId': generationId,
+          'durationMs': productStopwatch.elapsedMilliseconds,
+          'productCount': products.length,
+          'totalDurationMs': totalStopwatch.elapsedMilliseconds,
+        },
+      );
     } catch (error, stackTrace) {
       AppLogger.instance.error(
         'product_recommendations_failed',
@@ -672,7 +900,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         stackTrace: stackTrace,
         metadata: {'message': error.toString()},
       );
-      if (!mounted) {
+      if (!mounted || generationId != _generationSequence) {
         return;
       }
 
@@ -680,13 +908,23 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
           _viewModel.analysis?.recommendedProducts ?? const <Product>[];
       setState(() {
         _isLoadingProducts = false;
-        _productLoadError = existingProducts.isEmpty ? '商品匹配失败，请检查网络后重试' : null;
+        _productLoadError = existingProducts.isEmpty ? '商品匹配暂时失败' : null;
+        _generationState = OutfitGenerationState.partialSuccess;
+        _generationDetail = OutfitGenerationState.partialSuccess.label;
       });
       if (existingProducts.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('商品匹配失败，请稍后重试')),
+          const SnackBar(content: Text('商品匹配暂时失败，AI 穿搭方案已保留')),
         );
       }
+      AppLogger.instance.warning(
+        'outfit_partial_success',
+        metadata: {
+          'generationId': generationId,
+          'productDurationMs': productStopwatch.elapsedMilliseconds,
+          'totalDurationMs': totalStopwatch.elapsedMilliseconds,
+        },
+      );
       return;
     }
 
@@ -745,6 +983,19 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         },
       );
     }
+  }
+
+  void _retryProductRecommendations() {
+    final request = _lastRequest;
+    if (request == null || _isLoadingProducts) return;
+    final generationId = ++_generationSequence;
+    unawaited(
+      _loadProductRecommendations(
+        request,
+        generationId: generationId,
+        totalStopwatch: Stopwatch()..start(),
+      ),
+    );
   }
 
   void _toggleProduct(Product product) {
@@ -1376,16 +1627,80 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
             borderRadius: BorderRadius.circular(20),
           ),
         ),
-        child: Text(
-          isBusy ? "AI 正在分析你的身体模型..." : "✦ 生成我的穿搭方案",
-          style: const TextStyle(
-            fontSize: 16,
-            color: Colors.white,
-            fontWeight: FontWeight.w600,
-          ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (isBusy) ...[
+              const SizedBox(
+                width: 19,
+                height: 19,
+                child: CircularProgressIndicator(
+                  key: Key('generate-button-spinner'),
+                  strokeWidth: 2.2,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(width: 10),
+            ],
+            Flexible(
+              child: Text(
+                isBusy ? _generationState.label : '✦ 生成我的穿搭方案',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 16,
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
+  }
+
+  Widget _buildGenerationFeedback() {
+    if (_generationState.isBusy &&
+        _generationState != OutfitGenerationState.loadingProducts) {
+      return AiGenerationLoadingPanel(
+        key: ValueKey(_generationState),
+        state: _generationState,
+        detailMessage: _generationDetail,
+      );
+    }
+    if (_generationState == OutfitGenerationState.timeout ||
+        _generationState == OutfitGenerationState.error) {
+      return Container(
+        key: Key('generation-${_generationState.name}'),
+        width: double.infinity,
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFF6ED),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFFE5CDB7)),
+        ),
+        child: Column(
+          children: [
+            Text(
+              _generationState.label,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Color(0xFF7B4E35),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              key: const Key('retry-outfit-generation'),
+              onPressed: _generateOutfit,
+              icon: const Icon(Icons.refresh_rounded),
+              label: const Text('重新生成'),
+            ),
+          ],
+        ),
+      );
+    }
+    return const SizedBox.shrink();
   }
 
   // AI结果展示
@@ -1402,139 +1717,147 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       analysis: analysis,
     );
 
-    return Column(
-      key: ValueKey('outfit-result-${analysis.hashCode}'),
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        PersonalOutfitHeader(
-          imageBytes: _previewBytes['front'],
-          scene: request.scene,
-        ),
-        const SizedBox(height: 16),
-        if (analysis.isMock) ...[
-          Container(
-            width: double.infinity,
-            margin: const EdgeInsets.only(bottom: 16),
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: const Color(0xFFFFF3D9),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFFF0D495)),
-            ),
-            child: const Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(
-                  Icons.science_outlined,
-                  size: 20,
-                  color: Color(0xFF8A641D),
-                ),
-                SizedBox(width: 9),
-                Expanded(
-                  child: Text(
-                    "演示模式：当前网络无法连接真实视觉模型，以下为本地 Mock 建议，未对照片进行真实识别。",
-                    style: TextStyle(
-                      color: Color(0xFF76571F),
-                      fontSize: 12.5,
-                      height: 1.5,
-                      fontWeight: FontWeight.w600,
+    return Container(
+      key: _resultKey,
+      child: Column(
+        key: ValueKey('outfit-result-${analysis.hashCode}'),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          PersonalOutfitHeader(
+            imageBytes: _previewBytes['front'],
+            scene: request.scene,
+          ),
+          const SizedBox(height: 16),
+          if (analysis.isMock) ...[
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(bottom: 16),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF3D9),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: const Color(0xFFF0D495)),
+              ),
+              child: const Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.science_outlined,
+                    size: 20,
+                    color: Color(0xFF8A641D),
+                  ),
+                  SizedBox(width: 9),
+                  Expanded(
+                    child: Text(
+                      "演示模式：当前网络无法连接真实视觉模型，以下为本地 Mock 建议，未对照片进行真实识别。",
+                      style: TextStyle(
+                        color: Color(0xFF76571F),
+                        fontSize: 12.5,
+                        height: 1.5,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
+            ),
+          ],
+          AiOutfitReport(analysis: analysis, profile: profile),
+          const SizedBox(height: 18),
+          if (analysis.outfitPlan case final plan?) ...[
+            const Text(
+              '今日推荐 Look',
+              style: TextStyle(
+                color: Color(0xFF211F1C),
+                fontSize: 21,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 12),
+            OutfitPlanCard(
+              plan: plan,
+              favorite: _favoriteService.isOutfitPlanFavorite(plan.id),
+              onFavorite: _toggleFavoritePlan,
+              onTryOn: widget.onTryOn == null ? null : _openVirtualTryOn,
+              onProductTap: _showProductDetails,
+              onReplaceCategory: _replacePlanProduct,
+              onRegenerate: _regenerateOutfitPlan,
+              isRegenerating: _isRegeneratingPlan,
+              isTryOnLoading: _tryingOnProductId != null,
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                key: const Key('share-ai-outfit-plan'),
+                onPressed: () {
+                  unawaited(
+                    _analytics.track(
+                      'outfit_share_opened',
+                      userId: _session.account?.id ?? 'local-demo-user',
+                      properties: {'outfitPlanId': plan.id},
+                    ),
+                  );
+                  showShareOutfitSheet(
+                    context,
+                    outfitPlan: plan,
+                    userName: _session.account?.displayName ?? '我的树皮穿搭',
+                    avatarBase64: _session.account?.avatarBase64,
+                  );
+                },
+                icon: const Icon(Icons.ios_share_rounded),
+                label: const Text('生成并分享 AI 穿搭卡片'),
+              ),
+            ),
+            const SizedBox(height: 18),
+          ],
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 320),
+            child: OutfitRecommendationCard(
+              key: ValueKey(
+                _isLoadingProducts ? 'product-loading' : 'product-content',
+              ),
+              products: analysis.recommendedProducts,
+              selectedProductIds: _selectedProductIds,
+              onProductTap: _toggleProduct,
+              onViewDetails: _showProductDetails,
+              onProductTryOn: widget.onTryOn == null ? null : _openVirtualTryOn,
+              favoriteProductIds: _favoriteService.productIds,
+              onFavorite: _toggleFavoriteProduct,
+              onTryOn: widget.onTryOn == null || _selectedProductIds.isEmpty
+                  ? null
+                  : _openVirtualTryOn,
+              isLoading: _isLoadingProducts,
+              errorMessage: _productLoadError,
+              onRetry:
+                  _lastRequest == null ? null : _retryProductRecommendations,
+              tryingOnProductId: _tryingOnProductId,
             ),
           ),
-        ],
-        AiOutfitReport(analysis: analysis, profile: profile),
-        const SizedBox(height: 18),
-        if (analysis.outfitPlan case final plan?) ...[
-          const Text(
-            '今日推荐 Look',
-            style: TextStyle(
-              color: Color(0xFF211F1C),
-              fontSize: 21,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(height: 12),
-          OutfitPlanCard(
-            plan: plan,
-            favorite: _favoriteService.isOutfitPlanFavorite(plan.id),
-            onFavorite: _toggleFavoritePlan,
-            onTryOn: widget.onTryOn == null ? null : _openVirtualTryOn,
-            onProductTap: _showProductDetails,
-            onReplaceCategory: _replacePlanProduct,
-            onRegenerate: _regenerateOutfitPlan,
-            isRegenerating: _isRegeneratingPlan,
-            isTryOnLoading: _tryingOnProductId != null,
-          ),
-          const SizedBox(height: 10),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              key: const Key('share-ai-outfit-plan'),
-              onPressed: () {
-                unawaited(
-                  _analytics.track(
-                    'outfit_share_opened',
-                    userId: _session.account?.id ?? 'local-demo-user',
-                    properties: {'outfitPlanId': plan.id},
-                  ),
+          if (analysis.outfitPlan case final plan?) ...[
+            const SizedBox(height: 18),
+            RecommendationFeedbackCard(
+              key: ValueKey('feedback-${plan.id}'),
+              submitted: _submittedFeedbackPlanIds.contains(plan.id),
+              onSubmit: (input) async {
+                await _feedbackEventService.record(
+                  userId: _session.account?.id ?? 'local-demo-user',
+                  outfitPlanId: plan.id,
+                  scene: request.scene,
+                  satisfaction: input.satisfaction,
+                  rating: input.rating,
+                  willingToBuy: input.willingToBuy,
+                  noPurchaseReason: input.noPurchaseReason,
                 );
-                showShareOutfitSheet(
-                  context,
-                  outfitPlan: plan,
-                  userName: _session.account?.displayName ?? '我的树皮穿搭',
-                  avatarBase64: _session.account?.avatarBase64,
-                );
+                if (!mounted) {
+                  return;
+                }
+                setState(() => _submittedFeedbackPlanIds.add(plan.id));
               },
-              icon: const Icon(Icons.ios_share_rounded),
-              label: const Text('生成并分享 AI 穿搭卡片'),
             ),
-          ),
-          const SizedBox(height: 18),
+          ],
         ],
-        OutfitRecommendationCard(
-          products: analysis.recommendedProducts,
-          selectedProductIds: _selectedProductIds,
-          onProductTap: _toggleProduct,
-          onViewDetails: _showProductDetails,
-          onProductTryOn: widget.onTryOn == null ? null : _openVirtualTryOn,
-          favoriteProductIds: _favoriteService.productIds,
-          onFavorite: _toggleFavoriteProduct,
-          onTryOn: widget.onTryOn == null || _selectedProductIds.isEmpty
-              ? null
-              : _openVirtualTryOn,
-          isLoading: _isLoadingProducts,
-          errorMessage: _productLoadError,
-          onRetry: _lastRequest == null
-              ? null
-              : () => _loadProductRecommendations(_lastRequest!),
-          tryingOnProductId: _tryingOnProductId,
-        ),
-        if (analysis.outfitPlan case final plan?) ...[
-          const SizedBox(height: 18),
-          RecommendationFeedbackCard(
-            key: ValueKey('feedback-${plan.id}'),
-            submitted: _submittedFeedbackPlanIds.contains(plan.id),
-            onSubmit: (input) async {
-              await _feedbackEventService.record(
-                userId: _session.account?.id ?? 'local-demo-user',
-                outfitPlanId: plan.id,
-                scene: request.scene,
-                satisfaction: input.satisfaction,
-                rating: input.rating,
-                willingToBuy: input.willingToBuy,
-                noPurchaseReason: input.noPurchaseReason,
-              );
-              if (!mounted) {
-                return;
-              }
-              setState(() => _submittedFeedbackPlanIds.add(plan.id));
-            },
-          ),
-        ],
-      ],
+      ),
     );
   }
 
@@ -1588,6 +1911,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
           backgroundColor: const Color(0xffF8F7F3),
           body: SafeArea(
             child: SingleChildScrollView(
+              controller: _scrollController,
               keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               padding: EdgeInsets.fromLTRB(
                 compact ? 16 : 24,
@@ -1637,7 +1961,12 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
                             : "可以开始生成穿搭方案",
                         child: _buildGenerateButton(),
                       ),
-                      const SizedBox(height: 40),
+                      const SizedBox(height: 16),
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 240),
+                        child: _buildGenerationFeedback(),
+                      ),
+                      const SizedBox(height: 24),
                       AnimatedSwitcher(
                         duration: const Duration(milliseconds: 360),
                         switchInCurve: Curves.easeOutCubic,

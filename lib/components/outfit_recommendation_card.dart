@@ -89,23 +89,7 @@ class OutfitRecommendationCard extends StatelessWidget {
           ),
           const SizedBox(height: 18),
           if (isLoading)
-            const Padding(
-              key: Key('product-recommendation-loading'),
-              padding: EdgeInsets.symmetric(vertical: 54),
-              child: Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    CircularProgressIndicator(strokeWidth: 2.5),
-                    SizedBox(height: 14),
-                    Text(
-                      '正在根据分析结果匹配商品...',
-                      style: TextStyle(color: Color(0xFF77716C)),
-                    ),
-                  ],
-                ),
-              ),
-            )
+            const _ProductRecommendationSkeleton()
           else if (errorMessage != null && products.isEmpty)
             Padding(
               key: const Key('product-recommendation-error'),
@@ -192,6 +176,156 @@ class OutfitRecommendationCard extends StatelessWidget {
             ],
           ],
         ],
+      ),
+    );
+  }
+}
+
+class _ProductRecommendationSkeleton extends StatefulWidget {
+  const _ProductRecommendationSkeleton();
+
+  @override
+  State<_ProductRecommendationSkeleton> createState() =>
+      _ProductRecommendationSkeletonState();
+}
+
+class _ProductRecommendationSkeletonState
+    extends State<_ProductRecommendationSkeleton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1100),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      key: const Key('product-recommendation-loading'),
+      animation: _controller,
+      builder: (context, _) {
+        final color = Color.lerp(
+          const Color(0xFFE7E8E3),
+          const Color(0xFFF5F4EF),
+          _controller.value,
+        )!;
+        return SizedBox(
+          height: 410,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Row(
+                  children: [
+                    SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2.2),
+                    ),
+                    SizedBox(width: 9),
+                    Text(
+                      '正在匹配真实单品…',
+                      style: TextStyle(color: Color(0xFF77716C)),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                for (final slot in ProductCategory.values) ...[
+                  Text(
+                    ProductCategory.label(slot),
+                    style: const TextStyle(
+                      color: Color(0xFF2A2724),
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 9),
+                  _SkeletonProductCard(color: color, slot: slot),
+                  const SizedBox(height: 18),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _SkeletonProductCard extends StatelessWidget {
+  const _SkeletonProductCard({required this.color, required this.slot});
+
+  final Color color;
+  final String slot;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: '${ProductCategory.label(slot)}商品加载中',
+      child: Row(
+        key: Key('product-skeleton-$slot'),
+        children: [
+          Container(
+            width: 92,
+            height: 108,
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(6),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _SkeletonLine(color: color, widthFactor: .88, height: 16),
+                const SizedBox(height: 10),
+                _SkeletonLine(color: color, widthFactor: .45, height: 14),
+                const SizedBox(height: 16),
+                _SkeletonLine(color: color, widthFactor: .32, height: 18),
+                const SizedBox(height: 12),
+                _SkeletonLine(color: color, widthFactor: .62, height: 34),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SkeletonLine extends StatelessWidget {
+  const _SkeletonLine({
+    required this.color,
+    required this.widthFactor,
+    required this.height,
+  });
+
+  final Color color;
+  final double widthFactor;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    return FractionallySizedBox(
+      widthFactor: widthFactor,
+      child: Container(
+        height: height,
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(5),
+        ),
       ),
     );
   }

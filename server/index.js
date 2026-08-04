@@ -555,6 +555,14 @@ function sendError(res, status, code, message, details) {
   });
 }
 
+function setServerTiming(res, timings) {
+  const value = Object.entries(timings)
+    .filter(([, duration]) => Number.isFinite(duration) && duration >= 0)
+    .map(([name, duration]) => `${name};dur=${Number(duration).toFixed(1)}`)
+    .join(", ");
+  if (value) res.setHeader("Server-Timing", value);
+}
+
 function secretsMatch(actualValue, expectedValue) {
   const actual = Buffer.from(readOptionalString(actualValue));
   const expected = Buffer.from(readOptionalString(expectedValue));
@@ -968,6 +976,23 @@ async function buildOutfitApiResponse(
   };
 }
 
+async function buildOutfitResponseForRequest(
+  analysis,
+  outfitRequest,
+  {deferProducts = false} = {},
+) {
+  if (!deferProducts) {
+    return buildOutfitApiResponse(analysis, undefined, outfitRequest);
+  }
+  return {
+    ...analysis,
+    recommendations: {
+      ...analysis.recommendations,
+      products: [],
+    },
+  };
+}
+
 function outfitRateLimiter(req, res, next) {
   const now = Date.now();
   const key = req.ip || req.socket.remoteAddress || "unknown";
@@ -1016,7 +1041,12 @@ if (process.env.TRUST_PROXY === "true") {
 }
 
 app.use((req, res, next) => {
-  const requestId = crypto.randomUUID();
+  const clientRequestId = String(req.get("x-request-id") || "").trim();
+  const requestId =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      .test(clientRequestId)
+      ? clientRequestId
+      : crypto.randomUUID();
   const startedAt = process.hrtime.bigint();
 
   res.locals.requestId = requestId;
@@ -1059,9 +1089,10 @@ app.use(
       "X-Requested-With",
       "X-Admin-Key",
       "X-Request-Id",
+      "X-Defer-Products",
     ],
     optionsSuccessStatus: 204,
-    exposedHeaders: ["X-Request-Id", "Retry-After"],
+    exposedHeaders: ["X-Request-Id", "Retry-After", "Server-Timing"],
     maxAge: 600,
   }),
 );
@@ -1435,6 +1466,7 @@ app.get("/health", (req, res) => {
 });
 
 async function handleProductRecommendations(req, res, next) {
+  const startedAt = Date.now();
   try {
     const input = req.method === "POST" ? req.body : req.query;
     const products = await productProvider.recommend({
@@ -1449,6 +1481,18 @@ async function handleProductRecommendations(req, res, next) {
       budget: input?.budget,
       keyword: input?.keyword,
       limit: input?.limit == null ? undefined : Number(input.limit),
+    });
+    const providerDurationMs = Date.now() - startedAt;
+    setServerTiming(res, {
+      products: providerDurationMs,
+      total: providerDurationMs,
+    });
+    console.info("商品推荐完成", {
+      requestId: res.locals.requestId,
+      statusCode: 200,
+      provider: productProvider.name,
+      productCount: products.length,
+      durationMs: providerDurationMs,
     });
     return res.json({products, categorySlots: buildCategorySlots(products)});
   } catch (error) {
@@ -1501,17 +1545,21 @@ app.get("/products/:id/stats", async (req, res, next) => {
 app.post("/outfit", outfitRateLimiter, async (req, res) => {
   let outfitRequest;
   let aiRequestStartedAt;
+  const requestStartedAt = Date.now();
+  const deferProducts = req.get("x-defer-products") === "true";
 
   try {
     outfitRequest = validateOutfitRequest(req.body);
 
     if (shouldUseMockAi(config, aiClient)) {
+      const responsePayload = await buildOutfitResponseForRequest(
+        createMockOutfitAnalysis(outfitRequest),
+        outfitRequest,
+        {deferProducts},
+      );
+      setServerTiming(res, {total: Date.now() - requestStartedAt});
       return res.json({
-        ...(await buildOutfitApiResponse(
-          createMockOutfitAnalysis(outfitRequest),
-          undefined,
-          outfitRequest,
-        )),
+        ...responsePayload,
         fallbackReason: config.forceMockAi
           ? "AI_FORCE_MOCK"
           : "AI_NOT_CONFIGURED",
@@ -1519,12 +1567,14 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
     }
 
     if (activeAiRequests >= config.maxConcurrentAiRequests) {
+      const responsePayload = await buildOutfitResponseForRequest(
+        createMockOutfitAnalysis(outfitRequest),
+        outfitRequest,
+        {deferProducts},
+      );
+      setServerTiming(res, {total: Date.now() - requestStartedAt});
       return res.json({
-        ...(await buildOutfitApiResponse(
-          createMockOutfitAnalysis(outfitRequest),
-          undefined,
-          outfitRequest,
-        )),
+        ...responsePayload,
         fallbackReason: "AI_CAPACITY_REACHED",
       });
     }
@@ -1575,6 +1625,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
     activeAiRequests += 1;
 
     let response;
+    const preAiDurationMs = Date.now() - requestStartedAt;
 
     try {
       aiRequestStartedAt = Date.now();
@@ -1639,16 +1690,19 @@ ${partialViewSafetyInstruction}
       activeAiRequests -= 1;
     }
 
+    const dashscopeDurationMs = Date.now() - aiRequestStartedAt;
+    const parseStartedAt = Date.now();
     const aiText = extractAiText(response);
-    console.info("AI 原始文本响应", {
+    console.info("AI 响应元数据", {
       requestId: res.locals.requestId,
       responseId: response?.id ?? null,
       provider: config.aiProvider,
       model: response?.model ?? config.model,
       finishReason: response?.choices?.[0]?.finish_reason ?? null,
-      content: aiText,
+      contentLength: aiText.length,
     });
     const analysis = parseOutfitAnalysis(aiText);
+    const parseDurationMs = Date.now() - parseStartedAt;
 
     console.info("AI 穿搭响应字段校验通过", {
       requestId: res.locals.requestId,
@@ -1657,8 +1711,34 @@ ${partialViewSafetyInstruction}
       productCount: analysis.products.length,
     });
 
+    const productsStartedAt = Date.now();
+    const responsePayload = await buildOutfitResponseForRequest(
+      analysis,
+      outfitRequest,
+      {deferProducts},
+    );
+    const productDurationMs = Date.now() - productsStartedAt;
+    const totalDurationMs = Date.now() - requestStartedAt;
+    setServerTiming(res, {
+      pre_ai: preAiDurationMs,
+      dashscope: dashscopeDurationMs,
+      parse: parseDurationMs,
+      products: productDurationMs,
+      total: totalDurationMs,
+    });
+    console.info("AI 穿搭分段耗时", {
+      requestId: res.locals.requestId,
+      statusCode: 200,
+      preAiDurationMs,
+      dashscopeDurationMs,
+      parseDurationMs,
+      productDurationMs,
+      totalDurationMs,
+      productsDeferred: deferProducts,
+    });
+
     return res.json({
-      ...(await buildOutfitApiResponse(analysis, undefined, outfitRequest)),
+      ...responsePayload,
       analysisMode: "ai",
     });
   } catch (error) {
@@ -1702,16 +1782,25 @@ ${partialViewSafetyInstruction}
     });
 
     if (config.fallbackOnAiError && outfitRequest) {
+      const responsePayload = await buildOutfitResponseForRequest(
+        createMockOutfitAnalysis(outfitRequest),
+        outfitRequest,
+        {deferProducts},
+      );
+      setServerTiming(res, {
+        dashscope: elapsedMs,
+        total: Date.now() - requestStartedAt,
+      });
       return res.json({
-        ...(await buildOutfitApiResponse(
-          createMockOutfitAnalysis(outfitRequest),
-          undefined,
-          outfitRequest,
-        )),
+        ...responsePayload,
         fallbackReason,
       });
     }
 
+    setServerTiming(res, {
+      dashscope: elapsedMs,
+      total: Date.now() - requestStartedAt,
+    });
     return sendError(
       res,
       aiFailureHttpStatus(fallbackReason),

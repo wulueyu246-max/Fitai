@@ -1,3 +1,5 @@
+import 'dart:developer' as developer;
+
 import 'package:flutter/foundation.dart';
 
 enum AppLogLevel { info, warning, error }
@@ -70,6 +72,16 @@ class AppLogger {
     }
     if (kDebugMode) {
       debugPrint('[Shupi][${level.name}] $event $safeMetadata');
+    } else {
+      developer.log(
+        '$event $safeMetadata',
+        name: 'shupi.${level.name}',
+        level: switch (level) {
+          AppLogLevel.info => 800,
+          AppLogLevel.warning => 900,
+          AppLogLevel.error => 1000,
+        },
+      );
     }
   }
 

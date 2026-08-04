@@ -27,6 +27,15 @@ void main() {
         httpRequest.headers['Content-Type'],
         'application/json; charset=utf-8',
       );
+      expect(httpRequest.headers['X-Defer-Products'], 'true');
+      expect(
+        httpRequest.headers['X-Request-Id'],
+        matches(
+          RegExp(
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+          ),
+        ),
+      );
 
       final body = jsonDecode(httpRequest.body) as Map<String, dynamic>;
       expect(body['height'], 170);

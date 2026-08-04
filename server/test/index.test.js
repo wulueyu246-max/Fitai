@@ -3,6 +3,7 @@ const test = require("node:test");
 
 process.env.AFFILIATE_POSTBACK_SECRET = "fitai-test-affiliate-secret";
 process.env.PRODUCT_PROVIDER = "mock";
+process.env.AI_FORCE_MOCK = "true";
 
 const {
   app,
@@ -211,6 +212,40 @@ test("accepts a front-only outfit request without optional photo fields", () => 
 
   assert.deepEqual(Object.keys(result.images), ["front"]);
   assert.equal(result.images.front, imageDataUrl);
+});
+
+test("deferred outfit responses return before product matching with timings", async () => {
+  const server = await listenForRequests(app, 0);
+  try {
+    const {port} = server.address();
+    const requestId = "9a4e3d10-44f2-4aa1-a120-9a4e3d1044f2";
+    const response = await fetch(`http://127.0.0.1:${port}/outfit`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-defer-products": "true",
+        "x-request-id": requestId,
+      },
+      body: JSON.stringify({
+        height: 170,
+        weight: 60,
+        scene: "日常",
+        request: "简约穿搭",
+        images: {front: imageDataUrl},
+      }),
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-request-id"), requestId);
+    assert.match(response.headers.get("server-timing") || "", /total;dur=/);
+    assert.deepEqual(body.recommendations.products, []);
+    assert.equal(typeof body.bodyProfile, "string");
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
 });
 
 test("rejects an outfit request without a front photo", () => {

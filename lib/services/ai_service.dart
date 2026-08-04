@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
+import 'dart:math';
 
 import 'package:http/http.dart' as http;
 
 import '../config/app_config.dart';
+import '../core/logging/app_logger.dart';
 import '../models/outfit_analysis.dart';
 import '../models/outfit_request.dart';
 
@@ -38,6 +40,8 @@ class AIService {
   Future<OutfitAnalysis> generateOutfit(OutfitRequest request) async {
     late final http.Response response;
     late final Uri endpoint;
+    final totalStopwatch = Stopwatch()..start();
+    final clientRequestId = _newRequestId();
 
     try {
       endpoint = _config.outfitEndpoint;
@@ -48,9 +52,11 @@ class AIService {
       response = await _client
           .post(
             endpoint,
-            headers: const {
+            headers: {
               'Accept': 'application/json',
               'Content-Type': 'application/json; charset=utf-8',
+              'X-Defer-Products': 'true',
+              'X-Request-Id': clientRequestId,
             },
             body: jsonEncode(request.toJson()),
           )
@@ -90,6 +96,18 @@ class AIService {
       );
       throw const AIServiceException('请求发送失败，请稍后重试');
     }
+
+    final serverRequestId = response.headers['x-request-id'];
+    AppLogger.instance.info(
+      'outfit_http_completed',
+      metadata: {
+        'clientRequestId': clientRequestId,
+        'requestId': serverRequestId,
+        'statusCode': response.statusCode,
+        'totalDurationMs': totalStopwatch.elapsedMilliseconds,
+        'serverTiming': response.headers['server-timing'] ?? '',
+      },
+    );
 
     dynamic decodedBody;
 
@@ -136,6 +154,15 @@ class AIService {
         requestId: response.headers['x-request-id'],
       );
     }
+  }
+
+  static String _newRequestId() {
+    final random = Random.secure();
+    String hex(int length) => List.generate(
+          length,
+          (_) => random.nextInt(16).toRadixString(16),
+        ).join();
+    return '${hex(8)}-${hex(4)}-4${hex(3)}-a${hex(3)}-${hex(12)}';
   }
 
   void close() {
