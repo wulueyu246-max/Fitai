@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const {gzipSync} = require("node:zlib");
 
 const {
   TaobaoApiClient,
@@ -46,6 +47,21 @@ test("Taobao client maps permission errors to a safe code without leaking respon
     () => client.call("taobao.test.method"),
     (error) => error.code === "TAOBAO_PERMISSION_DENIED" && !error.message.includes("sensitive"),
   );
+});
+
+test("Taobao client decodes a gzip response even when content-encoding is missing", async () => {
+  const payload = {ok_response: {items: [{item_id: "1"}]}};
+  const client = new TaobaoApiClient({
+    appKey: "key",
+    appSecret: "secret",
+    fetchImpl: async () => new Response(gzipSync(JSON.stringify(payload)), {
+      status: 200,
+      headers: {"content-type": "application/json"},
+    }),
+    logger: {info() {}, warn() {}},
+  });
+
+  assert.deepEqual(await client.call("taobao.test.method"), payload);
 });
 
 test("Flutter source contains no Taobao server credential variables", () => {

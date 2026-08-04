@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const {gunzipSync} = require("node:zlib");
 const {Agent} = require("undici");
 
 const TAOBAO_ENDPOINT = "https://eco.taobao.com/router/rest";
@@ -104,7 +105,7 @@ class TaobaoApiClient {
           retryable: response.status === 429 || response.status >= 500,
         });
       }
-      return await response.json();
+      return await parseTaobaoResponse(response);
     } catch (error) {
       if (error instanceof TaobaoApiError) throw error;
       const timeout = error?.name === "AbortError";
@@ -115,6 +116,21 @@ class TaobaoApiClient {
     } finally {
       clearTimeout(timer);
     }
+  }
+}
+
+async function parseTaobaoResponse(response) {
+  try {
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const isGzip = bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+    const jsonBytes = isGzip ? gunzipSync(bytes) : bytes;
+    return JSON.parse(jsonBytes.toString("utf8"));
+  } catch (error) {
+    throw new TaobaoApiError("淘宝开放平台返回了无效响应", {
+      code: "TAOBAO_INVALID_RESPONSE",
+      retryable: false,
+      cause: error,
+    });
   }
 }
 
