@@ -3,7 +3,7 @@ const {gunzipSync} = require("node:zlib");
 const {Agent} = require("undici");
 
 const TAOBAO_ENDPOINT = "https://eco.taobao.com/router/rest";
-const TAOBAO_MATERIAL_SEARCH_METHOD = "taobao.tbk.dg.material.optional.upgrade";
+const TAOBAO_MATERIAL_SEARCH_METHOD = "taobao.tbk.dg.material.optional";
 const TAOBAO_MATERIAL_SAMPLE_METHOD = "taobao.tbk.dg.material.recommend";
 
 class TaobaoApiError extends Error {
