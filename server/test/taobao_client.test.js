@@ -3,7 +3,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
-const {TaobaoApiClient, signTaobaoRequest} = require("../taobao_client");
+const {
+  TaobaoApiClient,
+  safeTransportDetails,
+  signTaobaoRequest,
+} = require("../taobao_client");
 
 test("Taobao client signs official parameters without logging secrets or signatures", async () => {
   let requestBody = "";
@@ -58,4 +62,21 @@ test("Flutter source contains no Taobao server credential variables", () => {
   const source = files.map((file) => fs.readFileSync(file, "utf8")).join("\n");
   assert.equal(source.includes("TAOBAO_APP_SECRET"), false);
   assert.equal(source.includes("TAOBAO_APP_KEY"), false);
+});
+
+test("transport diagnostics preserve cause safely without credentials", () => {
+  const cause = Object.assign(new Error(
+    "connect failed ?app_key=sensitive&sign=signature&token=token-value",
+  ), {code: "ECONNRESET"});
+  const error = new Error("fetch failed", {cause});
+  const details = safeTransportDetails(
+    error,
+    "https://eco.taobao.com/router/rest",
+  );
+  assert.equal(details.causeName, "Error");
+  assert.equal(details.causeCode, "ECONNRESET");
+  assert.equal(details.hostname, "eco.taobao.com");
+  assert.equal(JSON.stringify(details).includes("sensitive"), false);
+  assert.equal(JSON.stringify(details).includes("signature"), false);
+  assert.equal(JSON.stringify(details).includes("token-value"), false);
 });

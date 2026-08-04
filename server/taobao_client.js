@@ -67,6 +67,7 @@ class TaobaoApiClient {
           attempt: attempt + 1,
           durationMs: Date.now() - startedAt,
           errorCode: lastError.code,
+          ...safeTransportDetails(lastError, this.endpoint),
         });
         if (!lastError.retryable || attempt >= this.maxRetries) break;
       }
@@ -155,6 +156,30 @@ function normalizeError(error) {
   return new TaobaoApiError("淘宝商品请求失败", {code: "TAOBAO_UNKNOWN_ERROR", cause: error});
 }
 
+function safeTransportDetails(error, endpoint) {
+  let cause = error?.cause;
+  while (cause?.cause) cause = cause.cause;
+  if (!cause) return {};
+  let hostname = "";
+  try {
+    hostname = new URL(endpoint).hostname;
+  } catch (_) {
+    // The endpoint is validated during construction.
+  }
+  return {
+    causeName: String(cause.name || "Error").slice(0, 80),
+    causeCode: String(cause.code || "UNKNOWN").slice(0, 80),
+    causeMessage: sanitizeErrorMessage(cause.message),
+    hostname,
+  };
+}
+
+function sanitizeErrorMessage(value) {
+  return String(value || "unknown error")
+    .replace(/([?&](?:app_key|sign|session|secret|token)=)[^&\s]+/gi, "$1[REDACTED]")
+    .slice(0, 240);
+}
+
 function required(value, name) {
   const text = String(value || "").trim();
   if (!text) throw new TaobaoApiError(`${name} 未配置`, {code: "TAOBAO_NOT_CONFIGURED"});
@@ -179,6 +204,7 @@ module.exports = {
   TAOBAO_MATERIAL_SEARCH_METHOD,
   TaobaoApiClient,
   TaobaoApiError,
+  safeTransportDetails,
   signTaobaoRequest,
   taobaoTimestamp,
 };
