@@ -7,11 +7,17 @@ const TAOBAO_MATERIAL_SEARCH_METHOD = "taobao.tbk.dg.material.optional.upgrade";
 const TAOBAO_MATERIAL_SAMPLE_METHOD = "taobao.tbk.dg.material.recommend";
 
 class TaobaoApiError extends Error {
-  constructor(message, {code = "TAOBAO_API_ERROR", retryable = false, cause} = {}) {
+  constructor(message, {
+    code = "TAOBAO_API_ERROR",
+    retryable = false,
+    cause,
+    details = {},
+  } = {}) {
     super(message, {cause});
     this.name = "TaobaoApiError";
     this.code = code;
     this.retryable = retryable;
+    this.details = details;
   }
 }
 
@@ -50,6 +56,7 @@ class TaobaoApiClient {
           throw new TaobaoApiError("淘宝开放平台拒绝了商品请求", {
             code,
             retryable: isRetryableTopError(errorResponse),
+            details: safeTopErrorDetails(errorResponse, [this.appKey, this.appSecret]),
           });
         }
         this.logger.info?.("淘宝商品接口完成", {
@@ -68,6 +75,7 @@ class TaobaoApiClient {
           attempt: attempt + 1,
           durationMs: Date.now() - startedAt,
           errorCode: lastError.code,
+          ...lastError.details,
           ...safeTransportDetails(lastError, this.endpoint),
         });
         if (!lastError.retryable || attempt >= this.maxRetries) break;
@@ -162,6 +170,20 @@ function safeTopErrorCode(error) {
   return `TAOBAO_API_${code || "UNKNOWN"}`;
 }
 
+function safeTopErrorDetails(error, secrets = []) {
+  return Object.fromEntries(Object.entries({
+    taobao_error_code: safeIdentifier(error?.code),
+    taobao_sub_code: safeIdentifier(error?.sub_code),
+    taobao_msg: sanitizeErrorMessage(error?.msg, secrets),
+    taobao_sub_msg: sanitizeErrorMessage(error?.sub_msg, secrets),
+    taobao_request_id: safeIdentifier(error?.request_id),
+  }).filter(([, value]) => value));
+}
+
+function safeIdentifier(value) {
+  return String(value || "").replace(/[^A-Za-z0-9_.:-]/g, "").slice(0, 160);
+}
+
 function isRetryableTopError(error) {
   const text = `${error?.code || ""} ${error?.sub_code || ""}`.toLowerCase();
   return /isp|service-unavailable|flow-limit|timeout/.test(text);
@@ -190,10 +212,15 @@ function safeTransportDetails(error, endpoint) {
   };
 }
 
-function sanitizeErrorMessage(value) {
-  return String(value || "unknown error")
+function sanitizeErrorMessage(value, secrets = []) {
+  let message = String(value || "")
     .replace(/([?&](?:app_key|sign|session|secret|token)=)[^&\s]+/gi, "$1[REDACTED]")
-    .slice(0, 240);
+    .replace(/\bmm_\d+_\d+_\d+\b/gi, "[REDACTED_PID]")
+    .replace(/\b[A-F0-9]{32}\b/gi, "[REDACTED_SIGNATURE]");
+  for (const secret of secrets) {
+    if (secret) message = message.split(String(secret)).join("[REDACTED]");
+  }
+  return message.slice(0, 240);
 }
 
 function required(value, name) {

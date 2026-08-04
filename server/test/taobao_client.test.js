@@ -49,6 +49,35 @@ test("Taobao client maps permission errors to a safe code without leaking respon
   );
 });
 
+test("Taobao client logs complete safe TOP error fields without credentials", async () => {
+  const logs = [];
+  const client = new TaobaoApiClient({
+    appKey: "public-test-key",
+    appSecret: "private-test-secret",
+    fetchImpl: async () => new Response(JSON.stringify({
+      error_response: {
+        code: 29,
+        sub_code: "isv.invalid-app-key",
+        msg: "Invalid app key public-test-key",
+        sub_msg: "Denied private-test-secret mm_1_2_3",
+        request_id: "top-request-123",
+      },
+    }), {status: 200}),
+    logger: {warn: (...args) => logs.push(args)},
+  });
+
+  await assert.rejects(() => client.call("taobao.test.method"));
+  const details = logs[0][1];
+  assert.equal(details.taobao_error_code, "29");
+  assert.equal(details.taobao_sub_code, "isv.invalid-app-key");
+  assert.equal(details.taobao_request_id, "top-request-123");
+  assert.match(details.taobao_msg, /Invalid app key/);
+  assert.match(details.taobao_sub_msg, /Denied/);
+  assert.equal(JSON.stringify(details).includes("public-test-key"), false);
+  assert.equal(JSON.stringify(details).includes("private-test-secret"), false);
+  assert.equal(JSON.stringify(details).includes("mm_1_2_3"), false);
+});
+
 test("Taobao client decodes a gzip response even when content-encoding is missing", async () => {
   const payload = {ok_response: {items: [{item_id: "1"}]}};
   const client = new TaobaoApiClient({
