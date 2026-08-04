@@ -1462,6 +1462,8 @@ app.get("/health", (req, res) => {
     admin_analytics_configured: Boolean(config.adminAnalyticsKey),
     affiliate_postback_configured: Boolean(config.affiliatePostbackSecret),
     product_provider: productProvider.name,
+    product_provider_status: productProvider.status || productProvider.name,
+    product_provider_configured: Boolean(productProvider.configured),
   });
 });
 

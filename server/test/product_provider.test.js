@@ -186,7 +186,52 @@ test("permission failure in auto health check safely falls back to Mock", async 
   });
   const products = await provider.recommend({category: "top"});
   assert.equal(provider.health, false);
+  assert.equal(provider.status, "mock");
   assert.ok(products.every((product) => product.is_mock === true));
+});
+
+test("auto mode coalesces concurrent health checks", async () => {
+  let healthCalls = 0;
+  let releaseHealth;
+  const healthGate = new Promise((resolve) => { releaseHealth = resolve; });
+  const taobao = {
+    healthCheck: async () => {
+      healthCalls += 1;
+      await healthGate;
+    },
+    recommend: async () => [{product_id: "taobao-1", source: "taobao"}],
+  };
+  const mock = {recommend: async () => [{product_id: "mock-1", is_mock: true}]};
+  const provider = new AutoProductProvider({
+    taobao,
+    mock,
+    logger: {info() {}, warn() {}},
+  });
+
+  const first = provider.recommend({category: "top"});
+  const second = provider.recommend({category: "shoes"});
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(healthCalls, 1);
+  releaseHealth();
+  const results = await Promise.all([first, second]);
+  assert.equal(provider.status, "taobao");
+  assert.ok(results.flat().every((product) => product.source === "taobao"));
+});
+
+test("mismatched PID and Adzone safely keep Mock active", () => {
+  const warnings = [];
+  const provider = createProductProvider({
+    environment: {
+      PRODUCT_PROVIDER: "auto",
+      TAOBAO_APP_KEY: "app-key",
+      TAOBAO_APP_SECRET: "app-secret",
+      TAOBAO_PID: "mm_1_2_300",
+      TAOBAO_ADZONE_ID: "999",
+    },
+    logger: {info() {}, warn: (...args) => warnings.push(args)},
+  });
+  assert.ok(provider instanceof MockProductProvider);
+  assert.equal(warnings[0][1].errorCode, "TAOBAO_PID_ADZONE_MISMATCH");
 });
 
 test("TaobaoService keeps provider implementation server-side", async () => {

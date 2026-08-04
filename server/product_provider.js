@@ -39,6 +39,8 @@ class MockProductProvider extends ProductProvider {
     super();
     this.catalog = catalog;
     this.name = "mock";
+    this.configured = false;
+    this.status = "mock";
   }
 
   async recommend(filters = {}) {
@@ -83,6 +85,8 @@ class TaobaoProductProvider extends ProductProvider {
       logger,
     });
     this.name = "taobao";
+    this.configured = true;
+    this.status = "taobao";
   }
 
   async healthCheck() {
@@ -144,31 +148,52 @@ class TaobaoProductProvider extends ProductProvider {
 }
 
 class AutoProductProvider extends ProductProvider {
-  constructor({taobao, mock, logger = console}) {
+  constructor({taobao, mock, logger = console, healthRetryMs = 60_000}) {
     super();
     this.taobao = taobao;
     this.mock = mock;
     this.logger = logger;
     this.name = "auto";
+    this.configured = true;
+    this.status = "checking";
     this.health = null;
+    this.healthPromise = null;
+    this.lastHealthFailureAt = 0;
+    this.healthRetryMs = healthRetryMs;
   }
 
   async recommend(filters = {}) {
-    if (this.health !== true) {
-      try {
-        await this.taobao.healthCheck();
+    if (!await this.#ensureHealthy()) return this.mock.recommend(filters);
+    return this.taobao.recommend(filters);
+  }
+
+  async #ensureHealthy() {
+    if (this.health === true) return true;
+    if (this.health === false &&
+        Date.now() - this.lastHealthFailureAt < this.healthRetryMs) {
+      return false;
+    }
+    if (!this.healthPromise) {
+      this.status = "checking";
+      this.healthPromise = this.taobao.healthCheck().then(() => {
         this.health = true;
+        this.status = "taobao";
         this.logger.info?.("淘宝 Provider 健康检查通过", {configured: true});
-      } catch (error) {
+        return true;
+      }).catch((error) => {
         this.health = false;
+        this.status = "mock";
+        this.lastHealthFailureAt = Date.now();
         this.logger.warn?.("淘宝 Provider 不可用，使用 Mock", {
           configured: true,
           errorCode: safeProviderCode(error),
         });
-        return this.mock.recommend(filters);
-      }
+        return false;
+      }).finally(() => {
+        this.healthPromise = null;
+      });
     }
-    return this.taobao.recommend(filters);
+    return this.healthPromise;
   }
 }
 
@@ -188,8 +213,17 @@ function createProductProvider({environment = process.env, catalog, logger = con
     adzoneId: String(environment.TAOBAO_ADZONE_ID || "").trim(),
   };
   const configured = Object.values(values).every(Boolean);
+  logger.info?.("淘宝 Provider 配置状态", {configured, mode});
   if (mode === "mock" || !configured) {
     if (mode !== "mock") logger.warn?.("淘宝 Provider 未完整配置，使用 Mock", {configured: false});
+    return new MockProductProvider({catalog: productCatalog});
+  }
+  const placementError = validatePlacement(values.pid, values.adzoneId);
+  if (placementError) {
+    logger.warn?.("淘宝推广位配置无效，使用 Mock", {
+      configured: true,
+      errorCode: placementError,
+    });
     return new MockProductProvider({catalog: productCatalog});
   }
   const taobao = new TaobaoProductProvider({
@@ -406,6 +440,16 @@ function requireConfig(value, field) {
 function positiveInteger(value, fallback) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : fallback;
+}
+
+function validatePlacement(pid, adzoneId) {
+  if (!/^\d+$/.test(adzoneId)) return "TAOBAO_INVALID_ADZONE_ID";
+  const pidParts = pid.split("_").filter(Boolean);
+  const pidAdzoneId = pidParts.length > 1 ? pidParts.at(-1) : "";
+  if (pidAdzoneId && /^\d+$/.test(pidAdzoneId) && pidAdzoneId !== adzoneId) {
+    return "TAOBAO_PID_ADZONE_MISMATCH";
+  }
+  return null;
 }
 
 function safeProviderCode(error) {
