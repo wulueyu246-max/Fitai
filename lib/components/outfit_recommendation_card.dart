@@ -106,7 +106,7 @@ class OutfitRecommendationCard extends StatelessWidget {
                 ),
               ),
             )
-          else if (errorMessage != null)
+          else if (errorMessage != null && products.isEmpty)
             Padding(
               key: const Key('product-recommendation-error'),
               padding: const EdgeInsets.symmetric(vertical: 38),
@@ -143,32 +143,28 @@ class OutfitRecommendationCard extends StatelessWidget {
             )
           else ...[
             const Text(
-              '商品推荐瀑布流',
-              style: TextStyle(
-                color: Color(0xFF2A2724),
-                fontSize: 17,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-            const SizedBox(height: 5),
-            const Text(
-              '向下滑动浏览全部商品，点击即可选择穿搭单品',
+              '按穿搭位置浏览商品，点击即可选择对应单品',
               style: TextStyle(
                 color: Color(0xFF817B75),
                 fontSize: 12,
               ),
             ),
-            const SizedBox(height: 12),
-            ProductGrid(
-              products: products,
-              selectedProductIds: selectedProductIds,
-              onProductTap: onProductTap,
-              onViewDetails: onViewDetails,
-              onProductTryOn: onProductTryOn,
-              favoriteProductIds: favoriteProductIds,
-              onFavorite: onFavorite,
-              tryingOnProductId: tryingOnProductId,
-            ),
+            const SizedBox(height: 18),
+            for (final slot in ProductCategory.values)
+              _ProductCategorySection(
+                slot: slot,
+                products: products
+                    .where((product) => product.wardrobeSlot == slot)
+                    .take(2)
+                    .toList(growable: false),
+                selectedProductIds: selectedProductIds,
+                onProductTap: onProductTap,
+                onViewDetails: onViewDetails,
+                onProductTryOn: onProductTryOn,
+                favoriteProductIds: favoriteProductIds,
+                onFavorite: onFavorite,
+                tryingOnProductId: tryingOnProductId,
+              ),
             if (onTryOn != null) ...[
               const SizedBox(height: 20),
               Text(
@@ -195,6 +191,68 @@ class OutfitRecommendationCard extends StatelessWidget {
               ),
             ],
           ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ProductCategorySection extends StatelessWidget {
+  const _ProductCategorySection({
+    required this.slot,
+    required this.products,
+    required this.selectedProductIds,
+    required this.onProductTap,
+    required this.onViewDetails,
+    required this.onProductTryOn,
+    required this.favoriteProductIds,
+    required this.onFavorite,
+    required this.tryingOnProductId,
+  });
+
+  final String slot;
+  final List<Product> products;
+  final Set<String> selectedProductIds;
+  final ValueChanged<Product> onProductTap;
+  final ValueChanged<Product> onViewDetails;
+  final ValueChanged<Product>? onProductTryOn;
+  final Set<String> favoriteProductIds;
+  final ValueChanged<Product> onFavorite;
+  final String? tryingOnProductId;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      key: Key('product-section-$slot'),
+      padding: const EdgeInsets.only(bottom: 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            ProductCategory.label(slot),
+            style: const TextStyle(
+              color: Color(0xFF2A2724),
+              fontSize: 17,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 10),
+          if (products.isEmpty)
+            const Text(
+              '暂时没有匹配单品',
+              style: TextStyle(color: Color(0xFF817B75), fontSize: 12),
+            )
+          else
+            ProductGrid(
+              products: products,
+              selectedProductIds: selectedProductIds,
+              onProductTap: onProductTap,
+              onViewDetails: onViewDetails,
+              onProductTryOn: onProductTryOn,
+              favoriteProductIds: favoriteProductIds,
+              onFavorite: onFavorite,
+              tryingOnProductId: tryingOnProductId,
+            ),
         ],
       ),
     );

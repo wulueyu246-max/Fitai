@@ -248,7 +248,7 @@ class _FavoriteProductsTab extends StatelessWidget {
         maxCrossAxisExtent: 260,
         mainAxisSpacing: 14,
         crossAxisSpacing: 14,
-        childAspectRatio: 0.66,
+        childAspectRatio: 0.63,
       ),
       itemCount: products.length,
       itemBuilder: (context, index) {

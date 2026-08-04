@@ -27,7 +27,7 @@ class ProductRecommendation {
 
   factory ProductRecommendation.fromJson(Map<String, dynamic> json) {
     final price = _readNumber(json, 'price');
-    final category = _readString(json, 'category');
+    final category = ProductCategory.normalize(_readString(json, 'category'));
     final rawCommission = _readOptionalNumber(json, 'commission');
     final commissionRate = json.containsKey('commission_rate')
         ? _readNumber(json, 'commission_rate')

@@ -196,7 +196,7 @@ void main() {
 
     expect(
       find.byKey(const Key('product-recommendation-grid')),
-      findsOneWidget,
+      findsWidgets,
     );
     expect(find.text(products.first.name), findsOneWidget);
     expect(find.text(products.first.aiReason), findsOneWidget);
@@ -239,13 +239,13 @@ void main() {
       (product) => product.id == 'uniqlo-tailored-blazer',
     );
     final trousers = products.firstWhere(
-      (product) => product.category == ProductCategory.bottom,
+      (product) => product.wardrobeSlot == ProductCategory.bottom,
     );
     final shoes = products.firstWhere(
-      (product) => product.category == ProductCategory.shoes,
+      (product) => product.wardrobeSlot == ProductCategory.shoes,
     );
     final watch = products.firstWhere(
-      (product) => product.category == ProductCategory.accessories,
+      (product) => product.wardrobeSlot == ProductCategory.accessories,
     );
     final outfit = Outfit(
       height: request.height,

@@ -30,7 +30,7 @@ const {
   ObjectStorageError,
   SupabaseObjectStorage,
 } = require("./supabase_storage");
-const {ProductCatalog} = require("./product_catalog");
+const {ProductCatalog, buildCategorySlots} = require("./product_catalog");
 const {
   ProductClickStore,
   ProductClickStoreError,
@@ -1445,11 +1445,12 @@ async function handleProductRecommendations(req, res, next) {
       scene: input?.scene,
       gender: input?.gender,
       fit: input?.fit,
+      season: input?.season,
       budget: input?.budget,
       keyword: input?.keyword,
       limit: input?.limit == null ? undefined : Number(input.limit),
     });
-    return res.json({products});
+    return res.json({products, categorySlots: buildCategorySlots(products)});
   } catch (error) {
     if (error instanceof TypeError || error instanceof ProductProviderError) {
       return sendError(

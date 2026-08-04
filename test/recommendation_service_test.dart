@@ -10,7 +10,7 @@ void main() {
   test('mock product database contains a commercial demo catalog', () {
     final products = MockProductDatabase.products;
     final brands = products.map((product) => product.brand).toSet();
-    final categories = products.map((product) => product.category).toSet();
+    final categories = products.map((product) => product.wardrobeSlot).toSet();
 
     expect(products.length, greaterThanOrEqualTo(50));
     expect(
@@ -20,11 +20,11 @@ void main() {
     expect(
       categories,
       containsAll([
-        ProductCategory.tee,
-        ProductCategory.shirt,
+        ProductCategory.top,
         ProductCategory.bottom,
         ProductCategory.shoes,
         ProductCategory.outerwear,
+        ProductCategory.accessories,
       ]),
     );
     expect(products.every((product) => product.aiReason.isNotEmpty), isTrue);

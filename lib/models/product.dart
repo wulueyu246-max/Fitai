@@ -1,30 +1,68 @@
 class ProductCategory {
   const ProductCategory._();
 
-  static const tee = 'T恤';
-  static const shirt = '衬衫';
-  static const outerwear = '外套';
-  static const top = '上衣';
-  static const bottom = '裤子';
-  static const shoes = '鞋';
-  static const accessories = '配饰';
+  static const top = 'top';
+  static const bottom = 'bottom';
+  static const shoes = 'shoes';
+  static const outerwear = 'outerwear';
+  static const accessories = 'accessories';
+
+  /// Legacy subtype aliases now share the stable top slot.
+  static const tee = top;
+  static const shirt = top;
 
   /// Virtual wardrobe slots. T-shirts and shirts both occupy the top slot.
   static const values = [
-    outerwear,
     top,
     bottom,
     shoes,
+    outerwear,
     accessories,
   ];
 
-  static const catalogValues = [
-    tee,
-    shirt,
-    outerwear,
-    bottom,
-    shoes,
-  ];
+  static const catalogValues = values;
+
+  static String normalize(String value) {
+    final normalized = value.trim().toLowerCase();
+    if (normalized.isEmpty) return '';
+    if (RegExp(r't恤|短袖|衬衫|上衣|上装').hasMatch(normalized) ||
+        RegExp(r'(^|[^a-z])(t-?shirt|tshirt|shirt|tee|upper|top)([^a-z]|$)')
+            .hasMatch(normalized)) {
+      return top;
+    }
+    if (RegExp(r'裤|下装|裙').hasMatch(normalized) ||
+        RegExp(r'(^|[^a-z])(pants|trousers|trouser|skirt|bottom)([^a-z]|$)')
+            .hasMatch(normalized)) {
+      return bottom;
+    }
+    if (RegExp(r'鞋|乐福').hasMatch(normalized) ||
+        RegExp(r'(^|[^a-z])(shoe|shoes|sneaker|sneakers|loafer|loafers)([^a-z]|$)')
+            .hasMatch(normalized)) {
+      return shoes;
+    }
+    if (RegExp(r'外套|夹克|西装|大衣').hasMatch(normalized) ||
+        RegExp(r'(^|[^a-z])(coat|jacket|blazer|outerwear)([^a-z]|$)')
+            .hasMatch(normalized)) {
+      return outerwear;
+    }
+    if (RegExp(r'配饰|包|帽|围巾').hasMatch(normalized) ||
+        RegExp(r'(^|[^a-z])(accessory|accessories|bag|hat|scarf)([^a-z]|$)')
+            .hasMatch(normalized)) {
+      return accessories;
+    }
+    return values.contains(normalized) ? normalized : normalized;
+  }
+
+  static String label(String slot) {
+    return switch (normalize(slot)) {
+      top => '上衣推荐',
+      bottom => '下装推荐',
+      shoes => '鞋履推荐',
+      outerwear => '外套推荐',
+      accessories => '配饰推荐',
+      _ => '其他推荐',
+    };
+  }
 }
 
 class Product {
@@ -77,7 +115,7 @@ class Product {
         fallback: '精选商品',
       ),
       name: _readAliasedString(json, ['name', 'title']),
-      category: _readString(json, 'category'),
+      category: ProductCategory.normalize(_readString(json, 'category')),
       imageUrl: _readAliasedString(json, ['imageUrl', 'image_url', 'image']),
       color: _readOptionalAliasedString(
         json,
@@ -132,6 +170,7 @@ class Product {
       ),
       styleTags: (json['styleTags'] as List<dynamic>? ??
               json['style_tags'] as List<dynamic>? ??
+              json['tags'] as List<dynamic>? ??
               const [])
           .whereType<String>()
           .toList(growable: false),
@@ -187,7 +226,7 @@ class Product {
     Map<String, dynamic> json, {
     required int index,
   }) {
-    final category = _readString(json, 'category').trim();
+    final category = ProductCategory.normalize(_readString(json, 'category'));
     final name = _readString(json, 'name').trim();
     final reason = _readOptionalAliasedString(
       json,
@@ -291,12 +330,7 @@ class Product {
       ? List<String>.unmodifiable({style, fitType, season})
       : styleTags;
   String get wardrobeSlot {
-    if (category == ProductCategory.tee ||
-        category == ProductCategory.shirt ||
-        category == ProductCategory.top) {
-      return ProductCategory.top;
-    }
-    return category;
+    return ProductCategory.normalize(category);
   }
 
   /// Backward-compatible alias for older UI and cached payloads.
@@ -469,16 +503,17 @@ class Product {
   }
 
   static String _aiPlaceholderImage(String category) {
-    if (category.contains('鞋')) {
+    final slot = ProductCategory.normalize(category);
+    if (slot == ProductCategory.shoes) {
       return 'assets/images/products/leather_loafers.jpg';
     }
-    if (category.contains('裤') || category.contains('下装')) {
+    if (slot == ProductCategory.bottom) {
       return 'assets/images/products/pleated_trousers.jpg';
     }
-    if (category.contains('配饰') || category.contains('包')) {
+    if (slot == ProductCategory.accessories) {
       return 'assets/images/products/minimal_watch.jpg';
     }
-    if (category.contains('上衣') || category.contains('衬衫')) {
+    if (slot == ProductCategory.top) {
       return 'assets/images/products/structured_shirt.jpg';
     }
     return 'assets/images/products/tailored_blazer.jpg';

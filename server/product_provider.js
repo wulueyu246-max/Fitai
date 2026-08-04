@@ -26,6 +26,7 @@ class ProductProvider {
         scene: context.scene,
         gender: context.gender,
         fit: context.fit,
+        season: context.season,
         budget: context.budget,
         keyword: query.keyword,
         limit: 3,
@@ -196,6 +197,7 @@ function normalizeFilters(filters) {
     scene: text(filters.scene, "scene"),
     gender: text(filters.gender, "gender"),
     fit: text(filters.fit, "fit"),
+    season: text(filters.season, "season"),
     budget: nonNegativeNumber(filters.budget),
     keyword: text(filters.keyword, "keyword"),
     limit: Number.isInteger(requestedLimit)
@@ -241,14 +243,17 @@ function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}}) {
   const affiliateUrl = normalizeHttpsUrl(
     item.click_url || item.clickUrl || couponUrl,
   );
+  const rawCategory = String(
+    item.category_name || item.level_one_category_name || fallbackCategory || "",
+  ).trim();
+  const category = canonicalCategory(`${rawCategory} ${item.title || ""}`) ||
+    canonicalCategory(fallbackCategory) || "top";
   return {
     product_id: productId,
     source: "taobao",
     title: String(item.short_title || item.title || "淘宝精选商品").trim(),
     brand: String(item.brand_name || item.shop_title || "淘宝精选").trim(),
-    category: String(
-      item.category_name || item.level_one_category_name || fallbackCategory || "服饰",
-    ).trim(),
+    category,
     price: nonNegativeNumber(
       item.price_after_coupon || item.zk_final_price || item.reserve_price,
     ),

@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../config/app_config.dart';
@@ -40,14 +41,15 @@ class RemoteBrandProductService implements BrandProductService {
         )
         .timeout(timeout);
     final payload = _decode(response);
-    final values = payload is List<dynamic>
-        ? payload
-        : payload is Map<String, dynamic>
-            ? payload['products'] as List<dynamic>? ?? const []
-            : const [];
-    return List<Product>.unmodifiable(
+    final values = _extractProducts(payload);
+    _debugProductsLength(values.length);
+    final products = List<Product>.unmodifiable(
       values.whereType<Map<String, dynamic>>().map(_parseProduct),
     );
+    if (values.isNotEmpty && products.isEmpty) {
+      throw const ProductSourceException('商品源返回的 products 字段格式无效');
+    }
+    return products;
   }
 
   @override
@@ -132,16 +134,85 @@ class RemoteBrandProductService implements BrandProductService {
   }
 
   Object? _decode(http.Response response) {
+    final responseBody = utf8.decode(response.bodyBytes);
+    _debugResponse(response.statusCode, responseBody);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw ProductSourceException(
         '商品源请求失败（HTTP ${response.statusCode}）',
       );
     }
     try {
-      return jsonDecode(utf8.decode(response.bodyBytes));
+      final decoded = jsonDecode(responseBody);
+      _debugDecoded(decoded);
+      return decoded;
     } catch (_) {
       throw const ProductSourceException('商品源返回了无效数据');
     }
+  }
+
+  List<dynamic> _extractProducts(Object? payload) {
+    if (payload is List<dynamic>) {
+      return payload;
+    }
+    if (payload is! Map<String, dynamic>) {
+      return const [];
+    }
+
+    final categorySlots = payload['categorySlots'] ?? payload['category_slots'];
+    if (categorySlots is Map<String, dynamic>) {
+      final products = <dynamic>[];
+      final ids = <String>{};
+      for (final slot in ProductCategory.values) {
+        final values = categorySlots[slot];
+        if (values is! List<dynamic>) continue;
+        for (final value in values) {
+          if (value is! Map<String, dynamic>) continue;
+          final product = <String, dynamic>{...value, 'category': slot};
+          final id = product['product_id']?.toString() ??
+              product['id']?.toString() ??
+              '';
+          if (id.isEmpty || ids.add(id)) products.add(product);
+        }
+      }
+      if (products.isNotEmpty) return products;
+    }
+
+    final directProducts = payload['products'];
+    if (directProducts is List<dynamic>) {
+      return directProducts;
+    }
+    final directItems = payload['items'];
+    if (directItems is List<dynamic>) {
+      return directItems;
+    }
+    final data = payload['data'];
+    if (data is Map<String, dynamic>) {
+      final nestedProducts = data['products'];
+      if (nestedProducts is List<dynamic>) {
+        return nestedProducts;
+      }
+      final nestedItems = data['items'];
+      if (nestedItems is List<dynamic>) {
+        return nestedItems;
+      }
+    }
+    return const [];
+  }
+
+  void _debugResponse(int statusCode, String responseBody) {
+    if (!kDebugMode) return;
+    debugPrint('[Shupi][product_response] method=GET statusCode=$statusCode');
+    debugPrint('[Shupi][product_response] response.body=$responseBody');
+  }
+
+  void _debugDecoded(Object? decoded) {
+    if (!kDebugMode) return;
+    debugPrint('[Shupi][product_response] jsonDecode=$decoded');
+  }
+
+  void _debugProductsLength(int length) {
+    if (!kDebugMode) return;
+    debugPrint('[Shupi][product_response] products.length=$length');
   }
 }
 

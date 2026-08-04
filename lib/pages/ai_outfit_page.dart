@@ -624,6 +624,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       _selectedProductIds = {};
     });
 
+    late final List<Product> products;
     try {
       final catalogProducts = analysis.productRecommendations.isNotEmpty
           ? analysis.recommendedProducts
@@ -634,25 +635,16 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       final rawProducts = catalogProducts.isEmpty
           ? analysis.recommendedProducts
           : catalogProducts;
-      final products = _weather == null
+      products = _weather == null
           ? rawProducts
           : _weatherAdvisor.adaptProducts(
               products: rawProducts,
               weather: _weather!,
               scene: request.scene,
             );
-      unawaited(
-        _productAnalytics.recordImpressions(
-          products,
-          source: 'ai-outfit-recommendations',
-          userId: _session.account?.id ?? 'local-demo-user',
-        ),
-      );
-      final outfitPlan = await _productService.createOutfitPlan(
-        products: products,
-        analysis: analysis,
-        request: request,
-      );
+      if (products.isEmpty) {
+        throw StateError('商品接口返回的 products 数组为空');
+      }
 
       if (!mounted) {
         return;
@@ -667,10 +659,55 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         }
       }
 
-      _viewModel.attachRecommendations(
-        products,
-        outfitPlan: outfitPlan,
+      _viewModel.attachRecommendations(products);
+      setState(() {
+        _selectedProductIds = selectedProductIds;
+        _isLoadingProducts = false;
+        _productLoadError = null;
+      });
+    } catch (error, stackTrace) {
+      AppLogger.instance.error(
+        'product_recommendations_failed',
+        error: error,
+        stackTrace: stackTrace,
+        metadata: {'message': error.toString()},
       );
+      if (!mounted) {
+        return;
+      }
+
+      final existingProducts =
+          _viewModel.analysis?.recommendedProducts ?? const <Product>[];
+      setState(() {
+        _isLoadingProducts = false;
+        _productLoadError = existingProducts.isEmpty ? '商品匹配失败，请检查网络后重试' : null;
+      });
+      if (existingProducts.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('商品匹配失败，请稍后重试')),
+        );
+      }
+      return;
+    }
+
+    unawaited(
+      _productAnalytics.recordImpressions(
+        products,
+        source: 'ai-outfit-recommendations',
+        userId: _session.account?.id ?? 'local-demo-user',
+      ),
+    );
+
+    try {
+      final outfitPlan = await _productService.createOutfitPlan(
+        products: products,
+        analysis: analysis,
+        request: request,
+      );
+      if (!mounted) {
+        return;
+      }
+      _viewModel.attachRecommendations(products, outfitPlan: outfitPlan);
       final profile = await _profileService.load();
       final mergedProfile = await _profileService.mergeAnalysis(
         profile: profile,
@@ -697,25 +734,15 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       } catch (_) {
         // Recommendation history must not block the current result.
       }
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _selectedProductIds = selectedProductIds;
-        _isLoadingProducts = false;
-        _productLoadError = null;
-      });
-    } catch (_) {
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _isLoadingProducts = false;
-        _productLoadError = '商品匹配失败，请检查网络后重试';
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('商品匹配失败，请稍后重试')),
+    } catch (error, stackTrace) {
+      AppLogger.instance.error(
+        'product_post_processing_failed',
+        error: error,
+        stackTrace: stackTrace,
+        metadata: {
+          'message': error.toString(),
+          'productsLength': products.length,
+        },
       );
     }
   }

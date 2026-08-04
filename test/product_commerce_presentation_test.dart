@@ -6,16 +6,18 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   Product product({
+    String id = 'product-1',
+    String category = ProductCategory.top,
     bool isMock = false,
     String purchaseUrl = 'https://shop.example.com/item',
     String imageUrl = 'assets/images/products/structured_shirt.jpg',
   }) {
     return Product(
-      id: 'product-1',
-      sku: 'SKU-1',
+      id: id,
+      sku: 'SKU-$id',
       brand: '测试品牌',
       name: '结构感通勤上衣',
-      category: ProductCategory.top,
+      category: category,
       imageUrl: imageUrl,
       color: '森林绿',
       size: 'S-XL',
@@ -61,6 +63,14 @@ void main() {
     expect(parsed.isMock, isTrue);
     expect(parsed.isPurchasable, isFalse);
     expect(parsed.recommendationReason, '根据穿搭关键词匹配');
+  });
+
+  test('normalizes legacy product category aliases', () {
+    expect(ProductCategory.normalize('shirt'), ProductCategory.top);
+    expect(ProductCategory.normalize('裤子'), ProductCategory.bottom);
+    expect(ProductCategory.normalize('sneakers'), ProductCategory.shoes);
+    expect(ProductCategory.normalize('jacket'), ProductCategory.outerwear);
+    expect(ProductCategory.normalize('围巾'), ProductCategory.accessories);
   });
 
   test('only a real HTTPS URL is purchasable', () {
@@ -170,5 +180,73 @@ void main() {
     await tester.pump();
 
     expect(find.text('图片暂时无法加载'), findsOneWidget);
+  });
+
+  testWidgets('non-empty products are not hidden by a stale error state', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: OutfitRecommendationCard(
+              products: [product()],
+              selectedProductIds: const {},
+              onProductTap: (_) {},
+              onViewDetails: (_) {},
+              favoriteProductIds: const {},
+              onFavorite: (_) {},
+              onTryOn: null,
+              errorMessage: '商品匹配失败',
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byKey(const Key('product-recommendation-error')), findsNothing);
+    expect(find.text('结构感通勤上衣'), findsOneWidget);
+  });
+
+  testWidgets('complete recommendations render all five category sections', (
+    tester,
+  ) async {
+    final products = [
+      product(id: 'top', category: 'shirt'),
+      product(id: 'bottom', category: 'trousers'),
+      product(id: 'shoes', category: 'sneakers'),
+      product(id: 'outerwear', category: 'jacket'),
+      product(id: 'accessories', category: 'bag'),
+    ];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: OutfitRecommendationCard(
+              products: products,
+              selectedProductIds: const {},
+              onProductTap: (_) {},
+              onViewDetails: (_) {},
+              favoriteProductIds: const {},
+              onFavorite: (_) {},
+              onTryOn: null,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    for (final title in const [
+      '上衣推荐',
+      '下装推荐',
+      '鞋履推荐',
+      '外套推荐',
+      '配饰推荐',
+    ]) {
+      expect(find.text(title), findsOneWidget);
+    }
+    for (final slot in ProductCategory.values) {
+      expect(find.byKey(Key('product-section-$slot')), findsOneWidget);
+    }
   });
 }

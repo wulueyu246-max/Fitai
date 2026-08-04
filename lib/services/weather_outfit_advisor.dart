@@ -77,35 +77,35 @@ class WeatherOutfitAdvisor {
         .toLowerCase();
     var score = 0;
     if (weather.isRainy) {
-      if (product.category == ProductCategory.outerwear) score += 18;
-      if (product.category == ProductCategory.shoes) score += 14;
+      if (product.wardrobeSlot == ProductCategory.outerwear) score += 40;
+      if (product.wardrobeSlot == ProductCategory.shoes) score += 36;
       if (_containsAny(text, const ['防水', '防风', '机能', '橡胶', '皮革'])) {
         score += 16;
       }
     }
     if (weather.isSnowy || weather.temperature <= 12) {
-      if (product.category == ProductCategory.outerwear) score += 20;
+      if (product.wardrobeSlot == ProductCategory.outerwear) score += 20;
       if (_containsAny(text, const ['羊毛', '羽绒', '保暖', '厚'])) score += 14;
     }
     if (weather.temperature >= 28 || weather.humidity >= 75) {
-      if (product.category == ProductCategory.tee) score += 20;
+      if (product.wardrobeSlot == ProductCategory.top) score += 20;
       if (_containsAny(text, const ['透气', '速干', 'airism', 'dri-fit', '棉'])) {
         score += 14;
       }
       if (_containsAny(text, const ['羊毛', '羽绒', '厚'])) score -= 18;
     }
     if (weather.windSpeed >= 20 &&
-        product.category == ProductCategory.outerwear) {
+        product.wardrobeSlot == ProductCategory.outerwear) {
       score += 14;
     }
     return score;
   }
 
   String _productReason(Product product, WeatherSnapshot weather) {
-    if (weather.isRainy && product.category == ProductCategory.shoes) {
+    if (weather.isRainy && product.wardrobeSlot == ProductCategory.shoes) {
       return '当前有雨，优先推荐包裹性更好、不易吸水的鞋履';
     }
-    if (weather.isRainy && product.category == ProductCategory.outerwear) {
+    if (weather.isRainy && product.wardrobeSlot == ProductCategory.outerwear) {
       return '当前有雨，外层可降低风雨对体感温度的影响';
     }
     if ((weather.temperature >= 28 || weather.humidity >= 75) &&
@@ -113,7 +113,7 @@ class WeatherOutfitAdvisor {
       return '当前高温或湿度较高，优先选择轻薄、透气的上装';
     }
     if ((weather.isSnowy || weather.temperature <= 12) &&
-        product.category == ProductCategory.outerwear) {
+        product.wardrobeSlot == ProductCategory.outerwear) {
       return '当前温度较低，保暖外层可维持舒适体感';
     }
     if (weather.windSpeed >= 20) {

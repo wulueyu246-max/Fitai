@@ -191,8 +191,8 @@ class RecommendationEngine {
         .toLowerCase();
     var score = 0;
     if (weather.contains('雨')) {
-      if (product.category == ProductCategory.outerwear) score += 12;
-      if (product.category == ProductCategory.shoes) score += 10;
+      if (product.wardrobeSlot == ProductCategory.outerwear) score += 12;
+      if (product.wardrobeSlot == ProductCategory.shoes) score += 10;
       if (productText.contains('防风') ||
           productText.contains('机能') ||
           productText.contains('橡胶')) {
@@ -207,7 +207,7 @@ class RecommendationEngine {
           ? 8
           : 0;
     } else if (temperature <= 12) {
-      score += product.category == ProductCategory.outerwear ||
+      score += product.wardrobeSlot == ProductCategory.outerwear ||
               product.season.contains('冬') ||
               product.material.contains('羊毛')
           ? 8

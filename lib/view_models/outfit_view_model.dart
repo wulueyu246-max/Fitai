@@ -66,7 +66,7 @@ class OutfitViewModel extends ChangeNotifier {
 
   void attachRecommendations(
     List<Product> products, {
-    required OutfitPlan outfitPlan,
+    OutfitPlan? outfitPlan,
   }) {
     final analysis = _analysis;
 

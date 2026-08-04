@@ -76,9 +76,9 @@ void main() {
       plan: OutfitPlan(
         id: 'daily-test',
         title: '北京商务会议Look',
-        top: slot('上衣'),
-        bottom: slot('裤子'),
-        shoes: slot('鞋'),
+        top: slot(ProductCategory.top),
+        bottom: slot(ProductCategory.bottom),
+        shoes: slot(ProductCategory.shoes),
         reason: '比例与天气匹配',
         createdTime: generatedAt,
       ),

@@ -42,15 +42,14 @@ void main() {
       weather: weather,
       scene: '工作',
     );
-
     expect(prompt, contains('用户地区：中国 上海'));
     expect(prompt, contains('防泼水外套'));
     expect(prompt, contains('场景：工作'));
     expect(
       products.take(5).any(
             (product) =>
-                product.category == ProductCategory.outerwear ||
-                product.category == ProductCategory.shoes,
+                product.wardrobeSlot == ProductCategory.outerwear ||
+                product.wardrobeSlot == ProductCategory.shoes,
           ),
       isTrue,
     );
@@ -77,7 +76,7 @@ void main() {
       scene: '日常',
     );
 
-    expect(products.first.category, ProductCategory.tee);
+    expect(products.first.wardrobeSlot, ProductCategory.top);
     expect(products.first.aiReason, contains('轻薄、透气'));
     expect(
       advisor.buildPrompt(weather: weather, scene: '日常'),

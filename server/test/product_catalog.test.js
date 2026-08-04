@@ -4,18 +4,34 @@ const test = require("node:test");
 process.env.PRODUCT_PROVIDER = "mock";
 
 const {
+  CATEGORY_SLOTS,
   PRODUCT_SEEDS,
   ProductCatalog,
+  canonicalCategory,
 } = require("../product_catalog");
 const {app, listenForRequests} = require("../index");
 
-test("ships at least 20 catalog products across required categories", () => {
+test("ships at least four products for every stable category slot", () => {
   assert.ok(PRODUCT_SEEDS.length >= 20);
-  const categories = new Set(PRODUCT_SEEDS.map((item) => item.category));
-  assert.deepEqual(
-    [...categories].sort(),
-    ["T恤", "外套", "裤子", "鞋"].sort(),
-  );
+  for (const slot of CATEGORY_SLOTS) {
+    assert.ok(
+      PRODUCT_SEEDS.filter((item) => item.category === slot).length >= 4,
+      `${slot} should contain at least four products`,
+    );
+  }
+});
+
+test("normalizes legacy Chinese and English category aliases", () => {
+  const aliases = {
+    top: ["shirt", "tshirt", "upper", "上衣", "T恤"],
+    bottom: ["pants", "trousers", "skirt", "裤子", "裙子"],
+    shoes: ["shoe", "sneakers", "loafers", "鞋"],
+    outerwear: ["coat", "jacket", "外套"],
+    accessories: ["bag", "hat", "scarf", "配饰"],
+  };
+  for (const [slot, values] of Object.entries(aliases)) {
+    assert.ok(values.every((value) => canonicalCategory(value) === slot));
+  }
 });
 
 test("matches products by category, style, color and body type", () => {
@@ -28,7 +44,7 @@ test("matches products by category, style, color and body type", () => {
   });
 
   assert.ok(products.length > 0);
-  assert.ok(products.every((item) => item.category === "外套"));
+  assert.ok(products.every((item) => item.category === "outerwear"));
   assert.equal(products[0].product_id, "coat-001");
   assert.equal(products[0].platform, "mock-catalog");
   assert.equal(products[0].is_mock, true);
@@ -52,11 +68,11 @@ test("matches AI query objects to catalog-backed recommendations", () => {
   assert.ok(products.every((item) => item.product_id && item.title && item.price >= 0));
   assert.deepEqual(
     new Set(products.map((item) => item.category)),
-    new Set(["T恤", "裤子", "鞋"]),
+    new Set(["top", "bottom", "shoes"]),
   );
 });
 
-test("respects an explicit total outfit budget without inventing one", () => {
+test("uses category fallback when an exact budget match is unavailable", () => {
   const catalog = new ProductCatalog();
   const products = catalog.recommendForQueries([
     {category: "T恤", keyword: "透气"},
@@ -64,7 +80,8 @@ test("respects an explicit total outfit budget without inventing one", () => {
   ], {budget: 500});
 
   assert.ok(products.length >= 2);
-  assert.ok(products.every((item) => item.price <= 250));
+  assert.ok(products.some((item) => item.category === "top"));
+  assert.ok(products.some((item) => item.category === "bottom"));
 });
 
 test("unfiltered recommendations keep every outfit category available", () => {
@@ -73,8 +90,24 @@ test("unfiltered recommendations keep every outfit category available", () => {
   assert.equal(products.length, 12);
   assert.deepEqual(
     new Set(products.map((item) => item.category)),
-    new Set(["T恤", "裤子", "鞋", "外套"]),
+    new Set(CATEGORY_SLOTS),
   );
+  assert.equal(new Set(products.map((item) => item.product_id)).size, 12);
+});
+
+test("falls back from style to color to season to any item in category", () => {
+  const customProducts = [
+    {...PRODUCT_SEEDS[0], product_id: "style", id: "style", style: "极简", color: "白色", season: "四季", tags: []},
+    {...PRODUCT_SEEDS[0], product_id: "color", id: "color", style: "休闲", color: "森林绿", season: "四季", tags: []},
+    {...PRODUCT_SEEDS[0], product_id: "season", id: "season", style: "休闲", color: "白色", season: "秋冬", tags: []},
+    {...PRODUCT_SEEDS[0], product_id: "any", id: "any", style: "休闲", color: "白色", season: "四季", tags: []},
+  ];
+  const catalog = new ProductCatalog(customProducts);
+
+  assert.equal(catalog.recommend({category: "上衣", style: "极简"})[0].product_id, "style");
+  assert.equal(catalog.recommend({category: "top", color: "森林绿"})[0].product_id, "color");
+  assert.equal(catalog.recommend({category: "shirt", season: "秋冬"})[0].product_id, "season");
+  assert.ok(catalog.recommend({category: "upper", style: "不存在"}).length > 0);
 });
 
 test("GET /products/recommend returns matched catalog products", async () => {
@@ -89,8 +122,10 @@ test("GET /products/recommend returns matched catalog products", async () => {
     assert.equal(response.status, 200);
     assert.ok(Array.isArray(body.products));
     assert.ok(body.products.length > 0);
-    assert.ok(body.products.every((item) => item.category === "鞋"));
+    assert.ok(body.products.every((item) => item.category === "shoes"));
     assert.ok(body.products.every((item) => item.product_id && item.stock_status));
+    assert.deepEqual(Object.keys(body.categorySlots), CATEGORY_SLOTS);
+    assert.equal(body.categorySlots.shoes.length, body.products.length);
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
@@ -115,8 +150,28 @@ test("POST /products/recommend returns Mock Provider products", async () => {
     assert.equal(response.status, 200);
     assert.ok(Array.isArray(body.products));
     assert.ok(body.products.length > 0);
-    assert.ok(body.products.every((item) => item.category === "外套"));
+    assert.ok(body.products.every((item) => item.category === "outerwear"));
     assert.ok(body.products.every((item) => item.is_mock === true));
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test("default recommendation endpoint returns complete categorySlots", async () => {
+  const server = await listenForRequests(app, 0);
+  try {
+    const {port} = server.address();
+    const response = await fetch(`http://127.0.0.1:${port}/products/recommend`);
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.ok(body.categorySlots.top.length >= 1);
+    assert.ok(body.categorySlots.bottom.length >= 1);
+    assert.ok(body.categorySlots.shoes.length >= 1);
+    assert.ok(body.categorySlots.outerwear.length >= 1);
+    assert.ok(body.categorySlots.accessories.length >= 1);
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));

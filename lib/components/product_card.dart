@@ -190,7 +190,7 @@ class ProductCard extends StatelessWidget {
                         children: [
                           Expanded(
                             child: Text(
-                              '${product.category} · ${product.color}',
+                              '${_placement(product)} · ${product.color}',
                               style: const TextStyle(
                                 color: Color(0xFF807B75),
                                 fontSize: 11,

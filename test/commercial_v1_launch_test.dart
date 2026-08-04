@@ -65,6 +65,133 @@ void main() {
     expect(products.single.estimatedCommission, closeTo(47.88, 0.001));
   });
 
+  test('remote product source parses the deployed mock response contract',
+      () async {
+    final client = MockClient((request) async {
+      expect(request.method, 'GET');
+      return http.Response(
+        jsonEncode({
+          'products': [
+            {
+              'product_id': 'tee-001',
+              'source': 'mock',
+              'title': 'AIRism 圆领T恤',
+              'brand': 'Uniqlo',
+              'category': 'T恤',
+              'price': 99,
+              'image_url': 'assets/images/products/structured_shirt.jpg',
+              'purchase_url': '',
+              'platform': 'mock-catalog',
+              'commission_rate': 0,
+              'stock_status': 'in_stock',
+              'is_mock': true,
+              'tags': ['极简', '通勤'],
+            },
+          ],
+        }),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+    final service = RemoteBrandProductService(
+      catalogEndpoint: Uri.parse('https://api.example.com/products/recommend'),
+      client: client,
+    );
+
+    final products = await service.fetchProducts();
+
+    expect(products, hasLength(1));
+    expect(products.single.id, 'tee-001');
+    expect(products.single.wardrobeSlot, ProductCategory.top);
+    expect(products.single.isMock, isTrue);
+    expect(products.single.styleTags, ['极简', '通勤']);
+  });
+
+  test('remote product source accepts data.products and items wrappers',
+      () async {
+    var requestCount = 0;
+    final client = MockClient((_) async {
+      requestCount += 1;
+      final productJson = {
+        'product_id': 'pants-001',
+        'title': '高腰直筒裤',
+        'brand': 'Uniqlo',
+        'category': '裤子',
+        'price': 299,
+        'image_url': 'assets/images/products/pleated_trousers.jpg',
+        'purchase_url': '',
+        'stock_status': 'in_stock',
+        'is_mock': true,
+      };
+      return http.Response.bytes(
+        utf8.encode(jsonEncode(
+          requestCount == 1
+              ? {
+                  'data': {
+                    'products': [productJson]
+                  },
+                }
+              : {
+                  'items': [productJson],
+                },
+        )),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+    final service = RemoteBrandProductService(
+      catalogEndpoint: Uri.parse('https://api.example.com/products/recommend'),
+      client: client,
+    );
+
+    expect(await service.fetchProducts(), hasLength(1));
+    expect(await service.fetchProducts(), hasLength(1));
+  });
+
+  test('remote product source prioritizes categorySlots over products',
+      () async {
+    Map<String, dynamic> item(String id, String category) => {
+          'product_id': id,
+          'title': id,
+          'brand': 'Shupi Select',
+          'category': category,
+          'price': 199,
+          'image_url': 'assets/images/products/structured_shirt.jpg',
+          'purchase_url': '',
+          'stock_status': 'in_stock',
+          'is_mock': true,
+        };
+    final client = MockClient((_) async {
+      return http.Response.bytes(
+        utf8.encode(
+          jsonEncode({
+            'products': [item('legacy-bottom', 'bottom')],
+            'categorySlots': {
+              'top': [item('slot-top', 'shirt')],
+              'bottom': [item('slot-bottom', 'pants')],
+              'shoes': [item('slot-shoes', 'sneakers')],
+              'outerwear': [item('slot-outerwear', 'jacket')],
+              'accessories': [item('slot-accessories', 'bag')],
+            },
+          }),
+        ),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+    final service = RemoteBrandProductService(
+      catalogEndpoint: Uri.parse('https://api.example.com/products/recommend'),
+      client: client,
+    );
+
+    final products = await service.fetchProducts();
+
+    expect(products, hasLength(5));
+    expect(products.map((product) => product.wardrobeSlot).toList(),
+        ProductCategory.values);
+    expect(products.any((product) => product.id == 'legacy-bottom'), isFalse);
+  });
+
   test('affiliate purchase confirmation produces revenue summary', () async {
     final launcher = _FakePurchaseLauncher();
     final analytics = ProductAnalyticsService(

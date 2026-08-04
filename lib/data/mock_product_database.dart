@@ -23,6 +23,12 @@ abstract final class MockProductDatabase {
         ProductCategory.shoes, '699', '通勤', '曜石黑'),
     _ProductSeed('fitai-minimal-watch', 'Shupi Select', '极简银黑腕表',
         ProductCategory.accessories, '599', '极简', '银黑色'),
+    _ProductSeed('fitai-forest-tote', 'Shupi Select', '森林绿通勤托特包',
+        ProductCategory.accessories, '329', '通勤', '森林绿'),
+    _ProductSeed('fitai-light-cap', 'Shupi Select', '轻量简约棒球帽',
+        ProductCategory.accessories, '129', '休闲', '米白色'),
+    _ProductSeed('fitai-wool-scarf', 'Shupi Select', '羊毛混纺围巾',
+        ProductCategory.accessories, '259', '高级感', '深灰色'),
     _ProductSeed('nike-dri-fit-tee', 'Nike', 'Dri-FIT 速干训练T恤',
         ProductCategory.tee, '249', '运动', '雾灰色'),
     _ProductSeed('adidas-training-tee', 'Adidas', 'AEROREADY 运动上衣',
@@ -167,7 +173,7 @@ abstract final class MockProductDatabase {
   }
 
   static String _imageForCategory(String category, String id) {
-    if (id == 'fitai-minimal-watch') {
+    if (category == ProductCategory.accessories) {
       return 'assets/images/products/minimal_watch.jpg';
     }
     if (category == ProductCategory.outerwear) {

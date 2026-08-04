@@ -68,6 +68,7 @@ test("maps a signed Taobao response into the stable product contract", async () 
   assert.equal(products.length, 1);
   assert.equal(products[0].product_id, "123456");
   assert.equal(products[0].source, "taobao");
+  assert.equal(products[0].category, "outerwear");
   assert.equal(products[0].shop_name, "测试品牌店");
   assert.equal(products[0].purchase_url, "https://s.click.taobao.com/affiliate");
   assert.equal(products[0].is_mock, false);
