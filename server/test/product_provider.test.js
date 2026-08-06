@@ -40,6 +40,13 @@ function response(method, items) {
   return {[key]: {result_list: {map_data: items}}};
 }
 
+test("16516 uses the authorized upgraded material search method", () => {
+  assert.equal(
+    TAOBAO_MATERIAL_SEARCH_METHOD,
+    "taobao.tbk.dg.material.optional.upgrade",
+  );
+});
+
 function providerWithClient(client) {
   return new TaobaoProductProvider({
     pid: "mm_100_200_300",
@@ -127,6 +134,26 @@ test("empty 16516 result uses 27399 material sample before Mock", async () => {
   assert.ok(products[0].tags.includes("sample"));
 });
 
+test("successful empty Taobao responses do not silently become Mock products", async () => {
+  const provider = providerWithClient({
+    call: async (method) => response(method, []),
+  });
+  const products = await provider.recommend({category: "outerwear", limit: 1});
+  assert.deepEqual(products, []);
+});
+
+test("Taobao API exceptions still fall back to Mock products", async () => {
+  const provider = providerWithClient({
+    call: async () => {
+      throw new TaobaoApiError("network unavailable", {code: "TAOBAO_NETWORK_ERROR"});
+    },
+  });
+  const products = await provider.recommend({category: "outerwear", limit: 1});
+  assert.equal(products.length, 1);
+  assert.equal(products[0].source, "mock");
+  assert.equal(products[0].is_mock, true);
+});
+
 test("one Taobao category failure does not block other categories", async () => {
   const provider = providerWithClient({
     call: async (method, params) => {
@@ -164,7 +191,7 @@ test("non-HTTPS URLs never become purchase links", () => {
   assert.equal(product.detail_url, "");
 });
 
-test("auto mode requires PID and Adzone and gates Taobao with health check", async () => {
+test("auto mode requires PID and Adzone and calls Taobao recommendations directly", async () => {
   const client = {call: async (method) => response(method, [taobaoItem()])};
   const provider = createProductProvider({
     environment: {
@@ -194,7 +221,7 @@ test("auto mode requires PID and Adzone and gates Taobao with health check", asy
   assert.ok(missingAdzone instanceof MockProductProvider);
 });
 
-test("permission failure in auto health check safely falls back to Mock", async () => {
+test("permission failure in auto mode safely falls back to Mock", async () => {
   const provider = createProductProvider({
     environment: {
       PRODUCT_PROVIDER: "auto",
@@ -212,16 +239,16 @@ test("permission failure in auto health check safely falls back to Mock", async 
   assert.ok(products.every((product) => product.is_mock === true));
 });
 
-test("auto mode coalesces concurrent health checks", async () => {
-  let healthCalls = 0;
-  let releaseHealth;
-  const healthGate = new Promise((resolve) => { releaseHealth = resolve; });
+test("auto mode does not cache a failure that skips later Taobao calls", async () => {
+  let recommendationCalls = 0;
   const taobao = {
-    healthCheck: async () => {
-      healthCalls += 1;
-      await healthGate;
+    recommend: async () => {
+      recommendationCalls += 1;
+      if (recommendationCalls === 1) {
+        return [{product_id: "mock-1", source: "mock", is_mock: true}];
+      }
+      return [{product_id: "taobao-1", source: "taobao", is_mock: false}];
     },
-    recommend: async () => [{product_id: "taobao-1", source: "taobao"}],
   };
   const mock = {recommend: async () => [{product_id: "mock-1", is_mock: true}]};
   const provider = new AutoProductProvider({
@@ -230,14 +257,31 @@ test("auto mode coalesces concurrent health checks", async () => {
     logger: {info() {}, warn() {}},
   });
 
-  const first = provider.recommend({category: "top"});
-  const second = provider.recommend({category: "shoes"});
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(healthCalls, 1);
-  releaseHealth();
-  const results = await Promise.all([first, second]);
+  const first = await provider.recommend({category: "top"});
+  assert.equal(provider.status, "mock");
+  const second = await provider.recommend({category: "shoes"});
+  const results = [first, second];
+  assert.equal(recommendationCalls, 2);
   assert.equal(provider.status, "taobao");
-  assert.ok(results.flat().every((product) => product.source === "taobao"));
+  assert.equal(results[1][0].source, "taobao");
+});
+
+test("legacy Taobao URLs map to affiliate, coupon, purchase and PID fields", () => {
+  const product = mapTaobaoProduct({
+    item_id: "legacy-1",
+    title: "基础上衣",
+    url: "//s.click.taobao.com/affiliate",
+    coupon_share_url: "//uland.taobao.com/coupon",
+    commission_rate: "1250",
+  }, {pid: "mm_1_2_3", fallbackCategory: "top"});
+  assert.equal(product.source, "taobao");
+  assert.equal(product.platform, "taobao");
+  assert.equal(product.affiliate_url, "https://s.click.taobao.com/affiliate");
+  assert.equal(product.coupon_url, "https://uland.taobao.com/coupon");
+  assert.equal(product.purchase_url, "https://uland.taobao.com/coupon");
+  assert.equal(product.pid, "mm_1_2_3");
+  assert.equal(product.commission_rate, 0.125);
+  assert.equal(product.is_mock, false);
 });
 
 test("mismatched PID and Adzone safely keep Mock active", () => {

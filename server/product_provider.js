@@ -107,7 +107,6 @@ class TaobaoProductProvider extends ProductProvider {
           const sampled = await this.#sample(scoped);
           products = uniqueProducts([...products, ...sampled]);
         }
-        if (products.length === 0) return this.#mockFallback(scoped);
         return products.slice(0, scoped.limit);
       } catch (error) {
         this.logger.warn?.("淘宝分类商品降级", {
@@ -148,52 +147,22 @@ class TaobaoProductProvider extends ProductProvider {
 }
 
 class AutoProductProvider extends ProductProvider {
-  constructor({taobao, mock, logger = console, healthRetryMs = 60_000}) {
+  constructor({taobao, logger = console}) {
     super();
     this.taobao = taobao;
-    this.mock = mock;
     this.logger = logger;
     this.name = "auto";
     this.configured = true;
     this.status = "checking";
     this.health = null;
-    this.healthPromise = null;
-    this.lastHealthFailureAt = 0;
-    this.healthRetryMs = healthRetryMs;
   }
 
   async recommend(filters = {}) {
-    if (!await this.#ensureHealthy()) return this.mock.recommend(filters);
-    return this.taobao.recommend(filters);
-  }
-
-  async #ensureHealthy() {
-    if (this.health === true) return true;
-    if (this.health === false &&
-        Date.now() - this.lastHealthFailureAt < this.healthRetryMs) {
-      return false;
-    }
-    if (!this.healthPromise) {
-      this.status = "checking";
-      this.healthPromise = this.taobao.healthCheck().then(() => {
-        this.health = true;
-        this.status = "taobao";
-        this.logger.info?.("淘宝 Provider 健康检查通过", {configured: true});
-        return true;
-      }).catch((error) => {
-        this.health = false;
-        this.status = "mock";
-        this.lastHealthFailureAt = Date.now();
-        this.logger.warn?.("淘宝 Provider 不可用，使用 Mock", {
-          configured: true,
-          errorCode: safeProviderCode(error),
-        });
-        return false;
-      }).finally(() => {
-        this.healthPromise = null;
-      });
-    }
-    return this.healthPromise;
+    const products = await this.taobao.recommend(filters);
+    const hasTaobaoProducts = products.some((product) => product?.source === "taobao");
+    this.health = hasTaobaoProducts || products.length === 0;
+    this.status = this.health ? "taobao" : "mock";
+    return products;
   }
 }
 
@@ -254,7 +223,6 @@ function createProductProvider({environment = process.env, catalog, logger = con
   if (mode === "taobao") return taobao;
   return new AutoProductProvider({
     taobao,
-    mock: new MockProductProvider({catalog: productCatalog}),
     logger,
   });
 }
@@ -322,12 +290,19 @@ function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}, origi
   const title = firstText(basic.short_title, basic.title, item.short_title, item.title);
   if (!title) throw new ProductProviderError("淘宝商品缺少标题");
   const couponUrl = firstHttps(
-    publish.coupon_share_url, publish.coupon_click_url, item.coupon_share_url, item.coupon_click_url,
+    publish.coupon_share_url, publish.couponShareUrl,
+    publish.coupon_click_url, publish.couponClickUrl,
+    item.coupon_share_url, item.couponShareUrl,
+    item.coupon_click_url, item.couponClickUrl,
   );
   const affiliateUrl = firstHttps(
-    publish.click_url, publish.clickUrl, publish.coupon_share_url,
-    item.click_url, item.clickUrl, item.coupon_share_url,
+    publish.click_url, publish.clickUrl,
+    publish.item_url, publish.itemUrl,
+    item.click_url, item.clickUrl,
+    item.url,
+    couponUrl,
   );
+  const purchaseUrl = couponUrl || affiliateUrl;
   const rawCategory = firstText(
     basic.category_name, basic.level_one_category_name, item.category_name,
     item.level_one_category_name, fallbackCategory,
@@ -360,8 +335,8 @@ function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}, origi
     ) || undefined,
     recommendation_reason: buildRecommendationReason(filters),
     match_explanation: buildMatchExplanation(filters),
-    detail_url: firstHttps(basic.item_url, item.item_url, item.url),
-    purchase_url: affiliateUrl,
+    detail_url: firstHttps(basic.item_url, basic.itemUrl, item.item_url, item.itemUrl),
+    purchase_url: purchaseUrl,
     platform: "taobao",
     commission_rate: commissionRate,
     affiliate_url: affiliateUrl,

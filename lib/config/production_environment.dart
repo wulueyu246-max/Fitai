@@ -16,11 +16,12 @@ class ProductionEnvironment {
     const analyticsApiBaseUrl =
         String.fromEnvironment('ANALYTICS_API_BASE_URL');
     const productCatalogUrl = String.fromEnvironment('PRODUCT_CATALOG_URL');
+    const appEnvironment = String.fromEnvironment(
+      'APP_ENV',
+      defaultValue: 'development',
+    );
     return ProductionEnvironment(
-      appEnvironment: String.fromEnvironment(
-        'APP_ENV',
-        defaultValue: 'development',
-      ),
+      appEnvironment: appEnvironment,
       apiBaseUrl: appConfig.apiBaseUrl,
       authApiBaseUrl:
           authApiBaseUrl.isEmpty ? appConfig.apiBaseUrl : authApiBaseUrl,
