@@ -162,3 +162,36 @@ test("model prompt requires four to six selections for every sufficiently large 
   assert.equal(payload.product_groups[1].maximum, 2);
   assert.match(messages[0].content, /而不是整套合计选择 4 至 6 件/);
 });
+
+test("under-selected groups receive one focused repair call", async () => {
+  let calls = 0;
+  const reranker = new ProductAestheticReranker({
+    client: {
+      chat: {completions: {create: async (request) => {
+        calls += 1;
+        const payload = JSON.parse(request.messages[1].content);
+        if (calls === 1) return response([selection("top-1")]);
+        assert.equal(payload.product_groups.length, 1);
+        return response([
+          selection("top-1"),
+          selection("top-2"),
+          selection("top-3"),
+          selection("top-4"),
+        ]);
+      }}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await reranker.rerank({
+    groups: [group("top", ["top-1", "top-2", "top-3", "top-4", "top-5"])],
+    context: {gender: "male"},
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(products.length, 4);
+  assert.ok(products.every((product) => product.ai_rerank_fallback === false));
+  assert.equal(reranker.getStats().call_count, 2);
+  assert.equal(reranker.getStats().fallback_count, 0);
+});

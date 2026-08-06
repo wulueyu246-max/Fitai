@@ -74,40 +74,52 @@ class ProductAestheticReranker {
     const cached = this.#readCache(cacheKey);
     if (cached) {
       this.metrics.cacheHits += 1;
+      const cachedFallback = cached.some((product) => product.ai_rerank_fallback === true);
       this.#logResult({
         requestId,
         candidateCount,
         selectedCount: cached.length,
         durationMs: 0,
         cached: true,
-        fallback: false,
+        fallback: cachedFallback,
+        errorCode: cachedFallback ? "AI_RERANK_CACHED_FALLBACK" : undefined,
       });
       return cloneProducts(cached);
     }
 
     const startedAt = Date.now();
-    this.metrics.callCount += 1;
     try {
-      const response = await this.client.chat.completions.create(
-        {
-          model: this.model,
-          response_format: {type: "json_object"},
-          temperature: 0.2,
-          messages: buildMessages(normalizedGroups, context),
-        },
-        {
-          timeout: this.timeoutMs,
-          maxRetries: 0,
-        },
-      );
-      const selected = validateSelection(
-        parseJsonResponse(extractText(response)),
+      let selected = validateSelection(
+        await this.#select(normalizedGroups, context),
         normalizedGroups,
         selectionLimit,
       );
+      const incompleteGroups = groupsBelowMinimum(normalizedGroups, selected);
+      let usedFallback = false;
+      if (incompleteGroups.length > 0) {
+        let repaired = [];
+        try {
+          repaired = validateSelection(
+            await this.#select(incompleteGroups, context),
+            incompleteGroups,
+            selectionLimit,
+          );
+        } catch (_) {
+          // The remaining groups use the documented rule fallback below.
+        }
+        selected = replaceGroupProducts(selected, repaired, incompleteGroups);
+        const unresolvedGroups = groupsBelowMinimum(incompleteGroups, selected);
+        if (unresolvedGroups.length > 0) {
+          usedFallback = true;
+          selected = replaceGroupProducts(
+            selected,
+            ruleFallback(unresolvedGroups, selectionLimit),
+            unresolvedGroups,
+          );
+        }
+      }
       const durationMs = Date.now() - startedAt;
-      this.metrics.totalDurationMs += durationMs;
-      this.metrics.lastDurationMs = durationMs;
+      if (usedFallback) this.metrics.fallbackCount += 1;
       this.#writeCache(cacheKey, selected);
       this.#logResult({
         requestId,
@@ -115,13 +127,12 @@ class ProductAestheticReranker {
         selectedCount: selected.length,
         durationMs,
         cached: false,
-        fallback: false,
+        fallback: usedFallback,
+        errorCode: usedFallback ? "AI_RERANK_INCOMPLETE_SELECTION" : undefined,
       });
       return cloneProducts(selected);
     } catch (error) {
       const durationMs = Date.now() - startedAt;
-      this.metrics.totalDurationMs += durationMs;
-      this.metrics.lastDurationMs = durationMs;
       this.metrics.fallbackCount += 1;
       const products = fallback();
       this.#logResult({
@@ -134,6 +145,30 @@ class ProductAestheticReranker {
         errorCode: safeErrorCode(error),
       });
       return products;
+    }
+  }
+
+  async #select(groups, context) {
+    const startedAt = Date.now();
+    this.metrics.callCount += 1;
+    try {
+      const response = await this.client.chat.completions.create(
+        {
+          model: this.model,
+          response_format: {type: "json_object"},
+          temperature: 0.2,
+          messages: buildMessages(groups, context),
+        },
+        {
+          timeout: this.timeoutMs,
+          maxRetries: 0,
+        },
+      );
+      return parseJsonResponse(extractText(response));
+    } finally {
+      const durationMs = Date.now() - startedAt;
+      this.metrics.totalDurationMs += durationMs;
+      this.metrics.lastDurationMs = durationMs;
     }
   }
 
@@ -276,12 +311,22 @@ function validateSelection(payload, groups, selectionLimit) {
   if (selectedByGroup.every((products) => products.length === 0)) {
     throw new Error("AI_RERANK_NO_VALID_SELECTION");
   }
-  return selectedByGroup.flatMap((products, groupIndex) => {
-    if (products.length === 0) {
-      return ruleFallback([groups[groupIndex]], selectionLimit);
-    }
-    return applyLabels(products);
-  });
+  return selectedByGroup.flatMap((products) => applyLabels(products));
+}
+
+function groupsBelowMinimum(groups, products) {
+  const selectedIds = new Set(products.map((product) => String(product.product_id)));
+  return groups.filter((group) => group.candidates.length >= 4 &&
+    group.candidates.filter((product) => selectedIds.has(String(product.product_id))).length < 4);
+}
+
+function replaceGroupProducts(products, replacements, groups) {
+  const groupIds = new Set(groups.flatMap((group) =>
+    group.candidates.map((product) => String(product.product_id))));
+  return [
+    ...products.filter((product) => !groupIds.has(String(product.product_id))),
+    ...replacements,
+  ];
 }
 
 function ruleFallback(groups, selectionLimit) {
