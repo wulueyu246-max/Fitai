@@ -104,7 +104,6 @@ class TaobaoApiClient {
       format: "json",
       method,
       sign_method: "md5",
-      simplify: "true",
       timestamp: taobaoTimestamp(),
       v: "2.0",
       ...cleanParams(apiParams),

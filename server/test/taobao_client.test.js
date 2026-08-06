@@ -33,6 +33,7 @@ test("Taobao client signs official parameters and logs only safe request diagnos
   const body = Object.fromEntries(new URLSearchParams(requestBody));
   const {sign, ...unsigned} = body;
   assert.equal(sign, signTaobaoRequest(unsigned, "private-test-secret"));
+  assert.equal("simplify" in body, false);
   assert.equal(requestBody.includes("private-test-secret"), false);
   const logged = JSON.stringify(logs);
   assert.equal(logged.includes("private-test-secret"), false);
