@@ -20,7 +20,7 @@ class RemoteBrandProductService implements BrandProductService {
       'AFFILIATE_CHANNEL_ID',
       defaultValue: 'fitai-commercial-test',
     ),
-    this.timeout = const Duration(seconds: 30),
+    this.timeout = const Duration(seconds: 75),
   }) : _client = client ?? http.Client();
 
   final Uri catalogEndpoint;

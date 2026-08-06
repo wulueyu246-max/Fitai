@@ -328,13 +328,59 @@ test("structured queries try precise keywords in order and expose relevance fiel
     limit: 1,
   }]);
 
-  assert.deepEqual(calls, searchKeywords);
+  assert.deepEqual(calls.slice(0, 2), searchKeywords);
   assert.equal(products.length, 1);
   assert.equal(products[0].gender, "male");
   assert.equal(products[0].category, "top");
   assert.equal(products[0].search_keyword, searchKeywords[1]);
   assert.ok(products[0].relevance_score >= 80);
   assert.equal(products[0].is_mock, false);
+});
+
+test("builds a twenty-item hard-filtered pool and returns up to six AI selections", async () => {
+  const pageSizes = [];
+  const capturedGroups = [];
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client: {
+      call: async (method, params) => {
+        pageSizes.push(params.page_size);
+        return response(method, Array.from({length: 30}, (_, index) => taobaoItem({
+          item_basic_info: {
+            item_id: `polo-${index}`,
+            title: `男士浅灰色短袖Polo夏季${index}`,
+            category_name: "Polo上衣",
+            pict_url: `//img.example.com/polo-${index}.jpg`,
+          },
+          publish_info: {
+            click_url: `//s.click.taobao.com/polo-${index}`,
+          },
+        })));
+      },
+    },
+    reranker: {
+      rerank: async ({groups}) => {
+        capturedGroups.push(...groups);
+        return groups.flatMap((group) => group.candidates.slice(0, 6));
+      },
+    },
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await provider.recommendForQueries([{
+    category: "top",
+    gender: "male",
+    item_name: "浅灰色短袖Polo",
+    color: "浅灰色",
+    season: "summer",
+    search_keywords: ["男士 浅灰色 短袖 Polo"],
+  }]);
+
+  assert.deepEqual(pageSizes, ["50"]);
+  assert.equal(capturedGroups[0].candidates.length, 20);
+  assert.equal(products.length, 6);
+  assert.ok(products.every((product) => product.source === "taobao"));
 });
 
 test("extracts official simplified camelCase result containers", () => {

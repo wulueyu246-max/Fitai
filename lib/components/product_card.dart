@@ -245,16 +245,67 @@ class ProductCard extends StatelessWidget {
                           ),
                         ),
                       ],
+                      if (product.hasAiTasteSelection) ...[
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            if (product.aiLabel.isNotEmpty)
+                              Container(
+                                key: Key('ai-label-${product.id}'),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFE7EFE8),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  product.aiLabel,
+                                  style: const TextStyle(
+                                    color: Color(0xFF355B43),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                            const Spacer(),
+                            Text(
+                              'AI匹配度 ${product.finalScore.round()}%',
+                              key: Key('ai-match-${product.id}'),
+                              style: const TextStyle(
+                                color: Color(0xFF355B43),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                       if (!compact &&
-                          product.recommendationReason.isNotEmpty) ...[
+                          product.displayRecommendationReason.isNotEmpty) ...[
                         const SizedBox(height: 8),
                         Text(
-                          product.recommendationReason,
+                          product.displayRecommendationReason,
                           style: const TextStyle(
                             color: Color(0xFF5F5954),
                             fontSize: 11.5,
                             height: 1.4,
                             fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                      if (!compact && product.aiConcern.isNotEmpty) ...[
+                        const SizedBox(height: 5),
+                        Text(
+                          '注意：${product.aiConcern}',
+                          key: Key('ai-concern-${product.id}'),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Color(0xFF8A5A42),
+                            fontSize: 10.5,
+                            height: 1.35,
                           ),
                         ),
                       ],

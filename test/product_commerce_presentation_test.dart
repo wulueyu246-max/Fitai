@@ -12,6 +12,10 @@ void main() {
     String purchaseUrl = 'https://shop.example.com/item',
     String imageUrl = 'assets/images/products/structured_shirt.jpg',
     String? sales,
+    double finalScore = 0,
+    String aiLabel = '',
+    String aiConcern = '',
+    String aiRecommendationReason = '',
   }) {
     return Product(
       id: id,
@@ -37,6 +41,14 @@ void main() {
       sales: sales,
       recommendationReason: '根据通勤场景与简约风格推荐',
       matchExplanation: '匹配上衣、森林绿和合体版型',
+      finalScore: finalScore,
+      aiTasteScore: finalScore,
+      fitScore: finalScore,
+      outfitCoherenceScore: finalScore,
+      valueScore: finalScore,
+      aiLabel: aiLabel,
+      aiConcern: aiConcern,
+      aiRecommendationReason: aiRecommendationReason,
       isMock: isMock,
     );
   }
@@ -83,6 +95,67 @@ void main() {
       isFalse,
     );
     expect(product(isMock: true).isPurchasable, isFalse);
+  });
+
+  test('parses AI aesthetic scores, reason, concern and label', () {
+    final parsed = Product.fromJson({
+      'product_id': 'taobao-ai-1',
+      'title': '男士浅灰色短袖Polo',
+      'category': 'top',
+      'image_url': 'https://img.example.com/polo.jpg',
+      'price': 199,
+      'purchase_url': 'https://s.click.taobao.com/polo',
+      'source': 'taobao',
+      'is_mock': false,
+      'relevance_score': 88,
+      'ai_taste_score': 94,
+      'fit_score': 91,
+      'outfit_coherence_score': 95,
+      'value_score': 86,
+      'final_score': 92.4,
+      'ai_recommendation_reason': '版型简洁，与整套穿搭协调。',
+      'ai_concern': '面料信息不完整。',
+      'ai_label': 'AI首选',
+      'ai_rerank_fallback': false,
+    });
+
+    expect(parsed.relevanceScore, 88);
+    expect(parsed.aiTasteScore, 94);
+    expect(parsed.finalScore, 92.4);
+    expect(parsed.aiRecommendationReason, '版型简洁，与整套穿搭协调。');
+    expect(parsed.aiConcern, '面料信息不完整。');
+    expect(parsed.aiLabel, 'AI首选');
+    expect(parsed.hasAiTasteSelection, isTrue);
+  });
+
+  testWidgets('product card displays AI match, label, reason and concern', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: SizedBox(
+              width: 390,
+              child: ProductCard(
+                product: product(
+                  finalScore: 92.4,
+                  aiLabel: 'AI首选',
+                  aiConcern: '购买前建议查看面料详情。',
+                  aiRecommendationReason: '版型简洁，与米白色下装协调。',
+                ),
+                selected: false,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('AI首选'), findsOneWidget);
+    expect(find.text('AI匹配度 92%'), findsOneWidget);
+    expect(find.text('版型简洁，与米白色下装协调。'), findsOneWidget);
+    expect(find.text('注意：购买前建议查看面料详情。'), findsOneWidget);
   });
 
   testWidgets('Mock product card shows review state and disables purchase', (

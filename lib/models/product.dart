@@ -102,6 +102,16 @@ class Product {
     this.sales,
     this.recommendationReason = '',
     this.matchExplanation = '',
+    this.relevanceScore = 0,
+    this.aiTasteScore = 0,
+    this.fitScore = 0,
+    this.outfitCoherenceScore = 0,
+    this.valueScore = 0,
+    this.finalScore = 0,
+    this.aiRecommendationReason = '',
+    this.aiConcern = '',
+    this.aiLabel = '',
+    this.aiRerankFallback = false,
     this.isMock = false,
     String? purchaseUrl,
     double? commission,
@@ -230,6 +240,42 @@ class Product {
         ['matchExplanation', 'match_explanation'],
         fallback: '',
       ),
+      relevanceScore: _readOptionalDouble(
+        json,
+        ['relevanceScore', 'relevance_score'],
+      ),
+      aiTasteScore: _readOptionalDouble(
+        json,
+        ['aiTasteScore', 'ai_taste_score'],
+      ),
+      fitScore: _readOptionalDouble(json, ['fitScore', 'fit_score']),
+      outfitCoherenceScore: _readOptionalDouble(
+        json,
+        ['outfitCoherenceScore', 'outfit_coherence_score'],
+      ),
+      valueScore: _readOptionalDouble(json, ['valueScore', 'value_score']),
+      finalScore: _readOptionalDouble(
+        json,
+        ['finalScore', 'final_score', 'ai_match_score'],
+      ),
+      aiRecommendationReason: _readOptionalAliasedString(
+        json,
+        ['aiRecommendationReason', 'ai_recommendation_reason'],
+        fallback: '',
+      ),
+      aiConcern: _readOptionalAliasedString(
+        json,
+        ['aiConcern', 'ai_concern'],
+        fallback: '',
+      ),
+      aiLabel: _readOptionalAliasedString(
+        json,
+        ['aiLabel', 'ai_label'],
+        fallback: '',
+      ),
+      aiRerankFallback: json['aiRerankFallback'] as bool? ??
+          json['ai_rerank_fallback'] as bool? ??
+          false,
       isMock: json['isMock'] as bool? ??
           json['is_mock'] as bool? ??
           _looksLikeMockSource(json),
@@ -306,6 +352,16 @@ class Product {
   final String? sales;
   final String recommendationReason;
   final String matchExplanation;
+  final double relevanceScore;
+  final double aiTasteScore;
+  final double fitScore;
+  final double outfitCoherenceScore;
+  final double valueScore;
+  final double finalScore;
+  final String aiRecommendationReason;
+  final String aiConcern;
+  final String aiLabel;
+  final bool aiRerankFallback;
   final bool isMock;
   final int stock;
   final String description;
@@ -356,6 +412,11 @@ class Product {
   /// Backward-compatible alias for older UI and cached payloads.
   String get reason => aiReason;
 
+  bool get hasAiTasteSelection => !aiRerankFallback && finalScore > 0;
+  String get displayRecommendationReason => aiRecommendationReason.isNotEmpty
+      ? aiRecommendationReason
+      : recommendationReason;
+
   bool get isNetworkImage {
     final uri = Uri.tryParse(imageUrl);
     return uri != null && uri.scheme == 'https' && uri.host.isNotEmpty;
@@ -391,6 +452,16 @@ class Product {
     String? sales,
     String? recommendationReason,
     String? matchExplanation,
+    double? relevanceScore,
+    double? aiTasteScore,
+    double? fitScore,
+    double? outfitCoherenceScore,
+    double? valueScore,
+    double? finalScore,
+    String? aiRecommendationReason,
+    String? aiConcern,
+    String? aiLabel,
+    bool? aiRerankFallback,
     bool? isMock,
     double? commission,
     double? commissionRate,
@@ -424,6 +495,17 @@ class Product {
       sales: sales ?? this.sales,
       recommendationReason: recommendationReason ?? this.recommendationReason,
       matchExplanation: matchExplanation ?? this.matchExplanation,
+      relevanceScore: relevanceScore ?? this.relevanceScore,
+      aiTasteScore: aiTasteScore ?? this.aiTasteScore,
+      fitScore: fitScore ?? this.fitScore,
+      outfitCoherenceScore: outfitCoherenceScore ?? this.outfitCoherenceScore,
+      valueScore: valueScore ?? this.valueScore,
+      finalScore: finalScore ?? this.finalScore,
+      aiRecommendationReason:
+          aiRecommendationReason ?? this.aiRecommendationReason,
+      aiConcern: aiConcern ?? this.aiConcern,
+      aiLabel: aiLabel ?? this.aiLabel,
+      aiRerankFallback: aiRerankFallback ?? this.aiRerankFallback,
       isMock: isMock ?? this.isMock,
       commissionRate: commissionRate ?? commission ?? this.commissionRate,
     );
@@ -454,6 +536,16 @@ class Product {
       'sales': sales,
       'recommendationReason': recommendationReason,
       'matchExplanation': matchExplanation,
+      'relevanceScore': relevanceScore,
+      'aiTasteScore': aiTasteScore,
+      'fitScore': fitScore,
+      'outfitCoherenceScore': outfitCoherenceScore,
+      'valueScore': valueScore,
+      'finalScore': finalScore,
+      'aiRecommendationReason': aiRecommendationReason,
+      'aiConcern': aiConcern,
+      'aiLabel': aiLabel,
+      'aiRerankFallback': aiRerankFallback,
       'isMock': isMock,
       'stock': stock,
       'description': description,

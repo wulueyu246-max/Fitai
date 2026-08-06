@@ -89,6 +89,7 @@ class TaobaoProductProvider extends ProductProvider {
     timeoutMs,
     maxRetries,
     sampleMaterialId = DEFAULT_SAMPLE_MATERIAL_ID,
+    reranker = null,
     logger = console,
   }) {
     super();
@@ -97,6 +98,7 @@ class TaobaoProductProvider extends ProductProvider {
     this.siteId = placement.siteId;
     this.adzoneId = placement.adzoneId;
     this.sampleMaterialId = String(sampleMaterialId || DEFAULT_SAMPLE_MATERIAL_ID);
+    this.reranker = reranker;
     this.logger = logger;
     this.client = client || new TaobaoApiClient({
       appKey,
@@ -173,14 +175,26 @@ class TaobaoProductProvider extends ProductProvider {
       });
     }
     try {
-      const batches = await Promise.all(values.map((query) =>
-        this.#recommendRequirement({
+      const groups = await Promise.all(values.map(async (query) => {
+        const requirement = normalizeProductRequirement({...context, ...query}, context);
+        const candidates = await this.#candidatePool({
           ...context,
           ...query,
-          limit: Math.min(positiveInteger(query?.limit, 3), 3),
-        })));
+          ...requirement,
+          limit: 20,
+        });
+        return {requirement, candidates};
+      }));
+      const products = this.reranker
+        ? await this.reranker.rerank({
+          groups,
+          context,
+          requestId: context.requestId || "",
+          selectionLimit: 6,
+        })
+        : groups.flatMap((group) => group.candidates.slice(0, 6));
       this.status = "taobao";
-      return uniqueProducts(batches.flat()).slice(0, values.length * 3);
+      return uniqueProducts(products).slice(0, values.length * 6);
     } catch (error) {
       this.status = "error";
       throw asProductProviderError(error);
@@ -188,22 +202,28 @@ class TaobaoProductProvider extends ProductProvider {
   }
 
   async #recommendRequirement(filters) {
+    const targetLimit = Math.min(positiveInteger(filters.limit, 3), 6);
+    const products = await this.#candidatePool({...filters, limit: 20});
+    return products.slice(0, targetLimit);
+  }
+
+  async #candidatePool(filters) {
     const requirement = normalizeProductRequirement(filters, filters);
     const keywords = buildSearchKeywords(requirement);
-    const targetLimit = Math.min(positiveInteger(filters.limit, 3), 3);
+    const candidateLimit = Math.min(positiveInteger(filters.limit, 20), 20);
     let products = [];
     for (const searchKeyword of keywords) {
       const matches = await this.#search({
         ...filters,
         ...requirement,
         searchKeyword,
-        limit: Math.max(targetLimit * 6, 18),
+        limit: 50,
       });
       products = uniqueProducts([...products, ...matches])
         .sort((left, right) => right.relevance_score - left.relevance_score);
-      if (products.length >= targetLimit) break;
+      if (products.length >= candidateLimit) break;
     }
-    if (products.length < targetLimit) {
+    if (products.length < Math.min(candidateLimit, 4)) {
       const sampled = await this.#sample({
         ...filters,
         ...requirement,
@@ -213,7 +233,19 @@ class TaobaoProductProvider extends ProductProvider {
       products = uniqueProducts([...products, ...sampled])
         .sort((left, right) => right.relevance_score - left.relevance_score);
     }
-    return products.slice(0, targetLimit);
+    const budget = Number(filters.budget);
+    const hardFiltered = Number.isFinite(budget) && budget > 0
+      ? products.filter((product) => Number(product.price) <= budget)
+      : products;
+    this.logger.info?.("淘宝候选商品池完成", {
+      requestId: filters.requestId || undefined,
+      search_keyword: keywords[0],
+      gender: requirement.gender,
+      category: requirement.category,
+      candidateCount: products.length,
+      hardFilteredCount: hardFiltered.length,
+    });
+    return hardFiltered.slice(0, candidateLimit);
   }
 
   async #search(filters) {
@@ -341,7 +373,13 @@ class AutoProductProvider extends ProductProvider {
   }
 }
 
-function createProductProvider({environment = process.env, catalog, logger = console, client} = {}) {
+function createProductProvider({
+  environment = process.env,
+  catalog,
+  logger = console,
+  client,
+  reranker = null,
+} = {}) {
   const mode = String(environment.PRODUCT_PROVIDER || "auto").trim().toLowerCase();
   if (!new Set(["mock", "taobao", "auto"]).has(mode)) {
     throw new ProductProviderError("PRODUCT_PROVIDER 必须为 mock、taobao 或 auto", {
@@ -387,6 +425,7 @@ function createProductProvider({environment = process.env, catalog, logger = con
       timeoutMs: positiveInteger(environment.PRODUCT_PROVIDER_TIMEOUT_MS, 12_000),
       maxRetries: positiveInteger(environment.TAOBAO_MAX_RETRIES, 1),
       sampleMaterialId: environment.TAOBAO_SAMPLE_MATERIAL_ID || DEFAULT_SAMPLE_MATERIAL_ID,
+      reranker,
       logger,
     });
   } catch (error) {

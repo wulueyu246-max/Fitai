@@ -44,6 +44,7 @@ const {
   normalizeGender,
   normalizeProductRequirement,
 } = require("./product_relevance");
+const {ProductAestheticReranker} = require("./product_aesthetic_reranker");
 const {TaobaoService} = require("./taobao_service");
 
 require("dotenv").config({
@@ -152,6 +153,16 @@ const config = Object.freeze({
     30_000,
   ),
   aiMaxRetries: readNonNegativeInteger(process.env.AI_MAX_RETRIES, 0),
+  productRerankModel:
+    readOptionalString(process.env.PRODUCT_RERANK_MODEL) || aiConfig.model,
+  productRerankTimeoutMs: readPositiveInteger(
+    process.env.PRODUCT_RERANK_TIMEOUT_MS,
+    45_000,
+  ),
+  productRerankCacheTtlMs: readPositiveInteger(
+    process.env.PRODUCT_RERANK_CACHE_TTL_MS,
+    15 * 60 * 1000,
+  ),
   fallbackOnAiError: readBoolean(process.env.AI_FALLBACK_ON_ERROR, false),
   useProxy: proxyConfig.useProxy,
   aiProxyUrl: proxyConfig.proxyUrl,
@@ -283,11 +294,6 @@ const recommendationKeys = Object.freeze([
 
 const app = express();
 const productCatalog = new ProductCatalog();
-const productProvider = createProductProvider({
-  environment: process.env,
-  catalog: productCatalog,
-});
-const taobaoService = new TaobaoService({provider: productProvider});
 const supabaseFetch = config.supabaseUrl && config.supabaseServiceRoleKey
   ? createDirectSupabaseFetch()
   : null;
@@ -456,6 +462,18 @@ function createAiClient(
 }
 
 const aiClient = createAiClient(config);
+const productAestheticReranker = new ProductAestheticReranker({
+  client: shouldUseMockAi(config, aiClient) ? null : aiClient,
+  model: config.productRerankModel,
+  timeoutMs: config.productRerankTimeoutMs,
+  cacheTtlMs: config.productRerankCacheTtlMs,
+});
+const productProvider = createProductProvider({
+  environment: process.env,
+  catalog: productCatalog,
+  reranker: productAestheticReranker,
+});
+const taobaoService = new TaobaoService({provider: productProvider});
 
 function shouldUseMockAi(currentConfig, aiClient) {
   return currentConfig.forceMockAi || !aiClient;
@@ -1020,6 +1038,26 @@ async function buildOutfitApiResponse(
       scene: outfitRequest.scene,
       gender,
       budget: budgetMatch ? Number(budgetMatch[1]) : 0,
+      user_profile: {
+        gender,
+        height: outfitRequest.height,
+        weight: outfitRequest.weight,
+        body_profile: analysis.bodyProfile,
+      },
+      user_requirements: {
+        scene: outfitRequest.scene,
+        style: analysis.style,
+        budget: budgetMatch ? Number(budgetMatch[1]) : 0,
+        user_input: outfitRequest.request,
+      },
+      outfit_plan: {
+        top: analysis.recommendations.top,
+        bottom: analysis.recommendations.bottom,
+        shoes: analysis.recommendations.shoes,
+        accessories: analysis.recommendations.accessories,
+        summary: analysis.recommendations.summary,
+      },
+      userInput: outfitRequest.request,
     });
   return {
     ...analysis,
@@ -1532,6 +1570,7 @@ app.get("/health", (req, res) => {
     product_provider: productProvider.name,
     product_provider_status: productProvider.status || productProvider.name,
     product_provider_configured: Boolean(productProvider.configured),
+    product_ai_reranker: productAestheticReranker.getStats(),
   });
 });
 
@@ -1587,6 +1626,10 @@ function productRecommendationFilters(input = {}, requestId = "") {
     item_name: input?.item_name ?? input?.itemName,
     search_keywords: input?.search_keywords ?? input?.searchKeywords,
     negative_keywords: input?.negative_keywords ?? input?.negativeKeywords,
+    user_profile: input?.user_profile ?? input?.userProfile,
+    user_requirements: input?.user_requirements ?? input?.userRequirements,
+    outfit_plan: input?.outfit_plan ?? input?.outfitPlan,
+    userInput: input?.user_input ?? input?.userInput,
     limit: input?.limit == null ? undefined : Number(input.limit),
     requestId,
   };
@@ -2095,6 +2138,7 @@ module.exports = {
   objectStorage,
   productCatalog,
   productProvider,
+  productAestheticReranker,
   taobaoService,
   productClickStore,
   config,

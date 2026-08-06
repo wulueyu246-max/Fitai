@@ -26,7 +26,7 @@ class HorizontalProductCarousel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: 760,
+      height: 820,
       child: ListView.separated(
         key: const Key('horizontal-product-carousel'),
         scrollDirection: Axis.horizontal,

@@ -154,6 +154,27 @@ class CatalogProductService implements ProductService {
               'gender': request.gender,
               'style': analysis.style,
               'scene': request.scene,
+              'budget': _budgetFromRequest(request.request),
+              'user_input': request.request,
+              'user_profile': {
+                'gender': request.gender,
+                'height': request.height,
+                'weight': request.weight,
+                'body_profile': analysis.bodyAnalysis,
+              },
+              'user_requirements': {
+                'scene': request.scene,
+                'style': analysis.style,
+                'budget': _budgetFromRequest(request.request),
+                'user_input': request.request,
+              },
+              'outfit_plan': {
+                'top': analysis.top,
+                'bottom': analysis.bottom,
+                'shoes': analysis.shoes,
+                'accessories': analysis.accessories,
+                'summary': analysis.suggestion,
+              },
               'items': analysis.productRequirements
                   .map((requirement) => requirement.toJson())
                   .toList(growable: false),
@@ -221,4 +242,10 @@ class CatalogProductService implements ProductService {
       catalog: await source.fetchProducts(),
     );
   }
+}
+
+double _budgetFromRequest(String request) {
+  final match =
+      RegExp(r'(?:预算|不超过|以内)\s*[¥￥]?\s*(\d+(?:\.\d+)?)').firstMatch(request);
+  return double.tryParse(match?.group(1) ?? '') ?? 0;
 }
