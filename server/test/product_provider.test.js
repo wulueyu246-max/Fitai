@@ -287,6 +287,26 @@ test("a keyword-only request performs one keyword search", async () => {
   assert.equal(products[0].source, "taobao");
 });
 
+test("mapping diagnostics contain counts but no product content or URLs", async () => {
+  const logs = [];
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    client: {
+      call: async (method) => response(method, [taobaoItem()]),
+    },
+    logger: {info: (...args) => logs.push(args), warn() {}},
+  });
+
+  await provider.recommend({keyword: "上衣", requestId: "request-map-1", limit: 1});
+
+  const diagnostics = logs.find(([message]) => message === "淘宝商品映射诊断")[1];
+  assert.equal(diagnostics.rawCount, 1);
+  assert.equal(diagnostics.mappedCount, 1);
+  assert.equal(diagnostics.usableCount, 1);
+  assert.equal(JSON.stringify(diagnostics).includes("通勤外套"), false);
+  assert.equal(JSON.stringify(diagnostics).includes("s.click.taobao.com"), false);
+});
+
 test("legacy Taobao URLs map to affiliate, coupon, purchase and PID fields", () => {
   const product = mapTaobaoProduct({
     item_id: "legacy-1",

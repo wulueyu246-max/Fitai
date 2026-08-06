@@ -155,7 +155,14 @@ class TaobaoProductProvider extends ProductProvider {
       provider: "taobao",
       siteId: this.siteId,
     });
-    return mapPayload(payload, filters, this.pid, "search");
+    return mapPayload(payload, filters, this.pid, "search", (details) => {
+      this.logger.info?.("淘宝商品映射诊断", {
+        requestId: filters.requestId || undefined,
+        provider: "taobao",
+        method: TAOBAO_MATERIAL_SEARCH_METHOD,
+        ...details,
+      });
+    });
   }
 
   async #sample(filters) {
@@ -169,7 +176,14 @@ class TaobaoProductProvider extends ProductProvider {
       provider: "taobao",
       siteId: this.siteId,
     });
-    return mapPayload(payload, filters, this.pid, "sample");
+    return mapPayload(payload, filters, this.pid, "sample", (details) => {
+      this.logger.info?.("淘宝商品映射诊断", {
+        requestId: filters.requestId || undefined,
+        provider: "taobao",
+        method: TAOBAO_MATERIAL_SAMPLE_METHOD,
+        ...details,
+      });
+    });
   }
 }
 
@@ -304,16 +318,33 @@ function extractTaobaoItems(payload) {
   return Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
 }
 
-function mapPayload(payload, filters, pid, origin) {
-  return extractTaobaoItems(payload).map((item) => {
+function mapPayload(payload, filters, pid, origin, onDiagnostics) {
+  const rawItems = extractTaobaoItems(payload);
+  const mapped = rawItems.map((item) => {
     try {
       return mapTaobaoProduct(item, {pid, fallbackCategory: filters.category, filters, origin});
     } catch (_) {
       return null;
     }
-  }).filter((product) => product && isUsableTaobaoProduct(product) && (
+  }).filter(Boolean);
+  const products = mapped.filter((product) => isUsableTaobaoProduct(product) && (
     !filters.category || product.category === filters.category
   ));
+  onDiagnostics?.({
+    origin,
+    rawCount: rawItems.length,
+    mappedCount: mapped.length,
+    usableCount: products.length,
+    missingImageCount: mapped.filter((product) => !normalizeHttpsUrl(product.image_url)).length,
+    missingPriceCount: mapped.filter((product) => !(Number(product.price) > 0)).length,
+    missingPromotionUrlCount: mapped.filter(
+      (product) => !normalizeHttpsUrl(product.purchase_url),
+    ).length,
+    categoryMismatchCount: mapped.filter(
+      (product) => filters.category && product.category !== filters.category,
+    ).length,
+  });
+  return products;
 }
 
 function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}, origin = "search"} = {}) {
