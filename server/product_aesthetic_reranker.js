@@ -196,6 +196,8 @@ function buildMessages(groups, context) {
     ]),
     product_groups: groups.map((group, index) => ({
       requirement_index: index,
+      required_minimum: Math.min(4, group.candidates.length),
+      maximum: Math.min(6, group.candidates.length),
       requirement: compactObject(group.requirement),
       candidates: group.candidates.map((product) => compactObject({
         product_id: product.product_id,
@@ -215,7 +217,9 @@ function buildMessages(groups, context) {
         "你是 FitAI 商品审美复选器。只能从候选商品中选择，不得编造或修改 product_id。",
         "综合整套穿搭、用户身材比例、性别、场景、季节、预算、颜色、版型、材质和设计语言判断。",
         "淘汰廉价感明显、设计杂乱、印花夸张、版型冲突或与整套不协调的商品。男性和女性规则必须由输入决定。",
-        "每个 requirement_index 最多选择 6 件，通常选择 4 至 6 件；合格商品不足时可以少选，不得凑数。",
+        "必须分别处理每个 requirement_index，而不是整套合计选择 4 至 6 件。",
+        "每组 candidates 数量不少于 4 时，该组必须选择 4 至 6 件；少于 4 时选择全部合格商品，不得跨组凑数。",
+        "product_groups 中的 required_minimum 和 maximum 是该组的明确数量约束，selected_products 必须逐组满足。",
         "同组商品应兼顾审美首选、百搭、性价比、设计感和身材适配。",
         "只返回严格 JSON：{\"selected_products\":[{\"product_id\":\"候选ID\",\"ai_taste_score\":0,\"fit_score\":0,\"outfit_coherence_score\":0,\"value_score\":0,\"reason\":\"\",\"concern\":\"\"}]}。",
         "所有分数必须在 0 到 100 之间，输出顺序就是最终推荐顺序。",

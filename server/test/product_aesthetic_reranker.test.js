@@ -148,3 +148,17 @@ test("model prompt excludes affiliate credentials and unrelated context", () => 
   assert.equal(serialized.includes("never-send-this-pid"), false);
   assert.equal(serialized.includes("never-send-this-signature"), false);
 });
+
+test("model prompt requires four to six selections for every sufficiently large group", () => {
+  const messages = buildMessages([
+    group("top", ["top-1", "top-2", "top-3", "top-4", "top-5"]),
+    group("shoes", ["shoe-1", "shoe-2"]),
+  ], {gender: "male"});
+  const payload = JSON.parse(messages[1].content);
+
+  assert.equal(payload.product_groups[0].required_minimum, 4);
+  assert.equal(payload.product_groups[0].maximum, 5);
+  assert.equal(payload.product_groups[1].required_minimum, 2);
+  assert.equal(payload.product_groups[1].maximum, 2);
+  assert.match(messages[0].content, /而不是整套合计选择 4 至 6 件/);
+});
