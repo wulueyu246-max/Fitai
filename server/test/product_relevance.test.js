@@ -125,3 +125,26 @@ test("relevance score sorts the closest product first and strips internal fields
   assert.ok(ranked[0].relevance_score > ranked[1].relevance_score);
   assert.equal("_category_text" in ranked[0], false);
 });
+
+test("AI candidate mode admits neutral low-score items without weakening hard filters", () => {
+  const requirement = normalizeProductRequirement({
+    category: "top",
+    gender: "male",
+    item_name: "短袖Polo",
+    search_keywords: ["男士 短袖 Polo"],
+    negative_keywords: ["女装", "吊带", "裙"],
+  });
+  const candidates = [
+    product("neutral", "简约短袖Polo上衣"),
+    product("female", "女士吊带短袖上衣"),
+    product("wrong-category", "男士休闲裤"),
+  ];
+
+  assert.deepEqual(rankProducts(candidates, requirement).map((item) => item.product_id), []);
+  assert.deepEqual(
+    rankProducts(candidates, requirement, requirement.search_keywords[0], {
+      minimumScore: 35,
+    }).map((item) => item.product_id),
+    ["neutral"],
+  );
+});

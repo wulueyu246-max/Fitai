@@ -213,14 +213,19 @@ class TaobaoProductProvider extends ProductProvider {
     const candidateLimit = Math.min(positiveInteger(filters.limit, 20), 20);
     let products = [];
     for (const searchKeyword of keywords) {
-      const matches = await this.#search({
-        ...filters,
-        ...requirement,
-        searchKeyword,
-        limit: 50,
-      });
-      products = uniqueProducts([...products, ...matches])
-        .sort((left, right) => right.relevance_score - left.relevance_score);
+      for (let pageNo = 1; pageNo <= 2; pageNo += 1) {
+        const matches = await this.#search({
+          ...filters,
+          ...requirement,
+          searchKeyword,
+          pageNo,
+          minimumRelevanceScore: 35,
+          limit: 50,
+        });
+        products = uniqueProducts([...products, ...matches])
+          .sort((left, right) => right.relevance_score - left.relevance_score);
+        if (products.length >= candidateLimit || matches.length === 0) break;
+      }
       if (products.length >= candidateLimit) break;
     }
     if (products.length < Math.min(candidateLimit, 4)) {
@@ -254,7 +259,7 @@ class TaobaoProductProvider extends ProductProvider {
       payload = await this.client.call(TAOBAO_MATERIAL_SEARCH_METHOD, {
         adzone_id: this.adzoneId,
         q: filters.searchKeyword || buildSearchKeyword(filters),
-        page_no: "1",
+        page_no: String(filters.pageNo || 1),
         page_size: String(filters.limit),
         platform: "2",
         ...(filters.budget > 0 ? {end_price: String(filters.budget)} : {}),
@@ -540,7 +545,12 @@ function mapPayload(payload, filters, pid, origin, onDiagnostics) {
   }).filter(Boolean);
   const usable = mapped.filter(isUsableTaobaoProduct);
   const products = filters.category
-    ? rankProducts(usable, filters, filters.searchKeyword || filters.keyword)
+    ? rankProducts(
+      usable,
+      filters,
+      filters.searchKeyword || filters.keyword,
+      {minimumScore: filters.minimumRelevanceScore},
+    )
     : usable.map((product) => {
       const {_category_text: _, ...publicProduct} = product;
       return {

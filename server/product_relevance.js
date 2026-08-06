@@ -164,13 +164,14 @@ function buildSearchKeywords(input = {}, context = {}) {
   return uniqueStrings(keywords).slice(0, 3);
 }
 
-function rankProducts(products, input = {}, searchKeyword = "") {
+function rankProducts(products, input = {}, searchKeyword = "", options = {}) {
   const requirement = normalizeProductRequirement(input);
+  const minimumScore = Number.isFinite(Number(options.minimumScore))
+    ? Number(options.minimumScore)
+    : requirement.gender === "unisex" ? 0 : 50;
   return (Array.isArray(products) ? products : [])
     .map((product) => scoreProduct(product, requirement, searchKeyword))
-    .filter((product) => product && (
-      requirement.gender === "unisex" || product.relevance_score >= 50
-    ))
+    .filter((product) => product && product.relevance_score >= minimumScore)
     .sort((left, right) => right.relevance_score - left.relevance_score ||
       String(left.product_id).localeCompare(String(right.product_id)));
 }
