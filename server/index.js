@@ -39,6 +39,11 @@ const {
   ProductProviderError,
   createProductProvider,
 } = require("./product_provider");
+const {
+  buildSearchKeywords,
+  normalizeGender,
+  normalizeProductRequirement,
+} = require("./product_relevance");
 const {TaobaoService} = require("./taobao_service");
 
 require("dotenv").config({
@@ -274,12 +279,6 @@ const recommendationKeys = Object.freeze([
   "shoes",
   "accessories",
   "summary",
-]);
-
-const productKeys = Object.freeze([
-  "category",
-  "style",
-  "keyword",
 ]);
 
 const app = express();
@@ -687,6 +686,7 @@ function validateOutfitRequest(body) {
   const scene = typeof body.scene === "string" ? body.scene.trim() : "";
   const request =
     typeof body.request === "string" ? body.request.trim() : "";
+  const gender = normalizeGender(body.gender);
   const images = body.images;
 
   if (!Number.isFinite(height) || height < 40 || height > 260) {
@@ -734,6 +734,7 @@ function validateOutfitRequest(body) {
     weight,
     scene,
     request,
+    gender,
     images: normalizedImages,
   };
 }
@@ -883,17 +884,24 @@ function parseOutfitAnalysis(content) {
     if (!product || typeof product !== "object" || Array.isArray(product)) {
       throw new Error(`AI 返回 products[${index}] 必须是对象`);
     }
-
-    const normalizedProduct = {};
-    for (const key of productKeys) {
-      if (typeof product[key] !== "string") {
-        throw new Error(
-          `AI 返回 products[${index}] 缺少字符串字段：${key}`,
-        );
-      }
-      normalizedProduct[key] = product[key].trim();
+    try {
+      const requirement = normalizeProductRequirement({
+        ...product,
+        item_name: product.item_name || product.itemName || product.keyword,
+        search_keywords: product.search_keywords ||
+          product.searchKeywords ||
+          (typeof product.keyword === "string" ? [product.keyword] : []),
+        negative_keywords: product.negative_keywords ||
+          product.negativeKeywords ||
+          [],
+      });
+      return {
+        ...requirement,
+        search_keywords: buildSearchKeywords(requirement),
+      };
+    } catch (error) {
+      throw new Error(`AI 返回 products[${index}] 结构无效：${error.message}`);
     }
-    return normalizedProduct;
   });
 
   return {
@@ -906,6 +914,11 @@ function parseOutfitAnalysis(content) {
 
 function createMockOutfitAnalysis(outfitRequest) {
   const scene = outfitRequest.scene;
+  const gender = normalizeGender(outfitRequest.gender);
+  const audience = gender === "male" ? "男士" : gender === "female" ? "女士" : "中性";
+  const genderNegatives = gender === "male"
+    ? ["女士", "女装", "吊带", "内衣", "连衣裙", "半身裙"]
+    : gender === "female" ? ["男士", "男装", "男款", "商务男鞋"] : [];
   const style = /商务|会议|通勤/.test(scene)
     ? "现代商务极简"
     : /约会|聚会/.test(scene)
@@ -930,19 +943,46 @@ function createMockOutfitAnalysis(outfitRequest) {
     },
     products: [
       {
-        category: "上衣",
+        category: "top",
+        gender,
+        item_name: "简约短袖上衣",
+        color: "白色",
         style: "简约通勤",
-        keyword: "结构感短款T恤",
+        season: "summer",
+        scene,
+        search_keywords: [
+          `${audience} 白色 简约短袖上衣`,
+          `${audience} 简约 短袖 夏季`,
+        ],
+        negative_keywords: genderNegatives,
       },
       {
-        category: "裤子",
+        category: "bottom",
+        gender,
+        item_name: "中高腰直筒裤",
+        color: "深灰色",
         style: "简约通勤",
-        keyword: "中高腰直筒裤",
+        season: "summer",
+        scene,
+        search_keywords: [
+          `${audience} 深灰色 中高腰直筒裤`,
+          `${audience} 简约 九分 休闲裤`,
+        ],
+        negative_keywords: genderNegatives,
       },
       {
-        category: "鞋",
+        category: "shoes",
+        gender,
+        item_name: "简洁低帮鞋",
+        color: "白色",
         style: "简约通勤",
-        keyword: "简洁低帮鞋",
+        season: "all",
+        scene,
+        search_keywords: [
+          `${audience} 白色 简洁低帮鞋`,
+          `${audience} 简约 休闲鞋`,
+        ],
+        negative_keywords: genderNegatives,
       },
     ],
     analysisMode: "mock",
@@ -956,11 +996,25 @@ async function buildOutfitApiResponse(
 ) {
   const requestText = String(outfitRequest.request || "");
   const budgetMatch = requestText.match(/(?:预算|不超过|以内)\s*[¥￥]?\s*(\d+(?:\.\d+)?)/);
-  const gender = /(?:男士|男生|男性)/.test(requestText)
-    ? "男"
-    : /(?:女士|女生|女性)/.test(requestText) ? "女" : "";
+  const profileGender = normalizeGender(outfitRequest.gender);
+  const gender = profileGender !== "unisex"
+    ? profileGender
+    : /(?:男士|男生|男性)/.test(requestText)
+      ? "male"
+      : /(?:女士|女生|女性)/.test(requestText) ? "female" : "unisex";
+  const productRequirements = analysis.products.map((product) => {
+    const requirement = normalizeProductRequirement({
+      ...product,
+      gender: gender === "unisex" ? product.gender : gender,
+    }, {
+      gender,
+      scene: outfitRequest.scene,
+      style: analysis.style,
+    });
+    return {...requirement, search_keywords: buildSearchKeywords(requirement)};
+  });
   const catalogProducts = productRecommendations ??
-    await productProvider.recommendForQueries(analysis.products, {
+    await productProvider.recommendForQueries(productRequirements, {
       style: analysis.style,
       bodyType: analysis.bodyProfile,
       scene: outfitRequest.scene,
@@ -969,6 +1023,7 @@ async function buildOutfitApiResponse(
     });
   return {
     ...analysis,
+    products: productRequirements,
     recommendations: {
       ...analysis.recommendations,
       products: catalogProducts,
@@ -984,8 +1039,21 @@ async function buildOutfitResponseForRequest(
   if (!deferProducts) {
     return buildOutfitApiResponse(analysis, undefined, outfitRequest);
   }
+  const requestGender = normalizeGender(outfitRequest.gender);
+  const products = analysis.products.map((product) => {
+    const requirement = normalizeProductRequirement({
+      ...product,
+      gender: requestGender === "unisex" ? product.gender : requestGender,
+    }, {
+      gender: requestGender,
+      scene: outfitRequest.scene,
+      style: analysis.style,
+    });
+    return {...requirement, search_keywords: buildSearchKeywords(requirement)};
+  });
   return {
     ...analysis,
+    products,
     recommendations: {
       ...analysis.recommendations,
       products: [],
@@ -1471,8 +1539,13 @@ async function handleProductRecommendations(req, res, next) {
   const startedAt = Date.now();
   try {
     const input = req.method === "POST" ? req.body : req.query;
-    const filters = productRecommendationFilters(input, res.locals.requestId);
-    const products = await productProvider.recommend(filters);
+    const {filters, items} = productRecommendationRequest(
+      input,
+      res.locals.requestId,
+    );
+    const products = items.length > 0
+      ? await productProvider.recommendForQueries(items, filters)
+      : await productProvider.recommend(filters);
     const providerDurationMs = Date.now() - startedAt;
     setServerTiming(res, {
       products: providerDurationMs,
@@ -1511,9 +1584,28 @@ function productRecommendationFilters(input = {}, requestId = "") {
     season: input?.season,
     budget: input?.budget,
     keyword: input?.keyword ?? input?.q,
+    item_name: input?.item_name ?? input?.itemName,
+    search_keywords: input?.search_keywords ?? input?.searchKeywords,
+    negative_keywords: input?.negative_keywords ?? input?.negativeKeywords,
     limit: input?.limit == null ? undefined : Number(input.limit),
     requestId,
   };
+}
+
+function productRecommendationRequest(input = {}, requestId = "") {
+  const filters = productRecommendationFilters(input, requestId);
+  const rawItems = input?.items;
+  if (rawItems == null) return {filters, items: []};
+  if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > 8) {
+    throw new TypeError("items must be an array containing 1 to 8 product requirements");
+  }
+  const items = rawItems.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new TypeError(`items[${index}] must be an object`);
+    }
+    return normalizeProductRequirement(item, filters);
+  });
+  return {filters, items};
 }
 
 app.get("/products/recommend", handleProductRecommendations);
@@ -1593,6 +1685,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
         text: [
           `身高：${outfitRequest.height} cm`,
           `体重：${outfitRequest.weight} kg`,
+          `用户性别：${outfitRequest.gender}`,
           `场景：${outfitRequest.scene}`,
           `穿搭需求：${outfitRequest.request || "无额外要求"}`,
           `实际提供照片：${Object.keys(outfitRequest.images)
@@ -1658,8 +1751,11 @@ ${partialViewSafetyInstruction}
 3. 建议必须具体，说明适合的版型、颜色、鞋子和配饰。
 4. 只返回一个 JSON 对象，不使用 Markdown、代码块或额外解释。
 5. products 只描述适合用户的商品类型和检索条件，不得编造品牌、SKU、价格或购买链接；真实商品由商品数据库另行匹配。
-6. products.keyword 应包含有助于检索的推荐颜色、版型和场景词；每个所需品类分别给出一项。
-7. 必须严格使用以下结构；除 products 外的末级字段均为字符串：
+6. products 中每个单品必须根据用户资料输出 gender，只能是 male、female 或 unisex；不得把性别写死。
+7. category 至少支持 top、bottom、dress、shoes、outerwear、bag、hat、accessory。
+8. 每个单品输出 2 到 3 个 search_keywords。每个关键词必须包含性别人群词、具体品类词、颜色或风格词，并按需加入季节、版型或场景。
+9. negative_keywords 必须排除与用户性别和目标品类明显冲突的商品词。
+10. 必须严格使用以下结构；原有 recommendations 文案字段保持字符串：
 
 {
   "bodyProfile": "",
@@ -1674,8 +1770,14 @@ ${partialViewSafetyInstruction}
   "products": [
     {
       "category": "",
+      "gender": "",
+      "item_name": "",
+      "color": "",
       "style": "",
-      "keyword": ""
+      "season": "",
+      "scene": "",
+      "search_keywords": ["", ""],
+      "negative_keywords": [""]
     }
   ]
 }
@@ -2024,4 +2126,5 @@ module.exports = {
   supabaseRuntime,
   partialViewSafetyInstruction,
   productRecommendationFilters,
+  productRecommendationRequest,
 };

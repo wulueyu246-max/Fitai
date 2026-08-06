@@ -133,6 +133,7 @@ void main() {
       'weight': 55,
       'scene': '工作',
       'request': '生成通勤穿搭',
+      'gender': 'unisex',
       'images': {
         'front': 'data:image/jpeg;base64,AA==',
       },

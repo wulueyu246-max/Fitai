@@ -16,13 +16,12 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
-  test('remote product source forwards affiliate channel and parses products',
+  test(
+      'remote product source forwards affiliate channel without custom headers',
       () async {
     final client = MockClient((request) async {
-      expect(
-        request.headers['X-FitAI-Affiliate-Channel'],
-        'channel-commercial-test',
-      );
+      expect(request.headers['X-FitAI-Affiliate-Channel'], isNull);
+      expect(request.headers['X-Shupi-Affiliate-Channel'], isNull);
       expect(
         request.url.queryParameters['affiliateChannelId'],
         'channel-commercial-test',
@@ -107,6 +106,82 @@ void main() {
     expect(products.single.styleTags, ['极简', '通勤']);
   });
 
+  test('structured product requirements use a safe POST request', () async {
+    final client = MockClient((request) async {
+      expect(request.method, 'POST');
+      expect(request.url.queryParameters, isEmpty);
+      expect(request.headers['Content-Type'], contains('application/json'));
+      expect(request.headers['X-FitAI-Affiliate-Channel'], isNull);
+      expect(request.headers['X-Shupi-Affiliate-Channel'], isNull);
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      expect(body['gender'], 'male');
+      expect(body['style'], 'clean fit');
+      expect(body['scene'], 'date');
+      final items = body['items'] as List<dynamic>;
+      expect(items, hasLength(1));
+      expect((items.single as Map<String, dynamic>)['category'], 'top');
+      expect(
+        (items.single as Map<String, dynamic>)['search_keywords'],
+        ['男士 浅灰色 短袖 Polo', '男士 clean fit Polo 夏季'],
+      );
+      return http.Response(
+        jsonEncode({
+          'products': [
+            {
+              'product_id': 'taobao-polo-1',
+              'source': 'taobao',
+              'title': '男士浅灰色短袖Polo',
+              'category': 'top',
+              'price': 129,
+              'image_url': 'https://img.example.com/polo.jpg',
+              'purchase_url': 'https://s.click.taobao.com/polo',
+              'platform': 'taobao',
+              'is_mock': false,
+              'gender': 'male',
+              'search_keyword': '男士 浅灰色 短袖 Polo',
+              'relevance_score': 90,
+            },
+          ],
+        }),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+    final service = RemoteBrandProductService(
+      catalogEndpoint: Uri.parse('https://api.example.com/products/recommend'),
+      client: client,
+    );
+
+    final products = await service.fetchProducts(
+      recommendationContext: {
+        'gender': 'male',
+        'style': 'clean fit',
+        'scene': 'date',
+        'items': [
+          {
+            'category': 'top',
+            'gender': 'male',
+            'item_name': '浅灰色短袖Polo',
+            'color': '浅灰色',
+            'style': 'clean fit',
+            'season': 'summer',
+            'scene': 'date',
+            'search_keywords': [
+              '男士 浅灰色 短袖 Polo',
+              '男士 clean fit Polo 夏季',
+            ],
+            'negative_keywords': ['女装', '吊带', '裙'],
+          },
+        ],
+      },
+    );
+
+    expect(products, hasLength(1));
+    expect(products.single.id, 'taobao-polo-1');
+    expect(products.single.sourceProvider, 'taobao');
+    expect(products.single.isMock, isFalse);
+  });
+
   test('remote product source accepts data.products and items wrappers',
       () async {
     var requestCount = 0;
@@ -187,8 +262,13 @@ void main() {
     final products = await service.fetchProducts();
 
     expect(products, hasLength(5));
-    expect(products.map((product) => product.wardrobeSlot).toList(),
-        ProductCategory.values);
+    expect(products.map((product) => product.wardrobeSlot).toList(), [
+      ProductCategory.top,
+      ProductCategory.bottom,
+      ProductCategory.shoes,
+      ProductCategory.outerwear,
+      ProductCategory.accessories,
+    ]);
     expect(products.any((product) => product.id == 'legacy-bottom'), isFalse);
   });
 

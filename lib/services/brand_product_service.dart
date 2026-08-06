@@ -3,7 +3,10 @@ import '../repositories/mock_product_repository.dart';
 import '../repositories/product_repository.dart';
 
 abstract interface class BrandProductService {
-  Future<List<Product>> fetchProducts({String? brand});
+  Future<List<Product>> fetchProducts({
+    String? brand,
+    Map<String, dynamic>? recommendationContext,
+  });
 
   Future<Product?> getProductBySku(String sku);
 
@@ -24,7 +27,10 @@ class MockBrandProductService implements BrandProductService {
       repository ?? MockProductRepository.instance;
 
   @override
-  Future<List<Product>> fetchProducts({String? brand}) async {
+  Future<List<Product>> fetchProducts({
+    String? brand,
+    Map<String, dynamic>? recommendationContext,
+  }) async {
     final normalized = brand?.trim().toLowerCase();
     return _repository.listProducts(brand: normalized);
   }

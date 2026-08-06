@@ -3,6 +3,7 @@ class ProductCategory {
 
   static const top = 'top';
   static const bottom = 'bottom';
+  static const dress = 'dress';
   static const shoes = 'shoes';
   static const outerwear = 'outerwear';
   static const accessories = 'accessories';
@@ -15,6 +16,7 @@ class ProductCategory {
   static const values = [
     top,
     bottom,
+    dress,
     shoes,
     outerwear,
     accessories,
@@ -25,6 +27,10 @@ class ProductCategory {
   static String normalize(String value) {
     final normalized = value.trim().toLowerCase();
     if (normalized.isEmpty) return '';
+    if (RegExp(r'连衣裙|礼服裙|裙装').hasMatch(normalized) ||
+        RegExp(r'(^|[^a-z])dress([^a-z]|$)').hasMatch(normalized)) {
+      return dress;
+    }
     if (RegExp(r't恤|短袖|衬衫|上衣|上装').hasMatch(normalized) ||
         RegExp(r'(^|[^a-z])(t-?shirt|tshirt|shirt|tee|upper|top)([^a-z]|$)')
             .hasMatch(normalized)) {
@@ -57,6 +63,7 @@ class ProductCategory {
     return switch (normalize(slot)) {
       top => '上衣推荐',
       bottom => '下装推荐',
+      dress => '连衣裙推荐',
       shoes => '鞋履推荐',
       outerwear => '外套推荐',
       accessories => '配饰推荐',

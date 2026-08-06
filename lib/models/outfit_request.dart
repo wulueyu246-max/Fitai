@@ -5,6 +5,7 @@ class OutfitRequest {
     required this.scene,
     required this.request,
     required this.images,
+    this.gender = 'unisex',
   });
 
   final double height;
@@ -12,6 +13,7 @@ class OutfitRequest {
   final String scene;
   final String request;
   final Map<String, String> images;
+  final String gender;
 
   Map<String, dynamic> toJson() {
     final normalizedImages = <String, String>{};
@@ -28,6 +30,7 @@ class OutfitRequest {
       'weight': weight,
       'scene': scene.trim(),
       'request': request.trim(),
+      'gender': gender.trim().isEmpty ? 'unisex' : gender.trim(),
       'images': normalizedImages,
     };
   }

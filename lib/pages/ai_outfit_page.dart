@@ -62,6 +62,7 @@ class AiOutfitPage extends StatefulWidget {
     this.initialScene,
     this.initialHeight,
     this.initialWeight,
+    this.initialGender,
     this.initialRequest,
     this.feedbackEventService,
     this.locationService,
@@ -83,6 +84,7 @@ class AiOutfitPage extends StatefulWidget {
   final String? initialScene;
   final double? initialHeight;
   final double? initialWeight;
+  final String? initialGender;
   final String? initialRequest;
   final FeedbackEventService? feedbackEventService;
   final LocationService? locationService;
@@ -157,6 +159,26 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
   AppLocation? _location;
 
   bool get _isGenerating => _generationState.isBusy;
+
+  String get _resolvedProfileGender {
+    final accountGender = _normalizeProfileGender(_session.account?.gender);
+    return accountGender != 'unisex'
+        ? accountGender
+        : _normalizeProfileGender(widget.initialGender);
+  }
+
+  String _normalizeProfileGender(String? value) {
+    final normalized = value?.trim().toLowerCase() ?? '';
+    if (const {'male', 'man', 'men'}.contains(normalized) ||
+        normalized.contains('\u7537')) {
+      return 'male';
+    }
+    if (const {'female', 'woman', 'women'}.contains(normalized) ||
+        normalized.contains('\u5973')) {
+      return 'female';
+    }
+    return 'unisex';
+  }
 
   @override
   void initState() {
@@ -675,6 +697,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         height: height,
         weight: weight,
         scene: _scene,
+        gender: _resolvedProfileGender,
         request: [userRequest, weatherInstruction]
             .where((value) => value.isNotEmpty)
             .join(' '),

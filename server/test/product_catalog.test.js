@@ -7,6 +7,7 @@ const {
   CATEGORY_SLOTS,
   PRODUCT_SEEDS,
   ProductCatalog,
+  buildCategorySlots,
   canonicalCategory,
 } = require("../product_catalog");
 const {app, listenForRequests} = require("../index");
@@ -32,6 +33,17 @@ test("normalizes legacy Chinese and English category aliases", () => {
   for (const [slot, values] of Object.entries(aliases)) {
     assert.ok(values.every((value) => canonicalCategory(value) === slot));
   }
+});
+
+test("response slots preserve dress products without changing Mock slots", () => {
+  const slots = buildCategorySlots([
+    {product_id: "dress-1", category: "dress", title: "女士法式连衣裙"},
+    {product_id: "top-1", category: "top", title: "女士针织衫"},
+  ]);
+
+  assert.equal(slots.dress[0].product_id, "dress-1");
+  assert.equal(slots.top[0].product_id, "top-1");
+  assert.ok(CATEGORY_SLOTS.every((slot) => Array.isArray(slots[slot])));
 });
 
 test("matches products by category, style, color and body type", () => {

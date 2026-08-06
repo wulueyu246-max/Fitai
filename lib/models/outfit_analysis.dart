@@ -1,6 +1,7 @@
 import 'outfit_plan.dart';
 import 'product.dart';
 import 'product_recommendation.dart';
+import 'product_search_requirement.dart';
 
 class OutfitAnalysis {
   const OutfitAnalysis({
@@ -14,6 +15,7 @@ class OutfitAnalysis {
     this.analysisMode = 'ai',
     this.recommendedProducts = const [],
     this.productRecommendations = const [],
+    this.productRequirements = const [],
     this.outfitPlan,
   });
 
@@ -40,6 +42,8 @@ class OutfitAnalysis {
       productRecommendations: _readProductRecommendations(
         json['product_recommendations'],
       ),
+      productRequirements:
+          _readProductRequirements(json['product_requirements']),
       outfitPlan: _readOutfitPlan(json['outfit_plan']),
     );
   }
@@ -52,6 +56,7 @@ class OutfitAnalysis {
     final productRecommendations = _readProductRecommendations(
       recommendations['products'],
     );
+    final productRequirements = _readProductRequirements(json['products']);
 
     return OutfitAnalysis(
       bodyAnalysis: _readAliasedString(
@@ -96,6 +101,7 @@ class OutfitAnalysis {
               ),
             ),
       productRecommendations: productRecommendations,
+      productRequirements: productRequirements,
     );
   }
 
@@ -109,6 +115,7 @@ class OutfitAnalysis {
   final String analysisMode;
   final List<Product> recommendedProducts;
   final List<ProductRecommendation> productRecommendations;
+  final List<ProductSearchRequirement> productRequirements;
   final OutfitPlan? outfitPlan;
 
   bool get isMock => analysisMode == 'mock';
@@ -124,6 +131,7 @@ class OutfitAnalysis {
     String? analysisMode,
     List<Product>? recommendedProducts,
     List<ProductRecommendation>? productRecommendations,
+    List<ProductSearchRequirement>? productRequirements,
     OutfitPlan? outfitPlan,
   }) {
     return OutfitAnalysis(
@@ -138,6 +146,7 @@ class OutfitAnalysis {
       recommendedProducts: recommendedProducts ?? this.recommendedProducts,
       productRecommendations:
           productRecommendations ?? this.productRecommendations,
+      productRequirements: productRequirements ?? this.productRequirements,
       outfitPlan: outfitPlan ?? this.outfitPlan,
     );
   }
@@ -156,6 +165,9 @@ class OutfitAnalysis {
           recommendedProducts.map((product) => product.toJson()).toList(),
       'product_recommendations': productRecommendations
           .map((recommendation) => recommendation.toJson())
+          .toList(),
+      'product_requirements': productRequirements
+          .map((requirement) => requirement.toJson())
           .toList(),
       'outfit_plan': outfitPlan?.toJson(),
     };
@@ -258,6 +270,23 @@ class OutfitAnalysis {
           );
         }
         return ProductRecommendation.fromJson(item);
+      }),
+    );
+  }
+
+  static List<ProductSearchRequirement> _readProductRequirements(
+    dynamic value,
+  ) {
+    if (value == null) return const [];
+    if (value is! List) {
+      throw const FormatException('products must be an array');
+    }
+    return List<ProductSearchRequirement>.unmodifiable(
+      value.map((item) {
+        if (item is! Map<String, dynamic>) {
+          throw const FormatException('products entries must be objects');
+        }
+        return ProductSearchRequirement.fromJson(item);
       }),
     );
   }

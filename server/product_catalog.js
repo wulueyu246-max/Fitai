@@ -83,6 +83,10 @@ function normalize(value) {
 function canonicalCategory(value) {
   const normalized = normalize(value);
   if (!normalized) return "";
+  if (/连衣裙|礼服裙|裙装/.test(normalized) ||
+      /(^|[^a-z])dress([^a-z]|$)/.test(normalized)) {
+    return "dress";
+  }
   if (/t恤|短袖|衬衫|上衣|上装/.test(normalized) ||
       /(^|[^a-z])(t-?shirt|tshirt|shirt|tee|upper|top)([^a-z]|$)/.test(normalized)) {
     return "top";
@@ -279,7 +283,10 @@ function buildCategorySlots(products) {
   const slots = Object.fromEntries(CATEGORY_SLOTS.map((slot) => [slot, []]));
   for (const item of Array.isArray(products) ? products : []) {
     const slot = canonicalCategory(item?.category);
-    if (slot) slots[slot].push(item);
+    if (slot) {
+      slots[slot] ||= [];
+      slots[slot].push(item);
+    }
   }
   return slots;
 }

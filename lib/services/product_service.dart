@@ -147,7 +147,22 @@ class CatalogProductService implements ProductService {
     required OutfitAnalysis analysis,
     required OutfitRequest request,
   }) async {
-    final catalog = await source.fetchProducts();
+    final hasStructuredRequirements = analysis.productRequirements.isNotEmpty;
+    final catalog = await source.fetchProducts(
+      recommendationContext: hasStructuredRequirements
+          ? {
+              'gender': request.gender,
+              'style': analysis.style,
+              'scene': request.scene,
+              'items': analysis.productRequirements
+                  .map((requirement) => requirement.toJson())
+                  .toList(growable: false),
+            }
+          : null,
+    );
+    if (hasStructuredRequirements) {
+      return catalog;
+    }
     return recommendationService.recommendProducts(
       height: request.height,
       weight: request.weight,

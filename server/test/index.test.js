@@ -23,6 +23,7 @@ const {
   logOptionalServiceWarnings,
   partialViewSafetyInstruction,
   productRecommendationFilters,
+  productRecommendationRequest,
   resolveAiFallbackReason,
   resolveAiModeReason,
   resolveAiConfig,
@@ -301,27 +302,15 @@ test("parses AI output into a structured analysis", () => {
     }),
   );
 
-  assert.deepEqual(result, {
-    bodyProfile: "身体分析",
-    style: "风格",
-    recommendations: {
-      top: "上衣",
-      bottom: "下装",
-      shoes: "鞋子",
-      accessories: "配饰",
-      summary: "总结",
-    },
-    products: [
-      {
-        category: "上衣",
-        style: "简约通勤",
-        keyword: "短款外套",
-      },
-    ],
-  });
+  assert.equal(result.bodyProfile, "身体分析");
+  assert.equal(result.products[0].category, "top");
+  assert.equal(result.products[0].gender, "unisex");
+  assert.equal(result.products[0].item_name, "短款外套");
+  assert.ok(result.products[0].search_keywords.length >= 2);
+  assert.ok(result.products[0].search_keywords.length <= 3);
 });
 
-test("adds catalog product recommendations without changing legacy products", async () => {
+test("adds catalog recommendations while upgrading legacy product requirements", async () => {
   const analysis = {
     bodyProfile: "balanced",
     style: "minimal",
@@ -354,9 +343,37 @@ test("adds catalog product recommendations without changing legacy products", as
 
   const response = await buildOutfitApiResponse(analysis, matchedProducts);
 
-  assert.deepEqual(response.products, analysis.products);
+  assert.equal(response.products[0].category, "top");
+  assert.equal(response.products[0].item_name, "shirt keyword");
+  assert.ok(response.products[0].search_keywords.length >= 2);
   assert.deepEqual(response.recommendations.products, matchedProducts);
   assert.equal(response.recommendations.top, "shirt");
+});
+
+test("accepts structured product requirements with normalized gender", () => {
+  const result = productRecommendationRequest({
+    gender: "女士",
+    style: "法式",
+    scene: "约会",
+    items: [
+      {
+        category: "dress",
+        gender: "female",
+        item_name: "法式连衣裙",
+        color: "白色",
+        search_keywords: ["女士 白色 法式连衣裙", "女士 夏季 连衣裙"],
+        negative_keywords: ["男装"],
+      },
+    ],
+  }, "request-products-structured");
+
+  assert.equal(result.filters.gender, "女士");
+  assert.equal(result.items[0].gender, "female");
+  assert.equal(result.items[0].category, "dress");
+  assert.deepEqual(result.items[0].search_keywords, [
+    "女士 白色 法式连衣裙",
+    "女士 夏季 连衣裙",
+  ]);
 });
 
 test("extracts text from DashScope compatible content parts", () => {

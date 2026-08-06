@@ -136,7 +136,9 @@ test("empty 27939 search uses the authorized material recommendation API", async
     },
   });
   const products = await provider.recommend({category: "outerwear", limit: 1});
-  assert.deepEqual(calls, [TAOBAO_MATERIAL_SEARCH_METHOD, TAOBAO_MATERIAL_SAMPLE_METHOD]);
+  assert.equal(calls.at(-1), TAOBAO_MATERIAL_SAMPLE_METHOD);
+  assert.ok(calls.slice(0, -1).every((method) => method === TAOBAO_MATERIAL_SEARCH_METHOD));
+  assert.ok(calls.length >= 3);
   assert.equal(products[0].source, "taobao");
   assert.ok(products[0].tags.includes("sample"));
 });
@@ -224,7 +226,7 @@ test("auto mode derives site and Adzone from PID when override is absent", async
   assert.equal(calls[0].options.siteId, "2");
 });
 
-test("permission failure in auto mode is explicit and never returns Mock", async () => {
+test("permission failure in auto mode safely falls back to Mock", async () => {
   const provider = createProductProvider({
     environment: {
       PRODUCT_PROVIDER: "auto",
@@ -236,12 +238,11 @@ test("permission failure in auto mode is explicit and never returns Mock", async
     client: {call: async () => { throw new TaobaoApiError("denied", {code: "TAOBAO_PERMISSION_DENIED"}); }},
     logger: {warn() {}},
   });
-  await assert.rejects(
-    () => provider.recommend({category: "top"}),
-    (error) => error.code === "TAOBAO_PERMISSION_DENIED",
-  );
+  const products = await provider.recommend({category: "top"});
+  assert.ok(products.length > 0);
+  assert.ok(products.every((product) => product.is_mock === true));
   assert.equal(provider.health, false);
-  assert.equal(provider.status, "error");
+  assert.equal(provider.status, "mock");
 });
 
 test("auto mode does not cache a failure that skips later Taobao calls", async () => {
@@ -260,8 +261,9 @@ test("auto mode does not cache a failure that skips later Taobao calls", async (
     logger: {info() {}, warn() {}},
   });
 
-  await assert.rejects(() => provider.recommend({category: "top"}));
-  assert.equal(provider.status, "error");
+  const first = await provider.recommend({category: "top"});
+  assert.ok(first.every((product) => product.is_mock === true));
+  assert.equal(provider.status, "mock");
   const second = await provider.recommend({category: "shoes"});
   assert.equal(recommendationCalls, 2);
   assert.equal(provider.status, "taobao");
@@ -286,6 +288,53 @@ test("a keyword-only request performs one keyword search", async () => {
   assert.equal(calls[0].params.q, "上衣");
   assert.equal(products.length, 1);
   assert.equal(products[0].source, "taobao");
+});
+
+test("structured queries try precise keywords in order and expose relevance fields", async () => {
+  const searchKeywords = [
+    "男士 浅灰色 短袖 Polo",
+    "男士 clean fit Polo 夏季",
+  ];
+  const calls = [];
+  const provider = providerWithClient({
+    call: async (method, params) => {
+      calls.push(params.q);
+      if (params.q === searchKeywords[0]) {
+        return response(method, [taobaoItem({
+          item_basic_info: {
+            title: "女士浅灰色吊带上衣",
+            category_name: "上衣",
+          },
+        })]);
+      }
+      return response(method, [taobaoItem({
+        item_basic_info: {
+          title: "男士浅灰色夏季clean fit短袖Polo",
+          category_name: "Polo上衣",
+        },
+      })]);
+    },
+  });
+
+  const products = await provider.recommendForQueries([{
+    category: "top",
+    gender: "male",
+    item_name: "浅灰色短袖Polo",
+    color: "浅灰色",
+    style: "clean fit",
+    season: "summer",
+    search_keywords: searchKeywords,
+    negative_keywords: ["女", "吊带", "裙"],
+    limit: 1,
+  }]);
+
+  assert.deepEqual(calls, searchKeywords);
+  assert.equal(products.length, 1);
+  assert.equal(products[0].gender, "male");
+  assert.equal(products[0].category, "top");
+  assert.equal(products[0].search_keyword, searchKeywords[1]);
+  assert.ok(products[0].relevance_score >= 80);
+  assert.equal(products[0].is_mock, false);
 });
 
 test("extracts official simplified camelCase result containers", () => {

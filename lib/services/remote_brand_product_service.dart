@@ -29,15 +29,28 @@ class RemoteBrandProductService implements BrandProductService {
   final http.Client _client;
 
   @override
-  Future<List<Product>> fetchProducts({String? brand}) async {
+  Future<List<Product>> fetchProducts({
+    String? brand,
+    Map<String, dynamic>? recommendationContext,
+  }) async {
     final query = <String, String>{
       ...catalogEndpoint.queryParameters,
       'affiliateChannelId': affiliateChannelId,
       if (brand != null && brand.trim().isNotEmpty) 'brand': brand.trim(),
     };
-    final response = await _get(
-      catalogEndpoint.replace(queryParameters: query),
-    );
+    final response = recommendationContext == null
+        ? await _get(catalogEndpoint.replace(queryParameters: query))
+        : await _post(
+            catalogEndpoint.replace(
+              queryParameters: catalogEndpoint.queryParameters,
+            ),
+            {
+              ...recommendationContext,
+              'affiliateChannelId': affiliateChannelId,
+              if (brand != null && brand.trim().isNotEmpty)
+                'brand': brand.trim(),
+            },
+          );
     final payload = _decode(response);
     final values = _extractProducts(payload);
     _debugProductsLength(values.length);
@@ -101,22 +114,48 @@ class RemoteBrandProductService implements BrandProductService {
     return uri;
   }
 
-  Map<String, String> get _headers => {
+  Map<String, String> get _headers => const {
         'Accept': 'application/json',
-        'X-FitAI-Affiliate-Channel': affiliateChannelId,
-        'X-Shupi-Affiliate-Channel': affiliateChannelId,
       };
 
   Future<http.Response> _get(Uri endpoint) async {
+    return _send(
+      method: 'GET',
+      endpoint: endpoint,
+      send: () => _client.get(endpoint, headers: _headers),
+    );
+  }
+
+  Future<http.Response> _post(
+    Uri endpoint,
+    Map<String, dynamic> body,
+  ) async {
+    return _send(
+      method: 'POST',
+      endpoint: endpoint,
+      send: () => _client.post(
+        endpoint,
+        headers: {..._headers, 'Content-Type': 'application/json'},
+        body: jsonEncode(body),
+      ),
+    );
+  }
+
+  Future<http.Response> _send({
+    required String method,
+    required Uri endpoint,
+    required Future<http.Response> Function() send,
+  }) async {
     final stopwatch = Stopwatch()..start();
     Object? lastError;
     for (var attempt = 1; attempt <= 2; attempt += 1) {
       try {
-        final response =
-            await _client.get(endpoint, headers: _headers).timeout(timeout);
+        final response = await send().timeout(timeout);
         AppLogger.instance.info(
           'product_http_completed',
           metadata: {
+            'method': method,
+            'url': endpoint.replace(queryParameters: const {}).toString(),
             'statusCode': response.statusCode,
             'durationMs': stopwatch.elapsedMilliseconds,
             'attempt': attempt,
@@ -158,7 +197,9 @@ class RemoteBrandProductService implements BrandProductService {
         json.containsKey('channelId');
     final hasProvider = json.containsKey('sourceProvider') ||
         json.containsKey('source_provider') ||
-        json.containsKey('provider');
+        json.containsKey('source') ||
+        json.containsKey('provider') ||
+        json.containsKey('platform');
     return product.copyWith(
       affiliateChannelId:
           hasChannel ? product.affiliateChannelId : affiliateChannelId,
@@ -169,7 +210,7 @@ class RemoteBrandProductService implements BrandProductService {
 
   Object? _decode(http.Response response) {
     final responseBody = utf8.decode(response.bodyBytes);
-    _debugResponse(response.statusCode, responseBody);
+    _debugResponse(response.statusCode);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw ProductSourceException(
         '商品源请求失败（HTTP ${response.statusCode}）',
@@ -177,7 +218,6 @@ class RemoteBrandProductService implements BrandProductService {
     }
     try {
       final decoded = jsonDecode(responseBody);
-      _debugDecoded(decoded);
       return decoded;
     } catch (_) {
       throw const ProductSourceException('商品源返回了无效数据');
@@ -233,15 +273,9 @@ class RemoteBrandProductService implements BrandProductService {
     return const [];
   }
 
-  void _debugResponse(int statusCode, String responseBody) {
+  void _debugResponse(int statusCode) {
     if (!kDebugMode) return;
-    debugPrint('[Shupi][product_response] method=GET statusCode=$statusCode');
-    debugPrint('[Shupi][product_response] response.body=$responseBody');
-  }
-
-  void _debugDecoded(Object? decoded) {
-    if (!kDebugMode) return;
-    debugPrint('[Shupi][product_response] jsonDecode=$decoded');
+    debugPrint('[Shupi][product_response] statusCode=$statusCode');
   }
 
   void _debugProductsLength(int length) {
