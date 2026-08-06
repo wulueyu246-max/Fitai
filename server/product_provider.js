@@ -156,7 +156,7 @@ class TaobaoProductProvider extends ProductProvider {
       siteId: this.siteId,
     });
     return mapPayload(payload, filters, this.pid, "search", (details) => {
-      this.logger.info?.("淘宝商品映射诊断", {
+      logMappingDiagnostics(this.logger, {
         requestId: filters.requestId || undefined,
         provider: "taobao",
         method: TAOBAO_MATERIAL_SEARCH_METHOD,
@@ -177,7 +177,7 @@ class TaobaoProductProvider extends ProductProvider {
       siteId: this.siteId,
     });
     return mapPayload(payload, filters, this.pid, "sample", (details) => {
-      this.logger.info?.("淘宝商品映射诊断", {
+      logMappingDiagnostics(this.logger, {
         requestId: filters.requestId || undefined,
         provider: "taobao",
         method: TAOBAO_MATERIAL_SAMPLE_METHOD,
@@ -484,6 +484,10 @@ function isUsableTaobaoProduct(product) {
     Number(product.price) > 0 &&
     Boolean(normalizeHttpsUrl(product.image_url)) &&
     Boolean(normalizeHttpsUrl(product.purchase_url));
+}
+
+function logMappingDiagnostics(logger, details) {
+  logger.info?.(`淘宝商品映射诊断 ${JSON.stringify(details)}`);
 }
 
 function uniqueProducts(products) {

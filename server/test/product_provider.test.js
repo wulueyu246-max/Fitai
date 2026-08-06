@@ -299,7 +299,8 @@ test("mapping diagnostics contain counts but no product content or URLs", async 
 
   await provider.recommend({keyword: "上衣", requestId: "request-map-1", limit: 1});
 
-  const diagnostics = logs.find(([message]) => message === "淘宝商品映射诊断")[1];
+  const message = logs.find(([value]) => value.startsWith("淘宝商品映射诊断 "))[0];
+  const diagnostics = JSON.parse(message.slice("淘宝商品映射诊断 ".length));
   assert.equal(diagnostics.rawCount, 1);
   assert.equal(diagnostics.mappedCount, 1);
   assert.equal(diagnostics.usableCount, 1);
