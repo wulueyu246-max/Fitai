@@ -337,6 +337,49 @@ test("structured queries try precise keywords in order and expose relevance fiel
   assert.equal(products[0].is_mock, false);
 });
 
+test("a Taobao no-result error continues with the next precise keyword", async () => {
+  const searchKeywords = ["女士 米白色 玛丽珍鞋", "女士 法式 玛丽珍鞋 夏季"];
+  const calls = [];
+  const provider = providerWithClient({
+    call: async (method, params) => {
+      calls.push(params.q);
+      if (params.q === searchKeywords[0]) {
+        throw new TaobaoApiError("no result", {
+          code: "TAOBAO_API_15",
+          details: {
+            taobao_error_code: "15",
+            taobao_sub_code: "50001",
+            taobao_sub_msg: "无结果",
+          },
+        });
+      }
+      return response(method, Array.from({length: 20}, (_, index) => taobaoItem({
+        item_basic_info: {
+          item_id: `mary-jane-${index}`,
+          title: `女士米白色法式玛丽珍鞋夏季${index}`,
+          category_name: "女鞋",
+          pict_url: `//img.example.com/mary-jane-${index}.jpg`,
+        },
+        publish_info: {click_url: `//s.click.taobao.com/mary-jane-${index}`},
+      })));
+    },
+  });
+
+  const products = await provider.recommendForQueries([{
+    category: "shoes",
+    gender: "female",
+    item_name: "米白色玛丽珍鞋",
+    color: "米白色",
+    style: "法式",
+    season: "summer",
+    search_keywords: searchKeywords,
+  }]);
+
+  assert.deepEqual(calls.slice(0, 2), searchKeywords);
+  assert.equal(products.length, 6);
+  assert.ok(products.every((product) => product.source === "taobao"));
+});
+
 test("builds a twenty-item hard-filtered pool and returns up to six AI selections", async () => {
   const pageSizes = [];
   const capturedGroups = [];

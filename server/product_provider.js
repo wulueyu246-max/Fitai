@@ -269,6 +269,17 @@ class TaobaoProductProvider extends ProductProvider {
         siteId: this.siteId,
       });
     } catch (error) {
+      if (isEmptyTaobaoResult(error)) {
+        this.logger.info?.("淘宝商品搜索无结果", {
+          requestId: filters.requestId || undefined,
+          provider: "taobao",
+          search_keyword: filters.searchKeyword || buildSearchKeyword(filters),
+          gender: normalizeGender(filters.gender),
+          category: filters.category || undefined,
+          errorCode: safeProviderCode(error),
+        });
+        return [];
+      }
       this.logger.warn?.("淘宝商品搜索失败", {
         requestId: filters.requestId || undefined,
         provider: "taobao",
@@ -290,16 +301,22 @@ class TaobaoProductProvider extends ProductProvider {
   }
 
   async #sample(filters) {
-    const payload = await this.client.call(TAOBAO_MATERIAL_SAMPLE_METHOD, {
-      adzone_id: this.adzoneId,
-      material_id: this.sampleMaterialId,
-      page_no: "1",
-      page_size: String(filters.limit),
-    }, {
-      requestId: filters.requestId || undefined,
-      provider: "taobao",
-      siteId: this.siteId,
-    });
+    let payload;
+    try {
+      payload = await this.client.call(TAOBAO_MATERIAL_SAMPLE_METHOD, {
+        adzone_id: this.adzoneId,
+        material_id: this.sampleMaterialId,
+        page_no: "1",
+        page_size: String(filters.limit),
+      }, {
+        requestId: filters.requestId || undefined,
+        provider: "taobao",
+        siteId: this.siteId,
+      });
+    } catch (error) {
+      if (isEmptyTaobaoResult(error)) return [];
+      throw error;
+    }
     return mapPayload(payload, filters, this.pid, "sample", (details) => {
       logMappingDiagnostics(this.logger, {
         requestId: filters.requestId || undefined,
@@ -792,6 +809,12 @@ function parseTaobaoPlacement(pid, adzoneIdOverride = "") {
 function safeProviderCode(error) {
   if (error instanceof TaobaoApiError || error instanceof ProductProviderError) return error.code;
   return "TAOBAO_UNKNOWN_ERROR";
+}
+
+function isEmptyTaobaoResult(error) {
+  return error instanceof TaobaoApiError &&
+    error.details?.taobao_error_code === "15" &&
+    error.details?.taobao_sub_code === "50001";
 }
 
 function asProductProviderError(error) {
