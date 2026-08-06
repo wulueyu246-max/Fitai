@@ -9,6 +9,7 @@ const {
   createProductProvider,
   mapTaobaoProduct,
   parseTaobaoPlacement,
+  extractTaobaoItems,
 } = require("../product_provider");
 const {
   TAOBAO_MATERIAL_SAMPLE_METHOD,
@@ -287,6 +288,18 @@ test("a keyword-only request performs one keyword search", async () => {
   assert.equal(products[0].source, "taobao");
 });
 
+test("extracts official simplified camelCase result containers", () => {
+  const items = extractTaobaoItems({
+    tbkDgMaterialOptionalUpgradeResponse: {
+      totalResults: 1,
+      resultList: {mapData: [taobaoItem()]},
+    },
+  });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].item_basic_info.item_id, "123456");
+});
+
 test("mapping diagnostics contain counts but no product content or URLs", async () => {
   const logs = [];
   const provider = new TaobaoProductProvider({
@@ -304,6 +317,8 @@ test("mapping diagnostics contain counts but no product content or URLs", async 
   assert.equal(diagnostics.rawCount, 1);
   assert.equal(diagnostics.mappedCount, 1);
   assert.equal(diagnostics.usableCount, 1);
+  assert.equal(diagnostics.responseRoot, "tbk_dg_material_optional_upgrade_response");
+  assert.deepEqual(diagnostics.resultListKeys, ["map_data"]);
   assert.equal(JSON.stringify(diagnostics).includes("通勤外套"), false);
   assert.equal(JSON.stringify(diagnostics).includes("s.click.taobao.com"), false);
 });

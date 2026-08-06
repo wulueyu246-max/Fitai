@@ -311,10 +311,14 @@ function buildSearchKeyword(filters) {
 
 function extractTaobaoItems(payload) {
   const response = payload?.tbk_dg_material_optional_upgrade_response ||
+    payload?.tbkDgMaterialOptionalUpgradeResponse ||
     payload?.tbk_dg_material_optional_response ||
-    payload?.tbk_dg_material_recommend_response || {};
-  const raw = response.result_list?.map_data || response.result_list?.mapData ||
-    response.result_list || response.results?.map_data || [];
+    payload?.tbkDgMaterialOptionalResponse ||
+    payload?.tbk_dg_material_recommend_response ||
+    payload?.tbkDgMaterialRecommendResponse || {};
+  const resultList = response.result_list || response.resultList || response.results || {};
+  const raw = resultList.map_data || resultList.mapData || resultList.items ||
+    response.map_data || response.mapData || [];
   return Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
 }
 
@@ -332,6 +336,7 @@ function mapPayload(payload, filters, pid, origin, onDiagnostics) {
   ));
   onDiagnostics?.({
     origin,
+    ...safeTaobaoResponseShape(payload),
     rawCount: rawItems.length,
     mappedCount: mapped.length,
     usableCount: products.length,
@@ -345,6 +350,23 @@ function mapPayload(payload, filters, pid, origin, onDiagnostics) {
     ).length,
   });
   return products;
+}
+
+function safeTaobaoResponseShape(payload) {
+  const rootKey = Object.keys(payload || {}).find((key) => /response$/i.test(key)) || "";
+  const response = rootKey && payload[rootKey] && typeof payload[rootKey] === "object"
+    ? payload[rootKey]
+    : {};
+  const resultList = response.result_list || response.resultList || response.results;
+  return {
+    responseRoot: rootKey,
+    responseKeys: Object.keys(response).sort().slice(0, 20),
+    resultListType: Array.isArray(resultList) ? "array" : typeof resultList,
+    resultListKeys: resultList && typeof resultList === "object" && !Array.isArray(resultList)
+      ? Object.keys(resultList).sort().slice(0, 20)
+      : [],
+    totalResults: firstNumber(response.total_results, response.totalResults) ?? null,
+  };
 }
 
 function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}, origin = "search"} = {}) {
@@ -564,5 +586,6 @@ module.exports = {
   mapTaobaoProduct,
   normalizeHttpsUrl,
   parseTaobaoPlacement,
+  safeTaobaoResponseShape,
   signTaobaoRequest,
 };
