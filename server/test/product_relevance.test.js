@@ -64,6 +64,7 @@ test("male recommendations remove women products and category conflicts", () => 
     product("valid", "男士浅灰色短袖Polo夏季clean fit上衣"),
     product("female", "女士浅灰色吊带上衣"),
     product("pants", "男士浅灰色九分休闲裤"),
+    product("weak-couple", "女款情侣基础短袖上衣"),
   ], requirement, requirement.search_keywords[0]);
 
   assert.deepEqual(ranked.map((item) => item.product_id), ["valid"]);

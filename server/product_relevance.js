@@ -168,7 +168,9 @@ function rankProducts(products, input = {}, searchKeyword = "") {
   const requirement = normalizeProductRequirement(input);
   return (Array.isArray(products) ? products : [])
     .map((product) => scoreProduct(product, requirement, searchKeyword))
-    .filter(Boolean)
+    .filter((product) => product && (
+      requirement.gender === "unisex" || product.relevance_score >= 50
+    ))
     .sort((left, right) => right.relevance_score - left.relevance_score ||
       String(left.product_id).localeCompare(String(right.product_id)));
 }
