@@ -817,7 +817,7 @@ function completeTruncatedJson(content) {
   return content + stack.reverse().join("");
 }
 
-function parseOutfitAnalysis(content) {
+function parseOutfitAnalysis(content, context = {}) {
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("AI 返回内容为空");
   }
@@ -898,6 +898,9 @@ function parseOutfitAnalysis(content) {
     throw new Error("AI 返回 products 不能超过 8 项");
   }
 
+  const analysisGender = Object.prototype.hasOwnProperty.call(parsed, "gender")
+    ? normalizeGender(parsed.gender)
+    : normalizeGender(context.gender);
   const products = parsed.products.map((product, index) => {
     if (!product || typeof product !== "object" || Array.isArray(product)) {
       throw new Error(`AI 返回 products[${index}] 必须是对象`);
@@ -905,6 +908,9 @@ function parseOutfitAnalysis(content) {
     try {
       const requirement = normalizeProductRequirement({
         ...product,
+        gender: Object.prototype.hasOwnProperty.call(product, "gender")
+          ? product.gender
+          : analysisGender,
         item_name: product.item_name || product.itemName || product.keyword,
         search_keywords: product.search_keywords ||
           product.searchKeywords ||
@@ -923,6 +929,7 @@ function parseOutfitAnalysis(content) {
   });
 
   return {
+    gender: analysisGender,
     bodyProfile: bodyProfile.trim(),
     style: parsed.style.trim(),
     recommendations,
@@ -946,6 +953,7 @@ function createMockOutfitAnalysis(outfitRequest) {
         : "简洁都市休闲";
 
   return {
+    gender,
     bodyProfile:
       `演示模式仅记录身高 ${outfitRequest.height} cm、体重 ` +
       `${outfitRequest.weight} kg；当前未对照片进行真实视觉识别。`,
@@ -1015,16 +1023,16 @@ async function buildOutfitApiResponse(
   const requestText = String(outfitRequest.request || "");
   const budgetMatch = requestText.match(/(?:预算|不超过|以内)\s*[¥￥]?\s*(\d+(?:\.\d+)?)/);
   const profileGender = normalizeGender(outfitRequest.gender);
-  const gender = profileGender !== "unisex"
-    ? profileGender
+  const analysisGender = normalizeGender(analysis.gender);
+  const gender = analysisGender !== "unisex"
+    ? analysisGender
+    : profileGender !== "unisex"
+      ? profileGender
     : /(?:男士|男生|男性)/.test(requestText)
       ? "male"
       : /(?:女士|女生|女性)/.test(requestText) ? "female" : "unisex";
   const productRequirements = analysis.products.map((product) => {
-    const requirement = normalizeProductRequirement({
-      ...product,
-      gender: gender === "unisex" ? product.gender : gender,
-    }, {
+    const requirement = normalizeProductRequirement(product, {
       gender,
       scene: outfitRequest.scene,
       style: analysis.style,
@@ -1078,12 +1086,11 @@ async function buildOutfitResponseForRequest(
     return buildOutfitApiResponse(analysis, undefined, outfitRequest);
   }
   const requestGender = normalizeGender(outfitRequest.gender);
+  const analysisGender = normalizeGender(analysis.gender);
+  const gender = analysisGender !== "unisex" ? analysisGender : requestGender;
   const products = analysis.products.map((product) => {
-    const requirement = normalizeProductRequirement({
-      ...product,
-      gender: requestGender === "unisex" ? product.gender : requestGender,
-    }, {
-      gender: requestGender,
+    const requirement = normalizeProductRequirement(product, {
+      gender,
       scene: outfitRequest.scene,
       style: analysis.style,
     });
@@ -1582,6 +1589,16 @@ async function handleProductRecommendations(req, res, next) {
       input,
       res.locals.requestId,
     );
+    console.info("商品搜索需求已解析", {
+      requestId: res.locals.requestId,
+      aiGender: filters.gender || undefined,
+      requirements: items.map((item) => ({
+        search_requirement_gender: item.gender,
+        search_keywords: item.search_keywords,
+        category: item.category,
+        item_name: item.item_name,
+      })),
+    });
     const products = items.length > 0
       ? await productProvider.recommendForQueries(items, filters)
       : await productProvider.recommend(filters);
@@ -1794,13 +1811,14 @@ ${partialViewSafetyInstruction}
 3. 建议必须具体，说明适合的版型、颜色、鞋子和配饰。
 4. 只返回一个 JSON 对象，不使用 Markdown、代码块或额外解释。
 5. products 只描述适合用户的商品类型和检索条件，不得编造品牌、SKU、价格或购买链接；真实商品由商品数据库另行匹配。
-6. products 中每个单品必须根据用户资料输出 gender，只能是 male、female 或 unisex；不得把性别写死。
+6. 顶层 gender 和 products 中每个单品的 gender 都必须根据用户资料输出，只能是 male、female 或 unisex；不得把性别写死，且两层必须一致，除非某个单品明确为中性款。
 7. category 至少支持 top、bottom、dress、shoes、outerwear、bag、hat、accessory。
 8. 每个单品输出 2 到 3 个 search_keywords。每个关键词必须包含性别人群词、具体品类词、颜色或风格词，并按需加入季节、版型或场景。
 9. negative_keywords 必须排除与用户性别和目标品类明显冲突的商品词。
 10. 必须严格使用以下结构；原有 recommendations 文案字段保持字符串：
 
 {
+  "gender": "",
   "bodyProfile": "",
   "style": "",
   "recommendations": {
@@ -1854,7 +1872,9 @@ ${partialViewSafetyInstruction}
       finishReason: response?.choices?.[0]?.finish_reason ?? null,
       contentLength: aiText.length,
     });
-    const analysis = parseOutfitAnalysis(aiText);
+    const analysis = parseOutfitAnalysis(aiText, {
+      gender: outfitRequest.gender,
+    });
     const parseDurationMs = Date.now() - parseStartedAt;
 
     console.info("AI 穿搭响应字段校验通过", {
@@ -1862,6 +1882,8 @@ ${partialViewSafetyInstruction}
       fields: Object.keys(analysis),
       recommendationFields: Object.keys(analysis.recommendations),
       productCount: analysis.products.length,
+      aiGender: analysis.gender,
+      productGenders: analysis.products.map((product) => product.gender),
     });
 
     const productsStartedAt = Date.now();

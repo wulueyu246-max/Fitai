@@ -11,7 +11,10 @@ class ProductSearchRequirement {
     required this.negativeKeywords,
   });
 
-  factory ProductSearchRequirement.fromJson(Map<String, dynamic> json) {
+  factory ProductSearchRequirement.fromJson(
+    Map<String, dynamic> json, {
+    String fallbackGender = 'unisex',
+  }) {
     final legacyKeyword = _optionalString(json['keyword']);
     final itemName = _optionalString(json['item_name']) ??
         _optionalString(json['itemName']) ??
@@ -25,7 +28,9 @@ class ProductSearchRequirement {
         (legacyKeyword == null ? const <String>[] : [legacyKeyword]);
     return ProductSearchRequirement(
       category: _requiredString(json['category'], 'category'),
-      gender: _optionalString(json['gender']) ?? 'unisex',
+      gender: _normalizeGender(
+        _optionalString(json['gender']) ?? fallbackGender,
+      ),
       itemName: itemName,
       color: _optionalString(json['color']) ?? '',
       style: _optionalString(json['style']) ?? '',
@@ -69,6 +74,18 @@ class ProductSearchRequirement {
 
   static String? _optionalString(Object? value) {
     return value is String && value.trim().isNotEmpty ? value.trim() : null;
+  }
+
+  static String _normalizeGender(String value) {
+    final normalized = value.trim().toLowerCase();
+    if (const {'male', 'man', 'men', '男性', '男士', '男生'}.contains(normalized)) {
+      return 'male';
+    }
+    if (const {'female', 'woman', 'women', '女性', '女士', '女生'}
+        .contains(normalized)) {
+      return 'female';
+    }
+    return 'unisex';
   }
 
   static List<String> _stringList(Object? value, String field) {

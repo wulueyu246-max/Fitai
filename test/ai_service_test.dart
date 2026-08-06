@@ -175,6 +175,58 @@ void main() {
     await service.generateOutfit(unnormalizedRequest);
   });
 
+  test('preserves male AI gender when a product omits gender', () async {
+    final client = MockClient((_) async {
+      return http.Response(
+        jsonEncode({
+          'gender': 'male',
+          'bodyProfile': '男性身体比例分析',
+          'style': '法式',
+          'recommendations': {
+            'top': '男士法式衬衫',
+            'bottom': '休闲裤',
+            'shoes': '皮鞋',
+            'accessories': '手表',
+            'summary': '男性约会穿搭',
+          },
+          'products': [
+            {
+              'category': 'top',
+              'item_name': '法式衬衫',
+              'style': '法式',
+              'search_keywords': ['男士 法式衬衫'],
+              'negative_keywords': ['女装', '吊带'],
+            },
+          ],
+        }),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+    final service = AIService(
+      client: client,
+      config: const AppConfig(apiBaseUrl: 'https://api.example.com'),
+    );
+
+    final analysis = await service.generateOutfit(
+      const OutfitRequest(
+        height: 178,
+        weight: 70,
+        scene: '约会',
+        request: '法式男士穿搭',
+        gender: 'male',
+        images: {'front': 'data:image/jpeg;base64,AA=='},
+      ),
+    );
+
+    expect(analysis.gender, 'male');
+    expect(analysis.productRequirements.single.gender, 'male');
+    expect(
+      analysis.productRequirements.single.searchKeywords.first,
+      '男士 法式衬衫',
+    );
+  });
+
   test('uses the Render backend by default on Android', () {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     try {

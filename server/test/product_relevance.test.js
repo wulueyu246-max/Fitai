@@ -49,6 +49,24 @@ test("gender and category aliases normalize for male female and unisex", () => {
   assert.equal(normalizeProductCategory("托特包"), "bag");
 });
 
+test("query builder prefixes every genderless male French shirt keyword", () => {
+  const keywords = buildSearchKeywords({
+    category: "top",
+    gender: "male",
+    item_name: "法式衬衫",
+    style: "法式",
+    fit: "长袖",
+    search_keywords: ["法式衬衫", "法式 长袖衬衫", "法式 上衣"],
+    negative_keywords: [],
+  });
+
+  assert.deepEqual(keywords, [
+    "男士 法式衬衫",
+    "男士 法式 长袖衬衫",
+    "男士 法式 上衣",
+  ]);
+});
+
 test("male recommendations remove women products and category conflicts", () => {
   const requirement = normalizeProductRequirement({
     category: "top",

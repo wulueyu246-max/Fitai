@@ -12,6 +12,7 @@ class OutfitAnalysis {
     required this.shoes,
     required this.accessories,
     required this.suggestion,
+    this.gender = 'unisex',
     this.analysisMode = 'ai',
     this.recommendedProducts = const [],
     this.productRecommendations = const [],
@@ -35,6 +36,11 @@ class OutfitAnalysis {
       shoes: _readString(json, 'shoes'),
       accessories: _readString(json, 'accessories'),
       suggestion: _readString(json, 'suggestion'),
+      gender: _readOptionalAliasedString(
+        json,
+        const ['gender'],
+        fallback: 'unisex',
+      ),
       analysisMode: json['analysis_mode'] is String
           ? json['analysis_mode'] as String
           : 'ai',
@@ -56,7 +62,18 @@ class OutfitAnalysis {
     final productRecommendations = _readProductRecommendations(
       recommendations['products'],
     );
-    final productRequirements = _readProductRequirements(json['products']);
+    final responseGender = _readOptionalAliasedString(
+      json,
+      const ['gender'],
+      fallback: 'unisex',
+    );
+    final productRequirements = _readProductRequirements(
+      json['products'],
+      fallbackGender: responseGender,
+    );
+    final gender = responseGender == 'unisex'
+        ? _commonRequirementGender(productRequirements)
+        : responseGender;
 
     return OutfitAnalysis(
       bodyAnalysis: _readAliasedString(
@@ -88,6 +105,7 @@ class OutfitAnalysis {
         recommendations,
         const ['summary', 'suggestion'],
       ),
+      gender: gender,
       analysisMode: _readOptionalAliasedString(
         json,
         const ['analysisMode', 'analysis_mode'],
@@ -112,6 +130,7 @@ class OutfitAnalysis {
   final String shoes;
   final String accessories;
   final String suggestion;
+  final String gender;
   final String analysisMode;
   final List<Product> recommendedProducts;
   final List<ProductRecommendation> productRecommendations;
@@ -128,6 +147,7 @@ class OutfitAnalysis {
     String? shoes,
     String? accessories,
     String? suggestion,
+    String? gender,
     String? analysisMode,
     List<Product>? recommendedProducts,
     List<ProductRecommendation>? productRecommendations,
@@ -142,6 +162,7 @@ class OutfitAnalysis {
       shoes: shoes ?? this.shoes,
       accessories: accessories ?? this.accessories,
       suggestion: suggestion ?? this.suggestion,
+      gender: gender ?? this.gender,
       analysisMode: analysisMode ?? this.analysisMode,
       recommendedProducts: recommendedProducts ?? this.recommendedProducts,
       productRecommendations:
@@ -160,6 +181,7 @@ class OutfitAnalysis {
       'shoes': shoes,
       'accessories': accessories,
       'suggestion': suggestion,
+      'gender': gender,
       'analysis_mode': analysisMode,
       'recommended_products':
           recommendedProducts.map((product) => product.toJson()).toList(),
@@ -275,8 +297,9 @@ class OutfitAnalysis {
   }
 
   static List<ProductSearchRequirement> _readProductRequirements(
-    dynamic value,
-  ) {
+    dynamic value, {
+    String fallbackGender = 'unisex',
+  }) {
     if (value == null) return const [];
     if (value is! List) {
       throw const FormatException('products must be an array');
@@ -286,9 +309,22 @@ class OutfitAnalysis {
         if (item is! Map<String, dynamic>) {
           throw const FormatException('products entries must be objects');
         }
-        return ProductSearchRequirement.fromJson(item);
+        return ProductSearchRequirement.fromJson(
+          item,
+          fallbackGender: fallbackGender,
+        );
       }),
     );
+  }
+
+  static String _commonRequirementGender(
+    List<ProductSearchRequirement> requirements,
+  ) {
+    final genders = requirements
+        .map((requirement) => requirement.gender)
+        .where((gender) => gender != 'unisex')
+        .toSet();
+    return genders.length == 1 ? genders.single : 'unisex';
   }
 
   static OutfitPlan? _readOutfitPlan(dynamic value) {

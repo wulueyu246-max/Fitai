@@ -1,3 +1,4 @@
+import '../core/logging/app_logger.dart';
 import '../models/outfit_analysis.dart';
 import '../models/outfit_plan.dart';
 import '../models/outfit_request.dart';
@@ -148,6 +149,25 @@ class CatalogProductService implements ProductService {
     required OutfitRequest request,
   }) async {
     final hasStructuredRequirements = analysis.productRequirements.isNotEmpty;
+    if (hasStructuredRequirements) {
+      AppLogger.instance.info(
+        'product_search_requirements_prepared',
+        metadata: {
+          'aiGender': analysis.gender,
+          'requestGender': request.gender,
+          'requirements': analysis.productRequirements
+              .map(
+                (requirement) => {
+                  'searchRequirementGender': requirement.gender,
+                  'searchKeywords': requirement.searchKeywords,
+                  'category': requirement.category,
+                  'itemName': requirement.itemName,
+                },
+              )
+              .toList(growable: false),
+        },
+      );
+    }
     final catalog = await source.fetchProducts(
       recommendationContext: hasStructuredRequirements
           ? {

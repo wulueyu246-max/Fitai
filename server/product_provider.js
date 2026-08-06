@@ -210,6 +210,13 @@ class TaobaoProductProvider extends ProductProvider {
   async #candidatePool(filters) {
     const requirement = normalizeProductRequirement(filters, filters);
     const keywords = buildSearchKeywords(requirement);
+    this.logger.info?.("淘宝商品搜索需求", {
+      requestId: filters.requestId || undefined,
+      search_requirement_gender: requirement.gender,
+      search_keywords: keywords,
+      category: requirement.category,
+      item_name: requirement.item_name,
+    });
     const candidateLimit = Math.min(positiveInteger(filters.limit, 20), 20);
     let products = [];
     for (const searchKeyword of keywords) {

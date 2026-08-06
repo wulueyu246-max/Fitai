@@ -350,6 +350,37 @@ test("adds catalog recommendations while upgrading legacy product requirements",
   assert.equal(response.recommendations.top, "shirt");
 });
 
+test("preserves a male AI gender when a product omits its gender", () => {
+  const analysis = parseOutfitAnalysis(JSON.stringify({
+    gender: "male",
+    bodyProfile: "balanced",
+    style: "法式",
+    recommendations: {
+      top: "法式男士衬衫",
+      bottom: "休闲裤",
+      shoes: "皮鞋",
+      accessories: "手表",
+      summary: "男性约会穿搭",
+    },
+    products: [{
+      category: "top",
+      item_name: "法式衬衫",
+      style: "法式",
+      fit: "长袖",
+      search_keywords: ["法式衬衫", "法式 长袖衬衫", "法式 上衣"],
+      negative_keywords: ["女装", "荷叶边", "吊带"],
+    }],
+  }), {gender: "male"});
+
+  assert.equal(analysis.gender, "male");
+  assert.equal(analysis.products[0].gender, "male");
+  assert.deepEqual(analysis.products[0].search_keywords, [
+    "男士 法式衬衫",
+    "男士 法式 长袖衬衫",
+    "男士 法式 上衣",
+  ]);
+});
+
 test("accepts structured product requirements with normalized gender", () => {
   const result = productRecommendationRequest({
     gender: "女士",
