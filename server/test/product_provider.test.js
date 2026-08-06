@@ -7,6 +7,7 @@ const {
   TaobaoProductProvider,
   createProductProvider,
   mapTaobaoProduct,
+  parseTaobaoPlacement,
 } = require("../product_provider");
 const {
   TAOBAO_MATERIAL_SAMPLE_METHOD,
@@ -71,7 +72,6 @@ test("uses MockProductProvider when Taobao credentials are absent", async () => 
     "TAOBAO_APP_KEY",
     "TAOBAO_APP_SECRET",
     "TAOBAO_PID",
-    "TAOBAO_ADZONE_ID",
   ]);
 });
 
@@ -108,6 +108,7 @@ test("16516 material search maps only fields actually returned", async () => {
   });
   const products = await provider.recommend({category: "外套", style: "通勤", limit: 1});
   assert.equal(calls[0].method, TAOBAO_MATERIAL_SEARCH_METHOD);
+  assert.equal(calls[0].params.site_id, "200");
   assert.equal(calls[0].params.adzone_id, "300");
   assert.equal(products.length, 1);
   assert.equal(products[0].category, "outerwear");
@@ -191,15 +192,18 @@ test("non-HTTPS URLs never become purchase links", () => {
   assert.equal(product.detail_url, "");
 });
 
-test("auto mode requires PID and Adzone and calls Taobao recommendations directly", async () => {
-  const client = {call: async (method) => response(method, [taobaoItem()])};
+test("auto mode derives site and Adzone from PID when override is absent", async () => {
+  const calls = [];
+  const client = {call: async (method, params) => {
+    calls.push({method, params});
+    return response(method, [taobaoItem()]);
+  }};
   const provider = createProductProvider({
     environment: {
       PRODUCT_PROVIDER: "auto",
       TAOBAO_APP_KEY: "app-key",
       TAOBAO_APP_SECRET: "app-secret",
       TAOBAO_PID: "mm_1_2_3",
-      TAOBAO_ADZONE_ID: "3",
     },
     client,
     logger: {info() {}, warn() {}},
@@ -208,17 +212,8 @@ test("auto mode requires PID and Adzone and calls Taobao recommendations directl
   const products = await provider.recommend({category: "outerwear", limit: 1});
   assert.equal(provider.health, true);
   assert.equal(products[0].source, "taobao");
-
-  const missingAdzone = createProductProvider({
-    environment: {
-      PRODUCT_PROVIDER: "auto",
-      TAOBAO_APP_KEY: "app-key",
-      TAOBAO_APP_SECRET: "app-secret",
-      TAOBAO_PID: "mm_1_2_3",
-    },
-    logger: {warn() {}},
-  });
-  assert.ok(missingAdzone instanceof MockProductProvider);
+  assert.equal(calls[0].params.site_id, "2");
+  assert.equal(calls[0].params.adzone_id, "3");
 });
 
 test("permission failure in auto mode safely falls back to Mock", async () => {
@@ -284,9 +279,16 @@ test("legacy Taobao URLs map to affiliate, coupon, purchase and PID fields", () 
   assert.equal(product.is_mock, false);
 });
 
-test("mismatched PID and Adzone safely keep Mock active", () => {
-  const warnings = [];
-  const provider = createProductProvider({
+test("matching TAOBAO_ADZONE_ID may explicitly override the PID value", () => {
+  assert.deepEqual(parseTaobaoPlacement("mm_1_2_300", "300"), {
+    siteId: "2",
+    adzoneId: "300",
+  });
+});
+
+test("mismatched PID and Adzone fails startup without logging the PID", () => {
+  const errors = [];
+  assert.throws(() => createProductProvider({
     environment: {
       PRODUCT_PROVIDER: "auto",
       TAOBAO_APP_KEY: "app-key",
@@ -294,10 +296,17 @@ test("mismatched PID and Adzone safely keep Mock active", () => {
       TAOBAO_PID: "mm_1_2_300",
       TAOBAO_ADZONE_ID: "999",
     },
-    logger: {info() {}, warn: (...args) => warnings.push(args)},
-  });
-  assert.ok(provider instanceof MockProductProvider);
-  assert.equal(warnings[0][1].errorCode, "TAOBAO_PID_ADZONE_MISMATCH");
+    logger: {info() {}, error: (...args) => errors.push(args)},
+  }), (error) => error.code === "TAOBAO_PID_ADZONE_MISMATCH");
+  assert.equal(errors[0][1].errorCode, "TAOBAO_PID_ADZONE_MISMATCH");
+  assert.equal(JSON.stringify(errors).includes("mm_1_2_300"), false);
+});
+
+test("invalid PID format fails startup with an explicit safe error", () => {
+  assert.throws(
+    () => parseTaobaoPlacement("invalid-pid"),
+    (error) => error.code === "TAOBAO_INVALID_PID" && /TAOBAO_PID/.test(error.message),
+  );
 });
 
 test("TaobaoService keeps provider implementation server-side", async () => {

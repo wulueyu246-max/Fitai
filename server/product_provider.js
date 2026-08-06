@@ -70,7 +70,9 @@ class TaobaoProductProvider extends ProductProvider {
   }) {
     super();
     this.pid = requireConfig(pid, "TAOBAO_PID");
-    this.adzoneId = requireConfig(adzoneId, "TAOBAO_ADZONE_ID");
+    const placement = parseTaobaoPlacement(this.pid, adzoneId);
+    this.siteId = placement.siteId;
+    this.adzoneId = placement.adzoneId;
     this.sampleMaterialId = String(sampleMaterialId || DEFAULT_SAMPLE_MATERIAL_ID);
     this.logger = logger;
     this.mock = new MockProductProvider({catalog});
@@ -121,6 +123,7 @@ class TaobaoProductProvider extends ProductProvider {
 
   async #search(filters) {
     const payload = await this.client.call(TAOBAO_MATERIAL_SEARCH_METHOD, {
+      site_id: this.siteId,
       adzone_id: this.adzoneId,
       q: buildSearchKeyword(filters),
       page_no: "1",
@@ -185,7 +188,6 @@ function createProductProvider({environment = process.env, catalog, logger = con
     TAOBAO_APP_KEY: values.appKey,
     TAOBAO_APP_SECRET: values.appSecret,
     TAOBAO_PID: values.pid,
-    TAOBAO_ADZONE_ID: values.adzoneId,
   };
   const missingVariables = Object.entries(requiredVariables)
     .filter(([, value]) => !value)
@@ -201,25 +203,28 @@ function createProductProvider({environment = process.env, catalog, logger = con
     }
     return new MockProductProvider({catalog: productCatalog});
   }
-  const placementError = validatePlacement(values.pid, values.adzoneId);
-  if (placementError) {
-    logger.warn?.("淘宝推广位配置无效，使用 Mock", {
-      configured: true,
-      errorCode: placementError,
+  let taobao;
+  try {
+    taobao = new TaobaoProductProvider({
+      ...values,
+      client,
+      catalog: productCatalog,
+      endpoint: environment.TAOBAO_API_URL,
+      connectTimeoutMs: positiveInteger(environment.TAOBAO_CONNECT_TIMEOUT_MS, 5_000),
+      timeoutMs: positiveInteger(environment.PRODUCT_PROVIDER_TIMEOUT_MS, 12_000),
+      maxRetries: positiveInteger(environment.TAOBAO_MAX_RETRIES, 1),
+      sampleMaterialId: environment.TAOBAO_SAMPLE_MATERIAL_ID || DEFAULT_SAMPLE_MATERIAL_ID,
+      logger,
     });
-    return new MockProductProvider({catalog: productCatalog});
+  } catch (error) {
+    logger.error?.("淘宝推广位配置无效", {
+      configured: true,
+      errorCode: error instanceof ProductProviderError
+        ? error.code
+        : "TAOBAO_INVALID_PLACEMENT",
+    });
+    throw error;
   }
-  const taobao = new TaobaoProductProvider({
-    ...values,
-    client,
-    catalog: productCatalog,
-    endpoint: environment.TAOBAO_API_URL,
-    connectTimeoutMs: positiveInteger(environment.TAOBAO_CONNECT_TIMEOUT_MS, 5_000),
-    timeoutMs: positiveInteger(environment.PRODUCT_PROVIDER_TIMEOUT_MS, 12_000),
-    maxRetries: positiveInteger(environment.TAOBAO_MAX_RETRIES, 1),
-    sampleMaterialId: environment.TAOBAO_SAMPLE_MATERIAL_ID || DEFAULT_SAMPLE_MATERIAL_ID,
-    logger,
-  });
   if (mode === "taobao") return taobao;
   return new AutoProductProvider({
     taobao,
@@ -431,14 +436,31 @@ function positiveInteger(value, fallback) {
   return Number.isInteger(number) && number > 0 ? number : fallback;
 }
 
-function validatePlacement(pid, adzoneId) {
-  if (!/^\d+$/.test(adzoneId)) return "TAOBAO_INVALID_ADZONE_ID";
-  const pidParts = pid.split("_").filter(Boolean);
-  const pidAdzoneId = pidParts.length > 1 ? pidParts.at(-1) : "";
-  if (pidAdzoneId && /^\d+$/.test(pidAdzoneId) && pidAdzoneId !== adzoneId) {
-    return "TAOBAO_PID_ADZONE_MISMATCH";
+function parseTaobaoPlacement(pid, adzoneIdOverride = "") {
+  const normalizedPid = requireConfig(pid, "TAOBAO_PID");
+  const match = /^mm_(\d+)_(\d+)_(\d+)$/.exec(normalizedPid);
+  if (!match) {
+    throw new ProductProviderError(
+      "TAOBAO_PID 格式无效，应为 mm_accountId_siteId_adzoneId",
+      {status: 500, code: "TAOBAO_INVALID_PID"},
+    );
   }
-  return null;
+  const siteId = match[2];
+  const pidAdzoneId = match[3];
+  const override = String(adzoneIdOverride || "").trim();
+  if (override && !/^\d+$/.test(override)) {
+    throw new ProductProviderError("TAOBAO_ADZONE_ID 格式无效", {
+      status: 500,
+      code: "TAOBAO_INVALID_ADZONE_ID",
+    });
+  }
+  if (override && override !== pidAdzoneId) {
+    throw new ProductProviderError(
+      "TAOBAO_ADZONE_ID 必须与 TAOBAO_PID 最后一段一致",
+      {status: 500, code: "TAOBAO_PID_ADZONE_MISMATCH"},
+    );
+  }
+  return {siteId, adzoneId: override || pidAdzoneId};
 }
 
 function safeProviderCode(error) {
@@ -456,5 +478,6 @@ module.exports = {
   extractTaobaoItems,
   mapTaobaoProduct,
   normalizeHttpsUrl,
+  parseTaobaoPlacement,
   signTaobaoRequest,
 };
