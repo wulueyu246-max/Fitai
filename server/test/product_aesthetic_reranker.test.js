@@ -195,3 +195,36 @@ test("under-selected groups receive one focused repair call", async () => {
   assert.equal(reranker.getStats().call_count, 2);
   assert.equal(reranker.getStats().fallback_count, 0);
 });
+
+test("multiple incomplete groups are repaired independently", async () => {
+  const repairedCategories = [];
+  const reranker = new ProductAestheticReranker({
+    client: {
+      chat: {completions: {create: async (request) => {
+        const payload = JSON.parse(request.messages[1].content);
+        if (payload.product_groups.length > 1) {
+          return response([selection("top-1"), selection("shoe-1")]);
+        }
+        const candidates = payload.product_groups[0].candidates;
+        const category = candidates[0].product_id.startsWith("top") ? "top" : "shoes";
+        repairedCategories.push(category);
+        return response(candidates.slice(0, 4).map((item) => selection(item.product_id)));
+      }}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await reranker.rerank({
+    groups: [
+      group("top", ["top-1", "top-2", "top-3", "top-4", "top-5"]),
+      group("shoes", ["shoe-1", "shoe-2", "shoe-3", "shoe-4", "shoe-5"]),
+    ],
+    context: {gender: "female"},
+  });
+
+  assert.deepEqual(repairedCategories.sort(), ["shoes", "top"]);
+  assert.equal(products.length, 8);
+  assert.ok(products.every((product) => product.ai_rerank_fallback === false));
+  assert.equal(reranker.getStats().call_count, 3);
+});

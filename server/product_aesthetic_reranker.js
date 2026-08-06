@@ -97,16 +97,17 @@ class ProductAestheticReranker {
       const incompleteGroups = groupsBelowMinimum(normalizedGroups, selected);
       let usedFallback = false;
       if (incompleteGroups.length > 0) {
-        let repaired = [];
-        try {
-          repaired = validateSelection(
-            await this.#select(incompleteGroups, context),
-            incompleteGroups,
-            selectionLimit,
-          );
-        } catch (_) {
-          // The remaining groups use the documented rule fallback below.
-        }
+        const repaired = (await Promise.all(incompleteGroups.map(async (group) => {
+          try {
+            return validateSelection(
+              await this.#select([group], context),
+              [group],
+              selectionLimit,
+            );
+          } catch (_) {
+            return [];
+          }
+        }))).flat();
         selected = replaceGroupProducts(selected, repaired, incompleteGroups);
         const unresolvedGroups = groupsBelowMinimum(incompleteGroups, selected);
         if (unresolvedGroups.length > 0) {
