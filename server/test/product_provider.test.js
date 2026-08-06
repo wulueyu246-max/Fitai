@@ -5,6 +5,7 @@ const {
   AutoProductProvider,
   MockProductProvider,
   TaobaoProductProvider,
+  UnavailableProductProvider,
   createProductProvider,
   mapTaobaoProduct,
   parseTaobaoPlacement,
@@ -30,7 +31,10 @@ function taobaoItem(overrides = {}) {
       final_promotion_price: "399",
       ...overrides.price_promotion_info,
     },
-    publish_info: {...overrides.publish_info},
+    publish_info: {
+      click_url: "//s.click.taobao.com/default-promotion",
+      ...overrides.publish_info,
+    },
   };
 }
 
@@ -41,7 +45,7 @@ function response(method, items) {
   return {[key]: {result_list: {map_data: items}}};
 }
 
-test("16516 uses the authorized upgraded material search method", () => {
+test("27939 uses the authorized upgraded material search method", () => {
   assert.equal(
     TAOBAO_MATERIAL_SEARCH_METHOD,
     "taobao.tbk.dg.material.optional.upgrade",
@@ -56,17 +60,17 @@ function providerWithClient(client) {
   });
 }
 
-test("uses MockProductProvider when Taobao credentials are absent", async () => {
+test("reports an unavailable Taobao provider when credentials are absent", async () => {
   const warnings = [];
   const provider = createProductProvider({
     environment: {PRODUCT_PROVIDER: "auto"},
     logger: {warn: (...args) => warnings.push(args)},
   });
-  const products = await provider.recommend({category: "外套"});
-  assert.ok(provider instanceof MockProductProvider);
-  assert.ok(products.length > 0);
-  assert.ok(products.every((product) => product.is_mock === true));
-  assert.ok(products.every((product) => product.purchase_url === ""));
+  assert.ok(provider instanceof UnavailableProductProvider);
+  await assert.rejects(
+    () => provider.recommend({category: "外套"}),
+    (error) => error.code === "PRODUCT_PROVIDER_NOT_CONFIGURED" && error.status === 503,
+  );
   assert.equal(warnings[0][1].configured, false);
   assert.deepEqual(warnings[0][1].missingVariables, [
     "TAOBAO_APP_KEY",
@@ -91,11 +95,11 @@ test("missing secret is named safely without logging configured values", () => {
   assert.equal(JSON.stringify(warnings).includes("sensitive-app-key-value"), false);
 });
 
-test("16516 material search maps only fields actually returned", async () => {
+test("authorized material search sends only official API parameters", async () => {
   const calls = [];
   const provider = providerWithClient({
-    call: async (method, params) => {
-      calls.push({method, params});
+    call: async (method, params, options) => {
+      calls.push({method, params, options});
       return response(method, [taobaoItem({
         item_basic_info: {annual_vol: "268"},
         price_promotion_info: {reserve_price: "499", coupon_amount: "20"},
@@ -108,8 +112,9 @@ test("16516 material search maps only fields actually returned", async () => {
   });
   const products = await provider.recommend({category: "外套", style: "通勤", limit: 1});
   assert.equal(calls[0].method, TAOBAO_MATERIAL_SEARCH_METHOD);
-  assert.equal(calls[0].params.site_id, "200");
+  assert.equal("site_id" in calls[0].params, false);
   assert.equal(calls[0].params.adzone_id, "300");
+  assert.equal(calls[0].options.siteId, "200");
   assert.equal(products.length, 1);
   assert.equal(products[0].category, "outerwear");
   assert.equal(products[0].purchase_url, "https://s.click.taobao.com/promotion");
@@ -120,7 +125,7 @@ test("16516 material search maps only fields actually returned", async () => {
   assert.equal(products[0].is_mock, false);
 });
 
-test("empty 16516 result uses 27399 material sample before Mock", async () => {
+test("empty 27939 search uses the authorized material recommendation API", async () => {
   const calls = [];
   const provider = providerWithClient({
     call: async (method) => {
@@ -143,19 +148,19 @@ test("successful empty Taobao responses do not silently become Mock products", a
   assert.deepEqual(products, []);
 });
 
-test("Taobao API exceptions still fall back to Mock products", async () => {
+test("Taobao API exceptions are returned explicitly without Mock products", async () => {
   const provider = providerWithClient({
     call: async () => {
       throw new TaobaoApiError("network unavailable", {code: "TAOBAO_NETWORK_ERROR"});
     },
   });
-  const products = await provider.recommend({category: "outerwear", limit: 1});
-  assert.equal(products.length, 1);
-  assert.equal(products[0].source, "mock");
-  assert.equal(products[0].is_mock, true);
+  await assert.rejects(
+    () => provider.recommend({category: "outerwear", limit: 1}),
+    (error) => error.code === "TAOBAO_NETWORK_ERROR" && error.status === 502,
+  );
 });
 
-test("one Taobao category failure does not block other categories", async () => {
+test("one Taobao category failure rejects the request instead of mixing Mock", async () => {
   const provider = providerWithClient({
     call: async (method, params) => {
       if (params.q?.includes("上衣")) throw new TaobaoApiError("denied", {code: "TAOBAO_PERMISSION_DENIED"});
@@ -165,18 +170,19 @@ test("one Taobao category failure does not block other categories", async () => 
       })]);
     },
   });
-  const products = await provider.recommend({limit: 1});
-  assert.ok(products.some((product) => product.is_mock === true && product.category === "top"));
-  assert.ok(products.some((product) => product.source === "taobao"));
+  await assert.rejects(
+    () => provider.recommend({limit: 1}),
+    (error) => error.code === "TAOBAO_PERMISSION_DENIED",
+  );
 });
 
 test("missing optional Taobao fields neither throw nor fabricate commerce facts", () => {
   const product = mapTaobaoProduct({item_id: "minimal", title: "基础上衣"}, {fallbackCategory: "top"});
   assert.equal(product.purchase_url, "");
   assert.equal(product.detail_url, "");
-  assert.equal("original_price" in product, false);
-  assert.equal("coupon_amount" in product, false);
-  assert.equal("commission_rate" in product, false);
+  assert.equal(product.original_price, null);
+  assert.equal(product.coupon_amount, null);
+  assert.equal(product.commission_rate, null);
   assert.equal("sales" in product, false);
   assert.equal(product.stock_status, "unknown");
 });
@@ -194,8 +200,8 @@ test("non-HTTPS URLs never become purchase links", () => {
 
 test("auto mode derives site and Adzone from PID when override is absent", async () => {
   const calls = [];
-  const client = {call: async (method, params) => {
-    calls.push({method, params});
+  const client = {call: async (method, params, options) => {
+    calls.push({method, params, options});
     return response(method, [taobaoItem()]);
   }};
   const provider = createProductProvider({
@@ -212,11 +218,12 @@ test("auto mode derives site and Adzone from PID when override is absent", async
   const products = await provider.recommend({category: "outerwear", limit: 1});
   assert.equal(provider.health, true);
   assert.equal(products[0].source, "taobao");
-  assert.equal(calls[0].params.site_id, "2");
+  assert.equal("site_id" in calls[0].params, false);
   assert.equal(calls[0].params.adzone_id, "3");
+  assert.equal(calls[0].options.siteId, "2");
 });
 
-test("permission failure in auto mode safely falls back to Mock", async () => {
+test("permission failure in auto mode is explicit and never returns Mock", async () => {
   const provider = createProductProvider({
     environment: {
       PRODUCT_PROVIDER: "auto",
@@ -228,10 +235,12 @@ test("permission failure in auto mode safely falls back to Mock", async () => {
     client: {call: async () => { throw new TaobaoApiError("denied", {code: "TAOBAO_PERMISSION_DENIED"}); }},
     logger: {warn() {}},
   });
-  const products = await provider.recommend({category: "top"});
+  await assert.rejects(
+    () => provider.recommend({category: "top"}),
+    (error) => error.code === "TAOBAO_PERMISSION_DENIED",
+  );
   assert.equal(provider.health, false);
-  assert.equal(provider.status, "mock");
-  assert.ok(products.every((product) => product.is_mock === true));
+  assert.equal(provider.status, "error");
 });
 
 test("auto mode does not cache a failure that skips later Taobao calls", async () => {
@@ -240,25 +249,42 @@ test("auto mode does not cache a failure that skips later Taobao calls", async (
     recommend: async () => {
       recommendationCalls += 1;
       if (recommendationCalls === 1) {
-        return [{product_id: "mock-1", source: "mock", is_mock: true}];
+        throw new TaobaoApiError("temporary", {code: "TAOBAO_NETWORK_ERROR"});
       }
       return [{product_id: "taobao-1", source: "taobao", is_mock: false}];
     },
   };
-  const mock = {recommend: async () => [{product_id: "mock-1", is_mock: true}]};
   const provider = new AutoProductProvider({
     taobao,
-    mock,
     logger: {info() {}, warn() {}},
   });
 
-  const first = await provider.recommend({category: "top"});
-  assert.equal(provider.status, "mock");
+  await assert.rejects(() => provider.recommend({category: "top"}));
+  assert.equal(provider.status, "error");
   const second = await provider.recommend({category: "shoes"});
-  const results = [first, second];
   assert.equal(recommendationCalls, 2);
   assert.equal(provider.status, "taobao");
-  assert.equal(results[1][0].source, "taobao");
+  assert.equal(second[0].source, "taobao");
+});
+
+test("a keyword-only request performs one keyword search", async () => {
+  const calls = [];
+  const provider = providerWithClient({
+    call: async (method, params) => {
+      calls.push({method, params});
+      return response(method, [taobaoItem({
+        item_basic_info: {pict_url: "//img.example.com/top.jpg"},
+        publish_info: {click_url: "//s.click.taobao.com/top"},
+      })]);
+    },
+  });
+
+  const products = await provider.recommend({keyword: "上衣", limit: 1});
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params.q, "上衣");
+  assert.equal(products.length, 1);
+  assert.equal(products[0].source, "taobao");
 });
 
 test("legacy Taobao URLs map to affiliate, coupon, purchase and PID fields", () => {

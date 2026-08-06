@@ -1471,19 +1471,8 @@ async function handleProductRecommendations(req, res, next) {
   const startedAt = Date.now();
   try {
     const input = req.method === "POST" ? req.body : req.query;
-    const products = await productProvider.recommend({
-      category: input?.category,
-      style: input?.style,
-      color: input?.color,
-      bodyType: input?.bodyType,
-      scene: input?.scene,
-      gender: input?.gender,
-      fit: input?.fit,
-      season: input?.season,
-      budget: input?.budget,
-      keyword: input?.keyword,
-      limit: input?.limit == null ? undefined : Number(input.limit),
-    });
+    const filters = productRecommendationFilters(input, res.locals.requestId);
+    const products = await productProvider.recommend(filters);
     const providerDurationMs = Date.now() - startedAt;
     setServerTiming(res, {
       products: providerDurationMs,
@@ -1508,6 +1497,23 @@ async function handleProductRecommendations(req, res, next) {
     }
     return next(error);
   }
+}
+
+function productRecommendationFilters(input = {}, requestId = "") {
+  return {
+    category: input?.category,
+    style: input?.style,
+    color: input?.color,
+    bodyType: input?.bodyType,
+    scene: input?.scene,
+    gender: input?.gender,
+    fit: input?.fit,
+    season: input?.season,
+    budget: input?.budget,
+    keyword: input?.keyword ?? input?.q,
+    limit: input?.limit == null ? undefined : Number(input.limit),
+    requestId,
+  };
 }
 
 app.get("/products/recommend", handleProductRecommendations);
@@ -2017,4 +2023,5 @@ module.exports = {
   safeSupabaseError,
   supabaseRuntime,
   partialViewSafetyInstruction,
+  productRecommendationFilters,
 };

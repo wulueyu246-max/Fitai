@@ -44,11 +44,27 @@ class TaobaoApiClient {
       : undefined;
   }
 
-  async call(method, apiParams = {}, {requestId = crypto.randomUUID()} = {}) {
+  async call(method, apiParams = {}, {
+    requestId = crypto.randomUUID(),
+    provider = "taobao",
+    siteId = "",
+  } = {}) {
     const startedAt = Date.now();
+    const diagnostics = {
+      requestId,
+      app_key: this.appKey,
+      method,
+      site_id: safeIdentifier(siteId),
+      adzone_id: safeIdentifier(apiParams.adzone_id),
+      provider,
+    };
     let lastError;
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
       try {
+        this.logger.info?.("淘宝商品接口请求", {
+          ...diagnostics,
+          attempt: attempt + 1,
+        });
         const payload = await this.#callOnce(method, apiParams);
         const errorResponse = payload?.error_response;
         if (errorResponse) {
@@ -60,8 +76,7 @@ class TaobaoApiClient {
           });
         }
         this.logger.info?.("淘宝商品接口完成", {
-          requestId,
-          method,
+          ...diagnostics,
           attempt: attempt + 1,
           durationMs: Date.now() - startedAt,
           statusCode: 200,
@@ -70,8 +85,7 @@ class TaobaoApiClient {
       } catch (error) {
         lastError = normalizeError(error);
         this.logger.warn?.("淘宝商品接口失败", {
-          requestId,
-          method,
+          ...diagnostics,
           attempt: attempt + 1,
           durationMs: Date.now() - startedAt,
           errorCode: lastError.code,

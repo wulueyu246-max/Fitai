@@ -10,7 +10,7 @@ const {
   signTaobaoRequest,
 } = require("../taobao_client");
 
-test("Taobao client signs official parameters without logging secrets or signatures", async () => {
+test("Taobao client signs official parameters and logs only safe request diagnostics", async () => {
   let requestBody = "";
   const logs = [];
   const client = new TaobaoApiClient({
@@ -22,7 +22,14 @@ test("Taobao client signs official parameters without logging secrets or signatu
     },
     logger: {info: (...args) => logs.push(args), warn: (...args) => logs.push(args)},
   });
-  await client.call("taobao.test.method", {q: "上衣"}, {requestId: "request-1"});
+  await client.call("taobao.test.method", {
+    q: "上衣",
+    adzone_id: "300",
+  }, {
+    requestId: "request-1",
+    provider: "taobao",
+    siteId: "200",
+  });
   const body = Object.fromEntries(new URLSearchParams(requestBody));
   const {sign, ...unsigned} = body;
   assert.equal(sign, signTaobaoRequest(unsigned, "private-test-secret"));
@@ -30,7 +37,10 @@ test("Taobao client signs official parameters without logging secrets or signatu
   const logged = JSON.stringify(logs);
   assert.equal(logged.includes("private-test-secret"), false);
   assert.equal(logged.includes(sign), false);
-  assert.equal(logged.includes("public-test-key"), false);
+  assert.equal(logged.includes("public-test-key"), true);
+  assert.equal(logged.includes('"site_id":"200"'), true);
+  assert.equal(logged.includes('"adzone_id":"300"'), true);
+  assert.equal(logged.includes('"provider":"taobao"'), true);
 });
 
 test("Taobao client maps permission errors to a safe code without leaking response text", async () => {
@@ -73,7 +83,7 @@ test("Taobao client logs complete safe TOP error fields without credentials", as
   assert.equal(details.taobao_request_id, "top-request-123");
   assert.match(details.taobao_msg, /Invalid app key/);
   assert.match(details.taobao_sub_msg, /Denied/);
-  assert.equal(JSON.stringify(details).includes("public-test-key"), false);
+  assert.equal(JSON.stringify(details).includes("public-test-key"), true);
   assert.equal(JSON.stringify(details).includes("private-test-secret"), false);
   assert.equal(JSON.stringify(details).includes("mm_1_2_3"), false);
 });

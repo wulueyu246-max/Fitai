@@ -22,6 +22,7 @@ const {
   listenForRequests,
   logOptionalServiceWarnings,
   partialViewSafetyInstruction,
+  productRecommendationFilters,
   resolveAiFallbackReason,
   resolveAiModeReason,
   resolveAiConfig,
@@ -35,6 +36,17 @@ const {
 const {AnalyticsStore} = require("../analytics_store");
 
 const imageDataUrl = "data:image/jpeg;base64,AA==";
+
+test("product recommendations accept q as an alias for keyword", () => {
+  assert.equal(
+    productRecommendationFilters({q: "上衣"}, "request-products-1").keyword,
+    "上衣",
+  );
+  assert.equal(
+    productRecommendationFilters({keyword: "外套", q: "上衣"}).keyword,
+    "外套",
+  );
+});
 
 test("keeps the HTTP server listening until it is explicitly closed", async () => {
   const server = await listenForRequests(app, 0);
