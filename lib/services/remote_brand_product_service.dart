@@ -65,11 +65,33 @@ class RemoteBrandProductService implements BrandProductService {
     if (values.isNotEmpty && parsedProducts.isEmpty) {
       throw const ProductSourceException('商品源返回的 products 字段格式无效');
     }
-    if (!enforceProductionSafety) return parsedProducts;
+    final explicitSearchKeyword =
+        recommendationContext?['explicit_user_search'] == true
+            ? (recommendationContext?['user_search_keyword']?.toString() ?? '')
+            : '';
+    final qualitySafeProducts = parsedProducts.where((product) {
+      final block = lookProductQualityBlock(
+        product,
+        explicitSearchKeyword: explicitSearchKeyword,
+      );
+      if (block == null) return true;
+      AppLogger.instance.warning(
+        'low_value_product_filtered',
+        metadata: {
+          'productId': product.id,
+          'blocked_category': block.blockedCategory,
+          'blocked_keyword': block.blockedKeyword,
+        },
+      );
+      return false;
+    }).toList(growable: false);
+    if (!enforceProductionSafety) {
+      return List<Product>.unmodifiable(qualitySafeProducts);
+    }
 
     final expectedRequestId =
         recommendationContext?['request_id']?.toString().trim();
-    final products = parsedProducts.where((product) {
+    final products = qualitySafeProducts.where((product) {
       final source = product.sourceProvider.trim().toLowerCase();
       final matchesRequest = expectedRequestId == null ||
           expectedRequestId.isEmpty ||

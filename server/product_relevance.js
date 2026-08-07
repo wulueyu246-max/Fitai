@@ -9,6 +9,38 @@ const SUPPORTED_PRODUCT_CATEGORIES = Object.freeze([
   "accessory",
 ]);
 
+const PRODUCT_CATEGORY_PRIORITY = Object.freeze({
+  top: 60,
+  bottom: 60,
+  shoes: 60,
+  outerwear: 60,
+  dress: 60,
+  bag: 60,
+  hat: 30,
+  accessory: 20,
+  accessories: 20,
+  underwear: 0,
+  homewear: 0,
+});
+
+const LOW_VALUE_PRODUCT_GROUPS = Object.freeze([
+  Object.freeze({category: "underwear", terms: Object.freeze([
+    "内裤", "文胸", "胸罩", "内衣", "安全裤", "打底裤", "塑身衣", "塑身裤",
+  ])}),
+  Object.freeze({category: "hosiery", terms: Object.freeze([
+    "袜子", "丝袜", "连裤袜", "打底袜", "船袜", "长筒袜",
+  ])}),
+  Object.freeze({category: "homewear", terms: Object.freeze([
+    "睡衣", "家居服", "睡袍", "浴袍",
+  ])}),
+  Object.freeze({category: "adult", terms: Object.freeze([
+    "情趣用品", "情趣内衣", "性感内衣",
+  ])}),
+  Object.freeze({category: "swimwear", terms: Object.freeze([
+    "泳衣", "泳装", "泳裤", "比基尼",
+  ])}),
+]);
+
 const CATEGORY_TERMS = Object.freeze({
   top: ["polo", "t恤", "衬衫", "针织衫", "毛衣", "卫衣", "上衣", "背心", "短袖", "长袖"],
   bottom: ["休闲裤", "西裤", "阔腿裤", "牛仔裤", "长裤", "短裤", "九分裤", "半身裙", "裙裤", "裤"],
@@ -145,6 +177,11 @@ function normalizeProductRequirement(input = {}, context = {}) {
       ...(gender === "male" ? MALE_NEGATIVE_TERMS : []),
       ...(gender === "female" ? FEMALE_NEGATIVE_TERMS : []),
     ]),
+    explicit_user_search: input.explicit_user_search === true ||
+      context.explicit_user_search === true,
+    user_search_keyword: optionalLooseText(
+      input.user_search_keyword || context.user_search_keyword,
+    ),
   };
 }
 
@@ -181,7 +218,8 @@ function rankProducts(products, input = {}, searchKeyword = "", options = {}) {
 function scoreProduct(product, requirement, searchKeyword = "") {
   const title = normalizeText(product?.title);
   const evidence = normalizeText(`${product?._category_text || ""} ${title}`);
-  if (!title || containsNegativeKeyword(title, requirement)) return null;
+  if (!title || productQualityBlock(product, requirement) ||
+      containsNegativeKeyword(title, requirement)) return null;
   if (!matchesTargetCategory(evidence, requirement.category)) return null;
 
   let score = 35;
@@ -190,6 +228,7 @@ function scoreProduct(product, requirement, searchKeyword = "") {
   if (matchesStyle(title, requirement.style, requirement.fit)) score += 10;
   if (matchesSeason(title, requirement.season)) score += 5;
   score += Math.min(keywordOverlapScore(title, searchKeyword, requirement), 15);
+  score += categoryPriorityScore(requirement.category);
 
   const {_category_text: _, ...publicProduct} = product;
   return {
@@ -200,6 +239,52 @@ function scoreProduct(product, requirement, searchKeyword = "") {
     search_keyword: normalizeWhitespace(searchKeyword),
     relevance_score: Math.min(score, 100),
   };
+}
+
+function productQualityBlock(product, requirement = {}) {
+  const evidence = normalizeText([
+    product?.title,
+    product?._category_text,
+    product?.category,
+  ].filter(Boolean).join(" "));
+  if (!evidence || explicitlyRequestsLowValueProduct(requirement)) return null;
+  for (const group of LOW_VALUE_PRODUCT_GROUPS) {
+    const blockedKeyword = group.terms.find((term) => evidence.includes(normalizeText(term)));
+    if (blockedKeyword) {
+      return {
+        blocked_category: group.category,
+        blocked_keyword: blockedKeyword,
+      };
+    }
+  }
+  return null;
+}
+
+function explicitlyRequestsLowValueProduct(requirement = {}) {
+  if (requirement.explicit_user_search !== true) return false;
+  const keyword = normalizeText(
+    requirement.user_search_keyword || requirement.keyword || "",
+  );
+  return LOW_VALUE_PRODUCT_GROUPS.some((group) =>
+    group.terms.some((term) => keyword.includes(normalizeText(term))));
+}
+
+function categoryPriority(category) {
+  return PRODUCT_CATEGORY_PRIORITY[normalizeProductCategory(category) || normalizeText(category)] || 0;
+}
+
+function categoryPriorityScore(category) {
+  const priority = categoryPriority(category);
+  if (priority >= 60) return 5;
+  if (priority <= 20) return -5;
+  return 0;
+}
+
+function sortProductsByCategoryPriority(products) {
+  return [...(Array.isArray(products) ? products : [])].sort((left, right) =>
+    categoryPriority(right?.category) - categoryPriority(left?.category) ||
+    Number(right?.final_score || right?.relevance_score || 0) -
+      Number(left?.final_score || left?.relevance_score || 0));
 }
 
 function containsNegativeKeyword(title, requirement) {
@@ -318,6 +403,11 @@ function optionalText(value, field) {
   return safeText(value, field);
 }
 
+function optionalLooseText(value) {
+  if (value == null || value === "") return "";
+  return normalizeWhitespace(String(value)).slice(0, 160);
+}
+
 function normalizeWhitespace(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
 }
@@ -332,12 +422,17 @@ function uniqueStrings(values) {
 
 module.exports = {
   CATEGORY_TERMS,
+  LOW_VALUE_PRODUCT_GROUPS,
+  PRODUCT_CATEGORY_PRIORITY,
   SUPPORTED_PRODUCT_CATEGORIES,
   buildSearchKeywords,
+  categoryPriority,
   matchesTargetCategory,
   normalizeGender,
   normalizeProductCategory,
   normalizeProductRequirement,
+  productQualityBlock,
   rankProducts,
   scoreProduct,
+  sortProductsByCategoryPriority,
 };

@@ -106,6 +106,22 @@ void main() {
     expect(parsed.isNetworkImage, isTrue);
   });
 
+  test('Flutter display policy blocks low-value Look products', () {
+    final underwear = product().copyWith(name: 'Tom Ford 男士内裤');
+    final shirt = product().copyWith(name: '男士短袖Polo');
+
+    expect(underwear.isAllowedForLookRecommendation, isFalse);
+    expect(lookProductQualityBlock(underwear)?.blockedKeyword, '内裤');
+    expect(shirt.isAllowedForLookRecommendation, isTrue);
+    expect(
+      lookProductQualityBlock(
+        underwear,
+        explicitSearchKeyword: '男士内裤',
+      ),
+      isNull,
+    );
+  });
+
   test('only a real HTTPS URL is purchasable', () {
     expect(product().isPurchasable, isTrue);
     expect(product(purchaseUrl: '').isPurchasable, isFalse);
@@ -175,6 +191,52 @@ void main() {
     expect(find.text('AI匹配度 92%'), findsOneWidget);
     expect(find.text('版型简洁，与米白色下装协调。'), findsOneWidget);
     expect(find.text('注意：购买前建议查看面料详情。'), findsOneWidget);
+  });
+
+  testWidgets('long AI copy never overflows and product actions stay visible', (
+    tester,
+  ) async {
+    final longText = List.filled(
+      30,
+      '这是一段用于验证商品卡布局稳定性的超长AI推荐文案',
+    ).join('，');
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 268,
+            height: 820,
+            child: ProductCard(
+              product: product().copyWith(
+                name: longText,
+                recommendationReason: longText,
+                aiRecommendationReason: longText,
+                matchExplanation: longText,
+                description: longText,
+                aiReason: longText,
+                finalScore: 90,
+              ),
+              selected: false,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const Key('details-product-1')), findsOneWidget);
+    expect(find.byKey(const Key('buy-product-1')), findsOneWidget);
+    final reason = tester.widget<Text>(
+      find.byKey(const Key('recommendation-reason-product-1')),
+    );
+    final explanation = tester.widget<Text>(
+      find.byKey(const Key('match-explanation-product-1')),
+    );
+    expect(reason.maxLines, 3);
+    expect(reason.overflow, TextOverflow.ellipsis);
+    expect(explanation.maxLines, 1);
+    expect(explanation.overflow, TextOverflow.ellipsis);
   });
 
   testWidgets('Mock product card shows review state and disables purchase', (

@@ -107,6 +107,49 @@ bool _isPublicImageHost(String host) {
   return true;
 }
 
+class ProductQualityBlock {
+  const ProductQualityBlock({
+    required this.blockedCategory,
+    required this.blockedKeyword,
+  });
+
+  final String blockedCategory;
+  final String blockedKeyword;
+}
+
+const Map<String, List<String>> _lowValueLookProductTerms = {
+  'underwear': ['内裤', '文胸', '胸罩', '内衣', '安全裤', '塑身衣', '塑身裤'],
+  'hosiery': ['袜子', '丝袜', '连裤袜', '打底袜', '船袜', '长筒袜'],
+  'homewear': ['睡衣', '家居服', '睡袍', '浴袍'],
+  'adult': ['情趣用品', '情趣内衣', '性感内衣'],
+  'swimwear': ['泳衣', '泳装', '泳裤', '比基尼'],
+};
+
+ProductQualityBlock? lookProductQualityBlock(
+  Product product, {
+  String explicitSearchKeyword = '',
+}) {
+  final explicitSearch = explicitSearchKeyword.trim().toLowerCase();
+  final explicitlyRequested = explicitSearch.isNotEmpty &&
+      _lowValueLookProductTerms.values
+          .expand((terms) => terms)
+          .any(explicitSearch.contains);
+  if (explicitlyRequested) return null;
+
+  final evidence = '${product.name} ${product.category}'.toLowerCase();
+  for (final entry in _lowValueLookProductTerms.entries) {
+    for (final keyword in entry.value) {
+      if (evidence.contains(keyword)) {
+        return ProductQualityBlock(
+          blockedCategory: entry.key,
+          blockedKeyword: keyword,
+        );
+      }
+    }
+  }
+  return null;
+}
+
 class Product {
   const Product({
     required this.id,
@@ -468,9 +511,13 @@ class Product {
   String get reason => aiReason;
 
   bool get hasAiTasteSelection => !aiRerankFallback && finalScore > 0;
+  bool get isAllowedForLookRecommendation =>
+      lookProductQualityBlock(this) == null;
   String get displayRecommendationReason => aiRecommendationReason.isNotEmpty
       ? aiRecommendationReason
-      : recommendationReason;
+      : recommendationReason.isNotEmpty
+          ? recommendationReason
+          : aiReason;
 
   bool get isNetworkImage {
     return normalizeProductImageUrl(imageUrl).isNotEmpty;

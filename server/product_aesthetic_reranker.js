@@ -1,4 +1,8 @@
 const crypto = require("node:crypto");
+const {
+  categoryPriority,
+  productQualityBlock,
+} = require("./product_relevance");
 
 const DEFAULT_SELECTION_LIMIT = 6;
 const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000;
@@ -48,6 +52,16 @@ class ProductAestheticReranker {
   }
 
   async rerank({groups, context = {}, requestId = "", selectionLimit = DEFAULT_SELECTION_LIMIT}) {
+    const qualityBlocks = collectQualityBlocks(groups);
+    if (qualityBlocks.length > 0) {
+      this.logger.warn?.("商品质量过滤", {
+        requestId: requestId || undefined,
+        stage: "ai_reranker",
+        blocked_category: [...new Set(qualityBlocks.map((item) => item.blocked_category))],
+        blocked_keyword: [...new Set(qualityBlocks.map((item) => item.blocked_keyword))],
+        blockedCount: qualityBlocks.length,
+      });
+    }
     const normalizedGroups = normalizeGroups(groups, selectionLimit);
     const candidateCount = normalizedGroups.reduce(
       (total, group) => total + group.candidates.length,
@@ -232,6 +246,7 @@ function buildMessages(groups, context) {
     ]),
     product_groups: groups.map((group, index) => ({
       requirement_index: index,
+      category_priority: categoryPriority(group.requirement.category),
       required_minimum: Math.min(4, group.candidates.length),
       maximum: Math.min(6, group.candidates.length),
       requirement: compactObject(group.requirement),
@@ -252,6 +267,8 @@ function buildMessages(groups, context) {
       role: "system",
       content: [
         "Each selected_products entry must include the source requirement_index and product_id.",
+        "Never select underwear, bras, socks, hosiery, sleepwear, homewear, adult products, shapewear, or swimwear unless explicit_user_search is true.",
+        "Prioritize top, bottom, shoes, outerwear, dress, and bag over accessory, underwear, and homewear.",
         "你是 FitAI 商品审美复选器。只能从候选商品中选择，不得编造或修改 product_id。",
         "综合整套穿搭、用户身材比例、性别、场景、季节、预算、颜色、版型、材质和设计语言判断。",
         "淘汰廉价感明显、设计杂乱、印花夸张、版型冲突或与整套不协调的商品。男性和女性规则必须由输入决定。",
@@ -271,9 +288,10 @@ function validateSelection(payload, groups, selectionLimit) {
   if (!payload || !Array.isArray(payload.selected_products)) {
     throw new Error("AI_RERANK_INVALID_RESPONSE");
   }
+  const safeGroups = normalizeGroups(groups, selectionLimit);
   const candidates = new Map();
   const productGroups = new Map();
-  groups.forEach((group, groupIndex) => {
+  safeGroups.forEach((group, groupIndex) => {
     group.candidates.forEach((product) => {
       const id = String(product.product_id);
       candidates.set(`${groupIndex}:${id}`, {product, groupIndex});
@@ -282,7 +300,7 @@ function validateSelection(payload, groups, selectionLimit) {
       productGroups.set(id, indexes);
     });
   });
-  const selectedByGroup = groups.map(() => []);
+  const selectedByGroup = safeGroups.map(() => []);
   const seen = new Set();
   for (const item of payload.selected_products) {
     const id = String(item?.product_id || "").trim();
@@ -381,10 +399,19 @@ function normalizeGroups(groups, selectionLimit) {
   return (Array.isArray(groups) ? groups : []).map((group) => ({
     requirement: compactObject(group?.requirement || {}),
     candidates: Array.isArray(group?.candidates)
-      ? group.candidates.slice(0, 20)
+      ? group.candidates
+        .filter((product) => !productQualityBlock(product, group?.requirement || {}))
+        .slice(0, 20)
       : [],
     selectionLimit: limit,
   }));
+}
+
+function collectQualityBlocks(groups) {
+  return (Array.isArray(groups) ? groups : []).flatMap((group) =>
+    (Array.isArray(group?.candidates) ? group.candidates : [])
+      .map((product) => productQualityBlock(product, group?.requirement || {}))
+      .filter(Boolean));
 }
 
 function buildCacheKey(groups, context) {

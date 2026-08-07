@@ -1756,6 +1756,7 @@ async function handleProductRecommendations(req, res, next) {
 }
 
 function productRecommendationFilters(input = {}, requestId = "") {
+  const directSearchKeyword = input?.keyword ?? input?.q;
   return {
     category: input?.category,
     style: input?.style,
@@ -1766,7 +1767,10 @@ function productRecommendationFilters(input = {}, requestId = "") {
     fit: input?.fit,
     season: input?.season,
     budget: input?.budget,
-    keyword: input?.keyword ?? input?.q,
+    keyword: directSearchKeyword,
+    explicit_user_search: typeof directSearchKeyword === "string" &&
+      directSearchKeyword.trim().length > 0,
+    user_search_keyword: directSearchKeyword,
     item_name: input?.item_name ?? input?.itemName,
     search_keywords: input?.search_keywords ?? input?.searchKeywords,
     negative_keywords: input?.negative_keywords ?? input?.negativeKeywords,

@@ -168,6 +168,8 @@ class ProductCard extends StatelessWidget {
                       const SizedBox(height: 5),
                       Text(
                         product.name,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: const Color(0xFF201E1C),
                           fontSize: compact ? 13 : 15,
@@ -191,6 +193,8 @@ class ProductCard extends StatelessWidget {
                           Expanded(
                             child: Text(
                               '${_placement(product)} · ${product.color}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
                                 color: Color(0xFF807B75),
                                 fontSize: 11,
@@ -284,9 +288,12 @@ class ProductCard extends StatelessWidget {
                       ],
                       if (!compact &&
                           product.displayRecommendationReason.isNotEmpty) ...[
-                        const SizedBox(height: 8),
+                        const SizedBox(height: 6),
                         Text(
                           product.displayRecommendationReason,
+                          key: Key('recommendation-reason-${product.id}'),
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             color: Color(0xFF5F5954),
                             fontSize: 11.5,
@@ -296,11 +303,11 @@ class ProductCard extends StatelessWidget {
                         ),
                       ],
                       if (!compact && product.aiConcern.isNotEmpty) ...[
-                        const SizedBox(height: 5),
+                        const SizedBox(height: 3),
                         Text(
                           '注意：${product.aiConcern}',
                           key: Key('ai-concern-${product.id}'),
-                          maxLines: 2,
+                          maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             color: Color(0xFF8A5A42),
@@ -310,9 +317,12 @@ class ProductCard extends StatelessWidget {
                         ),
                       ],
                       if (!compact && product.matchExplanation.isNotEmpty) ...[
-                        const SizedBox(height: 4),
+                        const SizedBox(height: 2),
                         Text(
                           product.matchExplanation,
+                          key: Key('match-explanation-${product.id}'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             color: Color(0xFF627066),
                             fontSize: 10.5,
@@ -321,19 +331,28 @@ class ProductCard extends StatelessWidget {
                         ),
                       ],
                       if (!compact) ...[
-                        const SizedBox(height: 12),
+                        const SizedBox(height: 6),
                         Text(
                           '${product.material} · 尺码 ${product.size} · '
                           '${product.inStock ? "库存 ${product.stock}" : "暂时缺货"}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             color: Color(0xFF837C76),
                             fontSize: 10.5,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
+                        /*
+                         * The full description and the expanded fit breakdown
+                         * belong on the product detail page. Keeping the same
+                         * content in a fixed-height recommendation card pushes
+                         * its action buttons out of view.
                         const SizedBox(height: 8),
                         Text(
                           product.description,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             color: Color(0xFF69645F),
                             fontSize: 12,
@@ -389,7 +408,8 @@ class ProductCard extends StatelessWidget {
                             ],
                           ),
                         ),
-                        const SizedBox(height: 10),
+                        */
+                        const SizedBox(height: 4),
                         Row(
                           children: [
                             Expanded(
@@ -527,51 +547,13 @@ class _ProductTag extends StatelessWidget {
       ),
       child: Text(
         label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
         style: const TextStyle(
           color: Color(0xFF625D57),
           fontSize: 9.5,
           fontWeight: FontWeight.w700,
         ),
-      ),
-    );
-  }
-}
-
-class _FitReason extends StatelessWidget {
-  const _FitReason({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 58,
-            child: Text(
-              label,
-              style: const TextStyle(
-                color: Color(0xFF695A78),
-                fontSize: 10,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ),
-          Expanded(
-            child: Text(
-              value,
-              style: const TextStyle(
-                color: Color(0xFF4E4854),
-                fontSize: 10.5,
-                height: 1.4,
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }

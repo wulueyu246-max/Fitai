@@ -149,6 +149,45 @@ test("model prompt excludes affiliate credentials and unrelated context", () => 
   assert.equal(serialized.includes("never-send-this-signature"), false);
 });
 
+test("AI reranker excludes low-value products and records safe block diagnostics", async () => {
+  const warnings = [];
+  const safe = product("top-safe", "top", 85);
+  safe.title = "男士短袖Polo";
+  const blocked = product("top-underwear", "top", 99);
+  blocked.title = "Tom Ford 男士内裤";
+  const reranker = new ProductAestheticReranker({
+    client: {
+      chat: {completions: {create: async (request) => {
+        const payload = JSON.parse(request.messages[1].content);
+        assert.deepEqual(
+          payload.product_groups[0].candidates.map((item) => item.product_id),
+          ["top-safe"],
+        );
+        return response([selection("top-safe")]);
+      }}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn: (...args) => warnings.push(args)},
+  });
+
+  const products = await reranker.rerank({
+    groups: [{
+      requirement: {
+        category: "top",
+        gender: "male",
+        item_name: "男士Polo",
+        search_keywords: ["男士 Polo"],
+      },
+      candidates: [blocked, safe],
+    }],
+    context: {gender: "male"},
+  });
+
+  assert.deepEqual(products.map((item) => item.product_id), ["top-safe"]);
+  assert.equal(warnings[0][1].blocked_category[0], "underwear");
+  assert.equal(warnings[0][1].blocked_keyword[0], "内裤");
+});
+
 test("model prompt requires four to six selections for every sufficiently large group", () => {
   const messages = buildMessages([
     group("top", ["top-1", "top-2", "top-3", "top-4", "top-5"]),

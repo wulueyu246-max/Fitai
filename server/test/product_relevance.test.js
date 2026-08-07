@@ -7,7 +7,9 @@ const {
   normalizeGender,
   normalizeProductCategory,
   normalizeProductRequirement,
+  productQualityBlock,
   rankProducts,
+  sortProductsByCategoryPriority,
 } = require("../product_relevance");
 
 function product(id, title, categoryText = title) {
@@ -187,4 +189,49 @@ test("ranked candidates keep the AI Look identity and material requirement", () 
   assert.equal(ranked.length, 1);
   assert.equal(ranked[0].look_id, "look-male-clean-1");
   assert.equal(ranked[0].gender, "male");
+});
+
+test("homepage quality policy blocks underwear and other low-value products", () => {
+  const requirement = normalizeProductRequirement({
+    category: "top",
+    gender: "male",
+    item_name: "男士Polo",
+    search_keywords: ["男士 Polo"],
+    negative_keywords: [],
+  });
+  const blocked = productQualityBlock(
+    product("underwear", "Tom Ford 男士内裤"),
+    requirement,
+  );
+
+  assert.deepEqual(blocked, {
+    blocked_category: "underwear",
+    blocked_keyword: "内裤",
+  });
+  assert.equal(
+    productQualityBlock(product("polo", "男士短袖Polo"), requirement),
+    null,
+  );
+});
+
+test("low-value products are allowed only for an explicit matching search", () => {
+  const productItem = product("underwear", "男士纯棉内裤");
+  assert.equal(productQualityBlock(productItem, {
+    explicit_user_search: true,
+    user_search_keyword: "男士内裤",
+  }), null);
+  assert.ok(productQualityBlock(productItem, {
+    explicit_user_search: false,
+    user_search_keyword: "男士内裤",
+  }));
+});
+
+test("primary outfit categories sort before accessories", () => {
+  const sorted = sortProductsByCategoryPriority([
+    {...product("watch", "简约手表"), category: "accessory", relevance_score: 95},
+    {...product("shoe", "男士皮鞋"), category: "shoes", relevance_score: 70},
+    {...product("top", "男士衬衫"), category: "top", relevance_score: 80},
+  ]);
+
+  assert.deepEqual(sorted.map((item) => item.product_id), ["top", "shoe", "watch"]);
 });

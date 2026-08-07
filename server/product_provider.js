@@ -12,7 +12,9 @@ const {
   normalizeGender,
   normalizeProductCategory,
   normalizeProductRequirement,
+  productQualityBlock,
   rankProducts,
+  sortProductsByCategoryPriority,
 } = require("./product_relevance");
 
 const PRODUCT_CATEGORIES = SUPPORTED_PRODUCT_CATEGORIES;
@@ -206,7 +208,8 @@ class TaobaoProductProvider extends ProductProvider {
         looks: summarizeProductsByLook(products),
       });
       this.status = "taobao";
-      return uniqueProducts(products).slice(0, values.length * 6);
+      return uniqueProducts(sortProductsByCategoryPriority(products))
+        .slice(0, values.length * 6);
     } catch (error) {
       this.status = "error";
       throw asProductProviderError(error);
@@ -541,6 +544,11 @@ function normalizeFilters(filters = {}) {
     lookId: text(filters.look_id ?? filters.lookId, "look_id"),
     budget: optionalNumber(filters.budget) || 0,
     keyword: text(filters.keyword, "keyword"),
+    explicit_user_search: filters.explicit_user_search === true,
+    user_search_keyword: text(
+      filters.user_search_keyword ?? filters.userSearchKeyword,
+      "user_search_keyword",
+    ),
     itemName: text(filters.item_name ?? filters.itemName, "item_name"),
     material: text(filters.material, "material"),
     searchKeywords: normalizeFilterList(
@@ -614,14 +622,18 @@ function mapPayload(payload, filters, pid, origin, onDiagnostics) {
     }
   }).filter(Boolean);
   const usable = mapped.filter(isUsableTaobaoProduct);
+  const qualityBlocks = usable
+    .map((product) => productQualityBlock(product, filters))
+    .filter(Boolean);
+  const qualitySafe = usable.filter((product) => !productQualityBlock(product, filters));
   const products = filters.category
     ? rankProducts(
-      usable,
+      qualitySafe,
       filters,
       filters.searchKeyword || filters.keyword,
       {minimumScore: filters.minimumRelevanceScore},
     )
-    : usable.map((product) => {
+    : qualitySafe.map((product) => {
       const {_category_text: _, ...publicProduct} = product;
       return {
         ...publicProduct,
@@ -641,7 +653,10 @@ function mapPayload(payload, filters, pid, origin, onDiagnostics) {
     missingPromotionUrlCount: mapped.filter(
       (product) => !normalizeHttpsUrl(product.purchase_url),
     ).length,
-    categoryMismatchCount: Math.max(usable.length - products.length, 0),
+    blocked_category: [...new Set(qualityBlocks.map((item) => item.blocked_category))],
+    blocked_keyword: [...new Set(qualityBlocks.map((item) => item.blocked_keyword))],
+    lowValueBlockedCount: qualityBlocks.length,
+    categoryMismatchCount: Math.max(qualitySafe.length - products.length, 0),
   });
   return products;
 }
