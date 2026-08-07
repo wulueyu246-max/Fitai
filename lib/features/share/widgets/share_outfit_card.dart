@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../../../components/product_image.dart';
 import '../../../models/product.dart';
 import '../models/share_outfit.dart';
 
@@ -178,9 +179,10 @@ class _ShareProduct extends StatelessWidget {
                 child: Container(
                   width: double.infinity,
                   color: Colors.white,
-                  child: product.isNetworkImage
-                      ? Image.network(product.imageUrl, fit: BoxFit.contain)
-                      : Image.asset(product.imageUrl, fit: BoxFit.contain),
+                  child: ProductImage(
+                    product: product,
+                    fit: BoxFit.cover,
+                  ),
                 ),
               ),
             ),

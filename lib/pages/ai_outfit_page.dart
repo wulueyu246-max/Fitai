@@ -624,6 +624,17 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         return;
       }
 
+      if (!mounted || generationId != _generationSequence) {
+        return;
+      }
+      _viewModel.clearResult();
+      setState(() {
+        _lastRequest = null;
+        _selectedProductIds = {};
+        _isLoadingProducts = false;
+        _productLoadError = null;
+      });
+
       final warmupFuture = _backendWarmupService?.wake() ??
           Future.value(
             const BackendWarmupResult(durationMs: 0, isReady: true),
@@ -928,10 +939,12 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       }
 
       final existingProducts =
-          _viewModel.analysis?.recommendedProducts ?? const <Product>[];
+          (_viewModel.analysis?.recommendedProducts ?? const <Product>[])
+              .where((product) => !product.isMock)
+              .toList(growable: false);
       setState(() {
         _isLoadingProducts = false;
-        _productLoadError = existingProducts.isEmpty ? '商品匹配暂时失败' : null;
+        _productLoadError = existingProducts.isEmpty ? '商品暂时加载失败，请重新生成' : null;
         _generationState = OutfitGenerationState.partialSuccess;
         _generationDetail = OutfitGenerationState.partialSuccess.label;
       });
@@ -965,11 +978,14 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         analysis: analysis,
         request: request,
       );
-      if (!mounted) {
+      if (!mounted || generationId != _generationSequence) {
         return;
       }
       _viewModel.attachRecommendations(products, outfitPlan: outfitPlan);
       final profile = await _profileService.load();
+      if (!mounted || generationId != _generationSequence) {
+        return;
+      }
       final mergedProfile = await _profileService.mergeAnalysis(
         profile: profile,
         height: request.height,
@@ -979,6 +995,9 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         photos: request.images,
         favoriteProductIds: _favoriteService.productIds,
       );
+      if (!mounted || generationId != _generationSequence) {
+        return;
+      }
       await _profileService.recordOutfit(mergedProfile, outfitPlan.id);
       final createdTime = DateTime.now();
       try {

@@ -8,6 +8,7 @@ const {
   UnavailableProductProvider,
   createProductProvider,
   mapTaobaoProduct,
+  normalizePublicImageUrl,
   parseTaobaoPlacement,
   extractTaobaoItems,
 } = require("../product_provider");
@@ -245,6 +246,42 @@ test("permission failure in auto mode safely falls back to Mock", async () => {
   assert.equal(provider.status, "mock");
 });
 
+test("production auto mode reports Taobao failure instead of returning Mock", async () => {
+  const provider = createProductProvider({
+    environment: {
+      NODE_ENV: "production",
+      PRODUCT_PROVIDER: "auto",
+      TAOBAO_APP_KEY: "app-key",
+      TAOBAO_APP_SECRET: "app-secret",
+      TAOBAO_PID: "mm_1_2_3",
+    },
+    client: {
+      call: async () => {
+        throw new TaobaoApiError("temporary", {code: "TAOBAO_NETWORK_ERROR"});
+      },
+    },
+    logger: {info() {}, warn() {}},
+  });
+
+  await assert.rejects(
+    provider.recommend({category: "top"}),
+    (error) => error.code === "TAOBAO_NETWORK_ERROR",
+  );
+  assert.equal(provider.status, "error");
+});
+
+test("production rejects an explicitly configured Mock provider", async () => {
+  const provider = createProductProvider({
+    environment: {NODE_ENV: "production", PRODUCT_PROVIDER: "mock"},
+    logger: {info() {}, error() {}},
+  });
+  assert.ok(provider instanceof UnavailableProductProvider);
+  await assert.rejects(
+    provider.recommend({category: "top"}),
+    (error) => error.code === "PRODUCT_MOCK_DISABLED_IN_PRODUCTION",
+  );
+});
+
 test("auto mode does not cache a failure that skips later Taobao calls", async () => {
   let recommendationCalls = 0;
   const taobao = {
@@ -477,6 +514,15 @@ test("legacy Taobao URLs map to affiliate, coupon, purchase and PID fields", () 
   assert.equal(product.pid, "mm_1_2_3");
   assert.equal(product.commission_rate, 0.125);
   assert.equal(product.is_mock, false);
+});
+
+test("protocol-relative Taobao images become public HTTPS URLs", () => {
+  assert.equal(
+    normalizePublicImageUrl("//img.alicdn.com/bao/uploaded/item.jpg"),
+    "https://img.alicdn.com/bao/uploaded/item.jpg",
+  );
+  assert.equal(normalizePublicImageUrl("file:///tmp/item.jpg"), "");
+  assert.equal(normalizePublicImageUrl("http://127.0.0.1/item.jpg"), "");
 });
 
 test("matching TAOBAO_ADZONE_ID may explicitly override the PID value", () => {

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../components/product_image.dart';
 import '../../../models/product.dart';
 import '../models/fashion_feed.dart';
 
@@ -207,9 +208,10 @@ class _DailyProductTile extends StatelessWidget {
               borderRadius: BorderRadius.circular(11),
               child: ColoredBox(
                 color: const Color(0xFFF7F4F7),
-                child: product.isNetworkImage
-                    ? Image.network(product.imageUrl, fit: BoxFit.contain)
-                    : Image.asset(product.imageUrl, fit: BoxFit.contain),
+                child: ProductImage(
+                  product: product,
+                  fit: BoxFit.cover,
+                ),
               ),
             ),
           ),

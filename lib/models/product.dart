@@ -72,6 +72,41 @@ class ProductCategory {
   }
 }
 
+String normalizeProductImageUrl(Object? value) {
+  final raw = value?.toString().trim() ?? '';
+  if (raw.isEmpty) return '';
+  final candidate = raw.startsWith('//') ? 'https:$raw' : raw;
+  final uri = Uri.tryParse(candidate);
+  if (uri == null ||
+      !{'http', 'https'}.contains(uri.scheme.toLowerCase()) ||
+      uri.host.isEmpty ||
+      !_isPublicImageHost(uri.host)) {
+    return '';
+  }
+  return uri.toString();
+}
+
+bool _isPublicImageHost(String host) {
+  final normalized = host.toLowerCase();
+  if (normalized == 'localhost' ||
+      normalized.endsWith('.localhost') ||
+      normalized == '0.0.0.0' ||
+      normalized == '::1') {
+    return false;
+  }
+  final octets = normalized.split('.').map(int.tryParse).toList();
+  if (octets.length == 4 && octets.every((part) => part != null)) {
+    final first = octets[0]!;
+    final second = octets[1]!;
+    return first != 10 &&
+        first != 127 &&
+        !(first == 169 && second == 254) &&
+        !(first == 172 && second >= 16 && second <= 31) &&
+        !(first == 192 && second == 168);
+  }
+  return true;
+}
+
 class Product {
   const Product({
     required this.id,
@@ -113,6 +148,7 @@ class Product {
     this.aiLabel = '',
     this.aiRerankFallback = false,
     this.isMock = false,
+    this.requestId,
     String? purchaseUrl,
     double? commission,
     double? commissionRate,
@@ -134,7 +170,13 @@ class Product {
       ),
       name: _readAliasedString(json, ['name', 'title']),
       category: ProductCategory.normalize(_readString(json, 'category')),
-      imageUrl: _readAliasedString(json, ['imageUrl', 'image_url', 'image']),
+      imageUrl: normalizeProductImageUrl(
+        _readOptionalAliasedString(
+          json,
+          ['imageUrl', 'image_url', 'image'],
+          fallback: '',
+        ),
+      ),
       color: _readOptionalAliasedString(
         json,
         ['color'],
@@ -279,6 +321,11 @@ class Product {
       isMock: json['isMock'] as bool? ??
           json['is_mock'] as bool? ??
           _looksLikeMockSource(json),
+      requestId: _readOptionalAliasedString(
+        json,
+        ['requestId', 'request_id'],
+        fallback: '',
+      ),
       tryOnAvailable: json['tryOnAvailable'] as bool? ??
           json['try_on_available'] as bool? ??
           true,
@@ -363,6 +410,7 @@ class Product {
   final String aiLabel;
   final bool aiRerankFallback;
   final bool isMock;
+  final String? requestId;
   final int stock;
   final String description;
   final String style;
@@ -418,8 +466,7 @@ class Product {
       : recommendationReason;
 
   bool get isNetworkImage {
-    final uri = Uri.tryParse(imageUrl);
-    return uri != null && uri.scheme == 'https' && uri.host.isNotEmpty;
+    return normalizeProductImageUrl(imageUrl).isNotEmpty;
   }
 
   Product copyWith({
@@ -463,6 +510,7 @@ class Product {
     String? aiLabel,
     bool? aiRerankFallback,
     bool? isMock,
+    String? requestId,
     double? commission,
     double? commissionRate,
   }) {
@@ -507,6 +555,7 @@ class Product {
       aiLabel: aiLabel ?? this.aiLabel,
       aiRerankFallback: aiRerankFallback ?? this.aiRerankFallback,
       isMock: isMock ?? this.isMock,
+      requestId: requestId ?? this.requestId,
       commissionRate: commissionRate ?? commission ?? this.commissionRate,
     );
   }
@@ -547,6 +596,7 @@ class Product {
       'aiLabel': aiLabel,
       'aiRerankFallback': aiRerankFallback,
       'isMock': isMock,
+      'requestId': requestId,
       'stock': stock,
       'description': description,
       'style': style,

@@ -59,18 +59,24 @@ class MockProductProvider extends ProductProvider {
 }
 
 class UnavailableProductProvider extends ProductProvider {
-  constructor({missingVariables = []} = {}) {
+  constructor({
+    missingVariables = [],
+    message = "淘宝商品 Provider 配置不完整",
+    code = "PRODUCT_PROVIDER_NOT_CONFIGURED",
+  } = {}) {
     super();
     this.name = "taobao";
     this.configured = false;
     this.status = "unconfigured";
     this.missingVariables = [...missingVariables];
+    this.message = message;
+    this.code = code;
   }
 
   async recommend() {
-    throw new ProductProviderError("淘宝商品 Provider 配置不完整", {
+    throw new ProductProviderError(this.message, {
       status: 503,
-      code: "PRODUCT_PROVIDER_NOT_CONFIGURED",
+      code: this.code,
     });
   }
 }
@@ -336,11 +342,17 @@ class TaobaoProductProvider extends ProductProvider {
 }
 
 class AutoProductProvider extends ProductProvider {
-  constructor({taobao, mock = new MockProductProvider(), logger = console}) {
+  constructor({
+    taobao,
+    mock = new MockProductProvider(),
+    logger = console,
+    allowMockFallback = true,
+  }) {
     super();
     this.taobao = taobao;
     this.mock = mock;
     this.logger = logger;
+    this.allowMockFallback = allowMockFallback;
     this.name = "auto";
     this.configured = true;
     this.status = "checking";
@@ -355,8 +367,12 @@ class AutoProductProvider extends ProductProvider {
       return products;
     } catch (error) {
       this.health = false;
-      this.status = "mock";
       this.#logFallback(error, filters);
+      if (!this.allowMockFallback) {
+        this.status = "error";
+        throw asProductProviderError(error);
+      }
+      this.status = "mock";
       return this.mock.recommend({
         ...filters,
         category: mockCompatibleCategory(filters.category),
@@ -372,9 +388,13 @@ class AutoProductProvider extends ProductProvider {
       return products;
     } catch (error) {
       this.health = false;
-      this.status = "mock";
       const first = Array.isArray(queries) ? queries[0] || {} : {};
       this.#logFallback(error, {...context, ...first});
+      if (!this.allowMockFallback) {
+        this.status = "error";
+        throw asProductProviderError(error);
+      }
+      this.status = "mock";
       const fallbackQueries = (Array.isArray(queries) ? queries : []).map((query) => ({
         ...query,
         category: mockCompatibleCategory(query?.category),
@@ -391,14 +411,17 @@ class AutoProductProvider extends ProductProvider {
     } catch (_) {
       // Invalid filters are reported by the Mock provider after the safe log.
     }
-    this.logger.warn?.("淘宝 Provider 降级 Mock", {
+    this.logger.warn?.(
+      this.allowMockFallback ? "淘宝 Provider 降级 Mock" : "淘宝 Provider 请求失败",
+      {
       requestId: filters.requestId || undefined,
       provider: "auto",
       search_keyword: searchKeyword || undefined,
       gender: normalizeGender(filters.gender),
       category: normalizeProductCategory(filters.category) || undefined,
       errorCode: safeProviderCode(error),
-    });
+      },
+    );
   }
 }
 
@@ -432,8 +455,20 @@ function createProductProvider({
     .filter(([, value]) => !value)
     .map(([name]) => name);
   const configured = missingVariables.length === 0;
+  const nodeEnvironment = String(
+    environment.NODE_ENV || (environment.RENDER ? "production" : "development"),
+  ).trim().toLowerCase();
+  const allowMock = ["development", "test"].includes(nodeEnvironment) ||
+    String(environment.MOCK_MODE || "").trim().toLowerCase() === "true";
   logger.info?.("淘宝 Provider 配置状态", {configured, mode});
   if (mode === "mock") {
+    if (!allowMock) {
+      logger.error?.("生产环境禁止 Mock 商品 Provider", {configured, mode});
+      return new UnavailableProductProvider({
+        message: "生产环境已禁用 Mock 商品数据",
+        code: "PRODUCT_MOCK_DISABLED_IN_PRODUCTION",
+      });
+    }
     return new MockProductProvider({catalog: productCatalog});
   }
   if (!configured) {
@@ -471,6 +506,7 @@ function createProductProvider({
     taobao,
     mock: new MockProductProvider({catalog: productCatalog}),
     logger,
+    allowMockFallback: allowMock,
   });
 }
 
@@ -590,7 +626,7 @@ function mapPayload(payload, filters, pid, origin, onDiagnostics) {
     rawCount: rawItems.length,
     mappedCount: mapped.length,
     usableCount: products.length,
-    missingImageCount: mapped.filter((product) => !normalizeHttpsUrl(product.image_url)).length,
+    missingImageCount: mapped.filter((product) => !normalizePublicImageUrl(product.image_url)).length,
     missingPriceCount: mapped.filter((product) => !(Number(product.price) > 0)).length,
     missingPromotionUrlCount: mapped.filter(
       (product) => !normalizeHttpsUrl(product.purchase_url),
@@ -664,7 +700,12 @@ function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}, origi
     brand: firstText(basic.brand_name, item.brand_name),
     category,
     price,
-    image_url: firstHttps(basic.pict_url, basic.white_image, item.pict_url, item.white_image),
+    image_url: firstPublicImageUrl(
+      basic.pict_url,
+      basic.white_image,
+      item.pict_url,
+      item.white_image,
+    ),
     original_price: originalPrice != null && originalPrice > price ? originalPrice : null,
     coupon_amount: firstNumber(priceInfo.coupon_amount, item.coupon_amount) ?? null,
     shop_name: firstText(basic.shop_title, basic.seller_nick, item.shop_title, item.seller_nick),
@@ -735,6 +776,47 @@ function firstHttps(...values) {
   return "";
 }
 
+function firstPublicImageUrl(...values) {
+  for (const value of values) {
+    const normalized = normalizePublicImageUrl(value);
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
+function normalizePublicImageUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const candidate = text.startsWith("//") ? `https:${text}` : text;
+  try {
+    const url = new URL(candidate);
+    if (!["http:", "https:"].includes(url.protocol) || !isPublicHost(url.hostname)) {
+      return "";
+    }
+    return url.toString();
+  } catch (_) {
+    return "";
+  }
+}
+
+function isPublicHost(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  if (!host || host === "localhost" || host.endsWith(".localhost") || host === "::1") {
+    return false;
+  }
+  const parts = host.split(".").map(Number);
+  if (parts.length === 4 && parts.every(Number.isInteger)) {
+    const [first, second] = parts;
+    return first !== 0 &&
+      first !== 10 &&
+      first !== 127 &&
+      !(first === 169 && second === 254) &&
+      !(first === 172 && second >= 16 && second <= 31) &&
+      !(first === 192 && second === 168);
+  }
+  return true;
+}
+
 function normalizeHttpsUrl(value) {
   const text = String(value || "").trim();
   if (!text) return "";
@@ -757,7 +839,7 @@ function isUsableTaobaoProduct(product) {
     Boolean(product.product_id) &&
     Boolean(product.title) &&
     Number(product.price) > 0 &&
-    Boolean(normalizeHttpsUrl(product.image_url)) &&
+    Boolean(normalizePublicImageUrl(product.image_url)) &&
     Boolean(normalizeHttpsUrl(product.purchase_url));
 }
 
@@ -844,6 +926,7 @@ module.exports = {
   extractTaobaoItems,
   mapTaobaoProduct,
   normalizeHttpsUrl,
+  normalizePublicImageUrl,
   parseTaobaoPlacement,
   safeTaobaoResponseShape,
   signTaobaoRequest,

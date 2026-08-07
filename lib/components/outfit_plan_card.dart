@@ -241,7 +241,7 @@ class _PlanProductRow extends StatelessWidget {
                   borderRadius: BorderRadius.circular(12),
                 ),
                 clipBehavior: Clip.antiAlias,
-                child: ProductImage(product: product, fit: BoxFit.contain),
+                child: ProductImage(product: product, fit: BoxFit.cover),
               ),
               const SizedBox(width: 11),
               Expanded(

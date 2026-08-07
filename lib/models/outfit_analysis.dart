@@ -17,6 +17,7 @@ class OutfitAnalysis {
     this.recommendedProducts = const [],
     this.productRecommendations = const [],
     this.productRequirements = const [],
+    this.requestId,
     this.outfitPlan,
   });
 
@@ -50,6 +51,11 @@ class OutfitAnalysis {
       ),
       productRequirements:
           _readProductRequirements(json['product_requirements']),
+      requestId: _readOptionalAliasedString(
+        json,
+        const ['request_id', 'requestId'],
+        fallback: '',
+      ),
       outfitPlan: _readOutfitPlan(json['outfit_plan']),
     );
   }
@@ -120,6 +126,11 @@ class OutfitAnalysis {
             ),
       productRecommendations: productRecommendations,
       productRequirements: productRequirements,
+      requestId: _readOptionalAliasedString(
+        json,
+        const ['request_id', 'requestId'],
+        fallback: '',
+      ),
     );
   }
 
@@ -135,6 +146,7 @@ class OutfitAnalysis {
   final List<Product> recommendedProducts;
   final List<ProductRecommendation> productRecommendations;
   final List<ProductSearchRequirement> productRequirements;
+  final String? requestId;
   final OutfitPlan? outfitPlan;
 
   bool get isMock => analysisMode == 'mock';
@@ -152,6 +164,7 @@ class OutfitAnalysis {
     List<Product>? recommendedProducts,
     List<ProductRecommendation>? productRecommendations,
     List<ProductSearchRequirement>? productRequirements,
+    String? requestId,
     OutfitPlan? outfitPlan,
   }) {
     return OutfitAnalysis(
@@ -168,6 +181,7 @@ class OutfitAnalysis {
       productRecommendations:
           productRecommendations ?? this.productRecommendations,
       productRequirements: productRequirements ?? this.productRequirements,
+      requestId: requestId ?? this.requestId,
       outfitPlan: outfitPlan ?? this.outfitPlan,
     );
   }
@@ -191,6 +205,7 @@ class OutfitAnalysis {
       'product_requirements': productRequirements
           .map((requirement) => requirement.toJson())
           .toList(),
+      'request_id': requestId,
       'outfit_plan': outfitPlan?.toJson(),
     };
   }

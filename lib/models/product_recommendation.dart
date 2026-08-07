@@ -49,8 +49,13 @@ class ProductRecommendation {
       brand: _readOptionalString(json, 'brand', fallback: '精选商品'),
       color: _readOptionalString(json, 'color', fallback: '以商品页为准'),
       size: _readOptionalString(json, 'size', fallback: '以商品页为准'),
-      imageUrl:
-          _readAliasedString(json, const ['image_url', 'imageUrl', 'image']),
+      imageUrl: normalizeProductImageUrl(
+        _readAliasedString(
+          json,
+          const ['image_url', 'imageUrl', 'image'],
+          fallback: '',
+        ),
+      ),
       price: price,
       platform: _readString(json, 'platform'),
       commissionRate: commissionRate.clamp(0, 1).toDouble(),

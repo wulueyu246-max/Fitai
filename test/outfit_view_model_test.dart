@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:fit_ai/models/outfit_analysis.dart';
 import 'package:fit_ai/models/outfit_request.dart';
+import 'package:fit_ai/models/product_search_requirement.dart';
 import 'package:fit_ai/data/mock_product_database.dart';
 import 'package:fit_ai/repositories/outfit_repository.dart';
 import 'package:fit_ai/services/ai_service.dart';
@@ -70,12 +71,47 @@ void main() {
     final viewModel = OutfitViewModel(repository: repository);
 
     expect(await viewModel.generateOutfit(request), isTrue);
-    expect(viewModel.analysis?.recommendedProducts, hasLength(1));
-    expect(
-      viewModel.analysis?.recommendedProducts.first.id,
-      MockProductDatabase.products.first.id,
-    );
+    expect(viewModel.analysis?.recommendedProducts, isEmpty);
     expect(viewModel.analysis?.outfitPlan, isNull);
+  });
+
+  test('preserves male AI gender and structured search requirements', () async {
+    const requirement = ProductSearchRequirement(
+      category: 'top',
+      gender: 'male',
+      itemName: '法式长袖衬衫',
+      color: '白色',
+      style: '法式',
+      season: 'spring',
+      scene: 'date',
+      searchKeywords: ['男士 法式衬衫', '男士 法式 长袖衬衫', '男士 法式 上衣'],
+      negativeKeywords: ['女', '女士', '吊带'],
+    );
+    final viewModel = OutfitViewModel(
+      repository: _FakeOutfitRepository(
+        response: const OutfitAnalysis(
+          bodyAnalysis: '男性体型分析',
+          style: '法式',
+          top: '法式衬衫',
+          bottom: '休闲裤',
+          shoes: '男士皮鞋',
+          accessories: '腕表',
+          suggestion: '男性约会穿搭',
+          gender: 'male',
+          requestId: 'request-male-1',
+          productRequirements: [requirement],
+        ),
+      ),
+    );
+
+    expect(await viewModel.generateOutfit(request), isTrue);
+    expect(viewModel.analysis?.gender, 'male');
+    expect(viewModel.analysis?.productRequirements.single.gender, 'male');
+    expect(
+      viewModel.analysis?.productRequirements.single.searchKeywords.first,
+      startsWith('男士'),
+    );
+    expect(viewModel.requestId, 'request-male-1');
   });
 
   test('allows only one generate request at a time', () async {

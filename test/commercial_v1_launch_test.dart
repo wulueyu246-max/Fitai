@@ -26,8 +26,8 @@ void main() {
         request.url.queryParameters['affiliateChannelId'],
         'channel-commercial-test',
       );
-      return http.Response(
-        jsonEncode({
+      return http.Response.bytes(
+        utf8.encode(jsonEncode({
           'products': [
             {
               'id': 'remote-shirt',
@@ -42,7 +42,7 @@ void main() {
               'commission': 0.12,
             },
           ],
-        }),
+        })),
         200,
         headers: {'content-type': 'application/json; charset=utf-8'},
       );
@@ -68,8 +68,8 @@ void main() {
       () async {
     final client = MockClient((request) async {
       expect(request.method, 'GET');
-      return http.Response(
-        jsonEncode({
+      return http.Response.bytes(
+        utf8.encode(jsonEncode({
           'products': [
             {
               'product_id': 'tee-001',
@@ -87,7 +87,7 @@ void main() {
               'tags': ['极简', '通勤'],
             },
           ],
-        }),
+        })),
         200,
         headers: {'content-type': 'application/json; charset=utf-8'},
       );
@@ -180,6 +180,84 @@ void main() {
     expect(products.single.id, 'taobao-polo-1');
     expect(products.single.sourceProvider, 'taobao');
     expect(products.single.isMock, isFalse);
+  });
+
+  test('production safety binds real products to the current request',
+      () async {
+    const requestId = '123e4567-e89b-42d3-a456-426614174000';
+    final client = MockClient((request) async {
+      expect(request.headers['X-Request-Id'], requestId);
+      return http.Response.bytes(
+        utf8.encode(jsonEncode({
+          'products': [
+            {
+              'product_id': 'current',
+              'title': '男士白色长袖衬衫',
+              'category': 'top',
+              'price': 199,
+              'image_url': '//img.alicdn.com/current.jpg',
+              'purchase_url': 'https://s.click.taobao.com/current',
+              'source': 'taobao',
+              'is_mock': false,
+              'request_id': requestId,
+            },
+            {
+              'product_id': 'stale',
+              'title': '上一轮商品',
+              'category': 'top',
+              'price': 99,
+              'image_url': 'https://img.alicdn.com/stale.jpg',
+              'purchase_url': 'https://s.click.taobao.com/stale',
+              'source': 'taobao',
+              'is_mock': false,
+              'request_id': 'stale-request',
+            },
+          ],
+        })),
+        200,
+      );
+    });
+    final service = RemoteBrandProductService(
+      catalogEndpoint: Uri.parse('https://api.example.com/products/recommend'),
+      client: client,
+      enforceProductionSafety: true,
+    );
+
+    final products = await service.fetchProducts(
+      recommendationContext: const {'request_id': requestId},
+    );
+
+    expect(products.map((product) => product.id), ['current']);
+    expect(products.single.requestId, requestId);
+  });
+
+  test('production safety rejects Mock success payloads', () async {
+    final client = MockClient((_) async => http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'products': [
+              {
+                'product_id': 'mock-production',
+                'title': 'Mock Studio 示例商品',
+                'category': 'top',
+                'price': 99,
+                'image_url': 'https://img.example.com/mock.jpg',
+                'source': 'mock',
+                'is_mock': true,
+              },
+            ],
+          })),
+          200,
+        ));
+    final service = RemoteBrandProductService(
+      catalogEndpoint: Uri.parse('https://api.example.com/products/recommend'),
+      client: client,
+      enforceProductionSafety: true,
+    );
+
+    await expectLater(
+      service.fetchProducts(),
+      throwsA(isA<ProductSourceException>()),
+    );
   });
 
   test('remote product source accepts data.products and items wrappers',

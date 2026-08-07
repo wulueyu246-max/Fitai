@@ -110,7 +110,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(find.text('测试身体分析'), findsOne);
-    expect(find.text('商品匹配暂时失败'), findsOne);
+    expect(find.text('商品暂时加载失败，请重新生成'), findsOne);
     expect(find.byKey(const Key('retry-product-recommendations')), findsOne);
     expect(find.byKey(const Key('generate-outfit')), findsOne);
     expect(repository.calls, 1);

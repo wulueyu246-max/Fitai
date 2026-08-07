@@ -171,13 +171,15 @@ class CatalogProductService implements ProductService {
     final catalog = await source.fetchProducts(
       recommendationContext: hasStructuredRequirements
           ? {
-              'gender': request.gender,
+              if (analysis.requestId?.trim().isNotEmpty ?? false)
+                'request_id': analysis.requestId!.trim(),
+              'gender': analysis.gender,
               'style': analysis.style,
               'scene': request.scene,
               'budget': _budgetFromRequest(request.request),
               'user_input': request.request,
               'user_profile': {
-                'gender': request.gender,
+                'gender': analysis.gender,
                 'height': request.height,
                 'weight': request.weight,
                 'body_profile': analysis.bodyAnalysis,

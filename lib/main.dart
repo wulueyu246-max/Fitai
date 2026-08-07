@@ -3,6 +3,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 
 import 'config/shupi_theme.dart';
 import 'config/production_environment.dart';
@@ -200,9 +201,19 @@ class _MainPageState extends State<MainPage> {
     final catalogUri = catalogUrl.isEmpty
         ? appConfig.endpoint('/products/recommend')
         : Uri.tryParse(catalogUrl);
-    _productSource =
-        catalogUri != null && catalogUri.hasScheme && catalogUri.host.isNotEmpty
-            ? RemoteBrandProductService(catalogEndpoint: catalogUri)
+    const explicitMockMode = bool.fromEnvironment(
+      'MOCK_MODE',
+      defaultValue: false,
+    );
+    final validCatalogUri = catalogUri != null &&
+        catalogUri.hasScheme &&
+        catalogUri.host.isNotEmpty;
+    _productSource = validCatalogUri
+        ? RemoteBrandProductService(catalogEndpoint: catalogUri)
+        : kReleaseMode && !explicitMockMode
+            ? RemoteBrandProductService(
+                catalogEndpoint: appConfig.endpoint('/products/recommend'),
+              )
             : const MockBrandProductService();
     _productService = CatalogProductService(source: _productSource);
     const authApiBaseUrl = String.fromEnvironment('AUTH_API_BASE_URL');

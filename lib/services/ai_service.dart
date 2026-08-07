@@ -140,7 +140,17 @@ class AIService {
     }
 
     try {
-      return OutfitAnalysis.fromJson(payload);
+      final analysis = OutfitAnalysis.fromJson(payload).copyWith(
+        requestId: serverRequestId ?? clientRequestId,
+      );
+      AppLogger.instance.info(
+        'ai_gender_resolved',
+        metadata: {
+          'requestId': analysis.requestId,
+          'aiGender': analysis.gender,
+        },
+      );
+      return analysis;
     } on FormatException catch (error, stackTrace) {
       developer.log(
         '穿搭分析响应解析失败；顶层字段：${payload.keys.join(', ')}',

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../models/product.dart';
@@ -36,6 +37,23 @@ class OutfitRecommendationCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    const explicitMockMode = bool.fromEnvironment(
+      'MOCK_MODE',
+      defaultValue: false,
+    );
+    final visibleProducts = kReleaseMode && !explicitMockMode
+        ? products
+            .where(
+              (product) =>
+                  !product.isMock &&
+                  product.sourceProvider.trim().toLowerCase() == 'taobao',
+            )
+            .toList(growable: false)
+        : products;
+    final effectiveError = errorMessage ??
+        (products.isNotEmpty && visibleProducts.isEmpty
+            ? '商品暂时加载失败，请重新生成'
+            : null);
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
@@ -90,7 +108,7 @@ class OutfitRecommendationCard extends StatelessWidget {
           const SizedBox(height: 18),
           if (isLoading)
             const _ProductRecommendationSkeleton()
-          else if (errorMessage != null && products.isEmpty)
+          else if (effectiveError != null && visibleProducts.isEmpty)
             Padding(
               key: const Key('product-recommendation-error'),
               padding: const EdgeInsets.symmetric(vertical: 38),
@@ -104,7 +122,7 @@ class OutfitRecommendationCard extends StatelessWidget {
                     ),
                     const SizedBox(height: 10),
                     Text(
-                      errorMessage!,
+                      effectiveError,
                       textAlign: TextAlign.center,
                       style: const TextStyle(color: Color(0xFF77716C)),
                     ),
@@ -119,7 +137,7 @@ class OutfitRecommendationCard extends StatelessWidget {
                 ),
               ),
             )
-          else if (products.isEmpty)
+          else if (visibleProducts.isEmpty)
             const Padding(
               key: Key('product-recommendation-empty'),
               padding: EdgeInsets.symmetric(vertical: 42),
@@ -137,7 +155,7 @@ class OutfitRecommendationCard extends StatelessWidget {
             for (final slot in ProductCategory.values)
               _ProductCategorySection(
                 slot: slot,
-                products: products
+                products: visibleProducts
                     .where((product) => product.wardrobeSlot == slot)
                     .take(2)
                     .toList(growable: false),

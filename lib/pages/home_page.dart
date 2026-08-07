@@ -1,9 +1,11 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../components/horizontal_product_carousel.dart';
 import '../components/outfit_post_card.dart';
+import '../components/product_image.dart';
 import '../features/home/models/daily_fashion_context.dart';
 import '../features/home/models/fashion_feed.dart';
 import '../features/home/services/daily_context_service.dart';
@@ -141,7 +143,13 @@ class _HomePageState extends State<HomePage> {
       completedDays: 0,
       checkedInToday: false,
     );
-    _refreshFeed();
+    const explicitMockMode = bool.fromEnvironment(
+      'MOCK_MODE',
+      defaultValue: false,
+    );
+    if (!kReleaseMode || explicitMockMode) {
+      _refreshFeed();
+    }
     _favoriteService.addListener(_onFavoritesChanged);
     _session.addListener(_onSessionChanged);
     _loadFeedData();
@@ -266,8 +274,17 @@ class _HomePageState extends State<HomePage> {
       }
       setState(() {
         _loading = false;
-        _loadError = '个性化信息流加载失败，已使用本地推荐';
-        _refreshFeed();
+        const explicitMockMode = bool.fromEnvironment(
+          'MOCK_MODE',
+          defaultValue: false,
+        );
+        if (kReleaseMode && !explicitMockMode) {
+          _productCatalog = const [];
+          _loadError = '商品暂时加载失败，请重试';
+        } else {
+          _loadError = '个性化信息流加载失败，已使用本地推荐';
+          _refreshFeed();
+        }
       });
     }
   }
@@ -665,6 +682,20 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    const explicitMockMode = bool.fromEnvironment(
+      'MOCK_MODE',
+      defaultValue: false,
+    );
+    if (kReleaseMode && !explicitMockMode && (_loading || _loadError != null)) {
+      return ColoredBox(
+        color: const Color(0xFFF7F3EA),
+        child: Center(
+          child: _loading
+              ? const CircularProgressIndicator()
+              : _HomeNotice(message: _loadError!, onRetry: _loadFeedData),
+        ),
+      );
+    }
     final posts = _feed.hotLooks;
     final products = _visibleProducts;
 
@@ -937,11 +968,11 @@ class _LookDetailSheet extends StatelessWidget {
                 onTap: () => onProductTap(product),
                 leading: ClipRRect(
                   borderRadius: BorderRadius.circular(10),
-                  child: Image.asset(
-                    product.imageUrl,
+                  child: ProductImage(
+                    product: product,
                     width: 48,
                     height: 58,
-                    fit: BoxFit.contain,
+                    fit: BoxFit.cover,
                   ),
                 ),
                 title: Text('${product.brand} ${product.name}'),

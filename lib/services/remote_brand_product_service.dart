@@ -21,11 +21,16 @@ class RemoteBrandProductService implements BrandProductService {
       defaultValue: 'fitai-commercial-test',
     ),
     this.timeout = const Duration(seconds: 75),
-  }) : _client = client ?? http.Client();
+    bool? enforceProductionSafety,
+  })  : enforceProductionSafety = enforceProductionSafety ??
+            (kReleaseMode &&
+                !const bool.fromEnvironment('MOCK_MODE', defaultValue: false)),
+        _client = client ?? http.Client();
 
   final Uri catalogEndpoint;
   final String affiliateChannelId;
   final Duration timeout;
+  final bool enforceProductionSafety;
   final http.Client _client;
 
   @override
@@ -54,13 +59,37 @@ class RemoteBrandProductService implements BrandProductService {
     final payload = _decode(response);
     final values = _extractProducts(payload);
     _debugProductsLength(values.length);
-    final products = List<Product>.unmodifiable(
+    final parsedProducts = List<Product>.unmodifiable(
       values.whereType<Map<String, dynamic>>().map(_parseProduct),
     );
-    if (values.isNotEmpty && products.isEmpty) {
+    if (values.isNotEmpty && parsedProducts.isEmpty) {
       throw const ProductSourceException('商品源返回的 products 字段格式无效');
     }
-    return products;
+    if (!enforceProductionSafety) return parsedProducts;
+
+    final expectedRequestId =
+        recommendationContext?['request_id']?.toString().trim();
+    final products = parsedProducts.where((product) {
+      final source = product.sourceProvider.trim().toLowerCase();
+      final matchesRequest = expectedRequestId == null ||
+          expectedRequestId.isEmpty ||
+          product.requestId == expectedRequestId;
+      return !product.isMock && source == 'taobao' && matchesRequest;
+    }).toList(growable: false);
+    if (products.length != parsedProducts.length) {
+      AppLogger.instance.warning(
+        'unsafe_product_response_filtered',
+        metadata: {
+          'receivedCount': parsedProducts.length,
+          'acceptedCount': products.length,
+          'requestId': expectedRequestId,
+        },
+      );
+    }
+    if (products.isEmpty) {
+      throw const ProductSourceException('商品暂时加载失败，请重新生成');
+    }
+    return List<Product>.unmodifiable(products);
   }
 
   @override
@@ -130,12 +159,17 @@ class RemoteBrandProductService implements BrandProductService {
     Uri endpoint,
     Map<String, dynamic> body,
   ) async {
+    final requestId = body['request_id']?.toString().trim() ?? '';
     return _send(
       method: 'POST',
       endpoint: endpoint,
       send: () => _client.post(
         endpoint,
-        headers: {..._headers, 'Content-Type': 'application/json'},
+        headers: {
+          ..._headers,
+          'Content-Type': 'application/json',
+          if (requestId.isNotEmpty) 'X-Request-Id': requestId,
+        },
         body: jsonEncode(body),
       ),
     );

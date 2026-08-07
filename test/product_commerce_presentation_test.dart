@@ -1,5 +1,6 @@
 import 'package:fit_ai/components/outfit_recommendation_card.dart';
 import 'package:fit_ai/components/product_card.dart';
+import 'package:fit_ai/components/product_image.dart';
 import 'package:fit_ai/models/product.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -85,6 +86,24 @@ void main() {
     expect(ProductCategory.normalize('sneakers'), ProductCategory.shoes);
     expect(ProductCategory.normalize('jacket'), ProductCategory.outerwear);
     expect(ProductCategory.normalize('围巾'), ProductCategory.accessories);
+  });
+
+  test('normalizes protocol-relative public product image URLs', () {
+    final parsed = Product.fromJson({
+      'product_id': 'taobao-image-1',
+      'title': '真实商品',
+      'category': 'top',
+      'image_url': '//img.alicdn.com/bao/uploaded/item.jpg',
+      'price': 99,
+      'source': 'taobao',
+      'is_mock': false,
+    });
+
+    expect(
+      parsed.imageUrl,
+      'https://img.alicdn.com/bao/uploaded/item.jpg',
+    );
+    expect(parsed.isNetworkImage, isTrue);
   });
 
   test('only a real HTTPS URL is purchasable', () {
@@ -301,6 +320,53 @@ void main() {
     await tester.pump();
 
     expect(find.text('图片暂时无法加载'), findsOneWidget);
+  });
+
+  testWidgets('empty product image displays the formal placeholder', (
+    tester,
+  ) async {
+    final emptyImageProduct = product(imageUrl: '');
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 160,
+          height: 180,
+          child: ProductImage(product: emptyImageProduct),
+        ),
+      ),
+    );
+
+    expect(
+      find.byKey(const Key('product-image-placeholder-product-1')),
+      findsOneWidget,
+    );
+    expect(find.text('图片暂时无法加载'), findsOneWidget);
+  });
+
+  testWidgets('404 product image falls back without an ErrorWidget', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 160,
+          height: 180,
+          child: ProductImage(
+            product: product(
+              id: '404-image',
+              imageUrl: 'https://example.invalid/not-found.jpg',
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ErrorWidget), findsNothing);
+    expect(
+      find.byKey(const Key('product-image-placeholder-404-image')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('non-empty products are not hidden by a stale error state', (

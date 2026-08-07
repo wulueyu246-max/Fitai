@@ -143,6 +143,11 @@ const config = Object.freeze({
   port: readPositiveInteger(PORT, 3000),
   isProduction: process.env.NODE_ENV === "production",
   forceMockAi: readBoolean(process.env.AI_FORCE_MOCK),
+  allowMockContent: ["development", "test"].includes(
+    String(process.env.NODE_ENV || (process.env.RENDER ? "production" : "development"))
+      .trim()
+      .toLowerCase(),
+  ) || readBoolean(process.env.MOCK_MODE),
   aiProvider: aiConfig.provider,
   model: aiConfig.model,
   baseURL: aiConfig.baseURL,
@@ -1542,7 +1547,9 @@ app.get("/health", (req, res) => {
     ai_configured: Boolean(aiClient),
     ai_provider: config.aiProvider,
     ai_model: config.model,
-    analysis_mode: shouldUseMockAi(config, aiClient) ? "mock" : "live",
+    analysis_mode: shouldUseMockAi(config, aiClient)
+      ? (config.allowMockContent ? "mock" : "unavailable")
+      : "live",
     ai_force_mock: config.forceMockAi,
     ai_mode_reason: resolveAiModeReason(config, aiClient),
     ai_request_url: buildAiRequestUrl(config.baseURL),
@@ -1607,14 +1614,22 @@ async function handleProductRecommendations(req, res, next) {
       products: providerDurationMs,
       total: providerDurationMs,
     });
+    const responseProducts = products.map((product) => ({
+      ...product,
+      request_id: res.locals.requestId,
+    }));
     console.info("商品推荐完成", {
       requestId: res.locals.requestId,
       statusCode: 200,
       provider: productProvider.name,
-      productCount: products.length,
+      productCount: responseProducts.length,
       durationMs: providerDurationMs,
     });
-    return res.json({products, categorySlots: buildCategorySlots(products)});
+    return res.json({
+      request_id: res.locals.requestId,
+      products: responseProducts,
+      categorySlots: buildCategorySlots(responseProducts),
+    });
   } catch (error) {
     if (error instanceof TypeError || error instanceof ProductProviderError) {
       return sendError(
@@ -1712,6 +1727,14 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
     outfitRequest = validateOutfitRequest(req.body);
 
     if (shouldUseMockAi(config, aiClient)) {
+      if (!config.allowMockContent) {
+        return sendError(
+          res,
+          503,
+          "AI_NOT_CONFIGURED",
+          "AI 穿搭服务暂时不可用，请稍后重试",
+        );
+      }
       const responsePayload = await buildOutfitResponseForRequest(
         createMockOutfitAnalysis(outfitRequest),
         outfitRequest,
@@ -1727,6 +1750,14 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
     }
 
     if (activeAiRequests >= config.maxConcurrentAiRequests) {
+      if (!config.allowMockContent) {
+        return sendError(
+          res,
+          503,
+          "AI_CAPACITY_REACHED",
+          "AI 穿搭服务繁忙，请稍后重试",
+        );
+      }
       const responsePayload = await buildOutfitResponseForRequest(
         createMockOutfitAnalysis(outfitRequest),
         outfitRequest,
@@ -1956,7 +1987,7 @@ ${partialViewSafetyInstruction}
       model: errorDetails.model,
     });
 
-    if (config.fallbackOnAiError && outfitRequest) {
+    if (config.allowMockContent && config.fallbackOnAiError && outfitRequest) {
       const responsePayload = await buildOutfitResponseForRequest(
         createMockOutfitAnalysis(outfitRequest),
         outfitRequest,

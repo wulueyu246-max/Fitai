@@ -67,7 +67,7 @@ class ProductCard extends StatelessWidget {
                     children: [
                       ProductImage(
                         product: product,
-                        fit: BoxFit.contain,
+                        fit: BoxFit.cover,
                         cacheWidth: compact ? 360 : 540,
                       ),
                       Positioned(

@@ -1,5 +1,8 @@
+import 'package:flutter/foundation.dart';
+
 import '../../../data/mock_outfit_post_database.dart';
 import '../../../models/fashion_profile.dart';
+import '../../../models/outfit_post.dart';
 import '../../../models/product.dart';
 import '../../../models/recommendation_feedback.dart';
 import '../../../models/user_profile.dart';
@@ -51,6 +54,22 @@ class FeedRecommendationService {
   final DailyOutfitService dailyOutfitService;
 
   FashionFeed recommend(FeedRecommendationInput input) {
+    const explicitMockMode = bool.fromEnvironment(
+      'MOCK_MODE',
+      defaultValue: false,
+    );
+    final allowMockContent = !kReleaseMode || explicitMockMode;
+    final safeProductCatalog = allowMockContent
+        ? input.productCatalog
+        : input.productCatalog
+            ?.where(
+              (product) =>
+                  !product.isMock &&
+                  product.sourceProvider.trim().toLowerCase() == 'taobao',
+            )
+            .toList(growable: false);
+    final postCatalog =
+        allowMockContent ? MockOutfitPostDatabase.posts : const <OutfitPost>[];
     final profile = input.userProfile.copyWith(
       stylePreference: {
         ...input.fashionProfile.likedStyles,
@@ -93,8 +112,8 @@ class FeedRecommendationService {
           input.context.updatedAt.day,
         ),
       ),
-      postCatalog: MockOutfitPostDatabase.posts,
-      productCatalog: input.productCatalog,
+      postCatalog: postCatalog,
+      productCatalog: safeProductCatalog,
       productLimit: 10,
     );
     final products = _rankByFashionProfile(
@@ -126,7 +145,7 @@ class FeedRecommendationService {
       plan: dailyPlan,
       aiReason: reason,
     );
-    final communityLooks = [...MockOutfitPostDatabase.posts]
+    final communityLooks = [...postCatalog]
       ..sort((left, right) => right.likes.compareTo(left.likes));
 
     return FashionFeed(

@@ -38,18 +38,12 @@ class OutfitViewModel extends ChangeNotifier {
       final response = await _repository.generateOutfit(request);
       // AI product entries are non-purchasable suggestions. ProductService
       // replaces them with catalog-backed products after matching succeeds.
-      _analysis = OutfitAnalysis(
-        bodyAnalysis: response.bodyAnalysis,
-        style: response.style,
-        top: response.top,
-        bottom: response.bottom,
-        shoes: response.shoes,
-        accessories: response.accessories,
-        suggestion: response.suggestion,
-        analysisMode: response.analysisMode,
-        recommendedProducts: response.recommendedProducts,
-        productRecommendations: response.productRecommendations,
+      _analysis = response.copyWith(
+        recommendedProducts: const [],
+        productRecommendations: const [],
+        outfitPlan: null,
       );
+      _requestId = response.requestId;
       return true;
     } on AIServiceException catch (error) {
       _errorMessage = error.message;
@@ -78,6 +72,13 @@ class OutfitViewModel extends ChangeNotifier {
       recommendedProducts: List<Product>.unmodifiable(products),
       outfitPlan: outfitPlan,
     );
+    _notifyListeners();
+  }
+
+  void clearResult() {
+    _analysis = null;
+    _errorMessage = null;
+    _requestId = null;
     _notifyListeners();
   }
 
