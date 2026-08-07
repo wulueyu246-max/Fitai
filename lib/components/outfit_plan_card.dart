@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/outfit_plan.dart';
+import '../models/outfit_look.dart';
 import '../models/product.dart';
 import 'product_image.dart';
 
@@ -98,6 +99,12 @@ class OutfitPlanCard extends StatelessWidget {
             runSpacing: 8,
             children: [
               _PlanBadge(icon: Icons.place_outlined, label: plan.scene),
+              if (plan.styleDirection.trim().isNotEmpty)
+                _PlanBadge(
+                  key: Key('style-direction-${plan.lookId}'),
+                  icon: Icons.palette_outlined,
+                  label: plan.styleDirection,
+                ),
               _PlanBadge(
                 icon: Icons.bolt_rounded,
                 label: '匹配度 ${plan.matchScore.clamp(0, 100)}%',
@@ -113,6 +120,13 @@ class OutfitPlanCard extends StatelessWidget {
               height: 1.55,
             ),
           ),
+          if (plan.accessoryDecisions.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            _StylingAdvice(
+              key: Key('styling-advice-${plan.lookId}'),
+              decisions: plan.accessoryDecisions,
+            ),
+          ],
           const SizedBox(height: 16),
           for (final product in plan.products)
             _PlanProductRow(
@@ -195,6 +209,55 @@ class OutfitPlanCard extends StatelessWidget {
                 label: Text(
                   isTryOnLoading ? '正在准备 3D 试穿...' : '进入 3D 虚拟试穿',
                   style: const TextStyle(fontWeight: FontWeight.w900),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StylingAdvice extends StatelessWidget {
+  const _StylingAdvice({required this.decisions, super.key});
+
+  final List<AccessoryDecision> decisions;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.09),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '造型建议',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 7),
+          for (final decision in decisions)
+            Padding(
+              key: Key('accessory-decision-${decision.category}'),
+              padding: const EdgeInsets.only(bottom: 5),
+              child: Text(
+                decision.include
+                    ? '✓ ${decision.label}（${decision.reason}）'
+                    : '本套 Look 无需${decision.label}，${decision.reason}',
+                style: const TextStyle(
+                  color: Color(0xFFE9E3EA),
+                  fontSize: 11.5,
+                  height: 1.45,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ),
@@ -350,7 +413,7 @@ class _PlanProductRow extends StatelessWidget {
 }
 
 class _PlanBadge extends StatelessWidget {
-  const _PlanBadge({required this.icon, required this.label});
+  const _PlanBadge({required this.icon, required this.label, super.key});
 
   final IconData icon;
   final String label;

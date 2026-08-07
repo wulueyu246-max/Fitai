@@ -33,6 +33,9 @@ const {
   isLocalDevelopmentOrigin,
   validateProductionConfig,
   validateOutfitRequest,
+  DEFAULT_AI_MODEL,
+  LEGACY_AI_MODEL,
+  structuredJsonRequestOptions,
 } = require("../index");
 const {AnalyticsStore} = require("../analytics_store");
 
@@ -75,7 +78,7 @@ test("production startup permits disabled optional services", () => {
   assert.doesNotThrow(() => validateProductionConfig(productionConfig, {
     OPENAI_API_KEY: "configured-but-not-logged",
     AI_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    AI_MODEL: "qwen-vl-plus",
+    AI_MODEL: "qwen3.7-plus",
   }));
 });
 
@@ -399,6 +402,7 @@ test("AI designs three complete male Clean Fit looks before product matching", (
     gender: "male",
     scene: "date",
     style: "Clean Fit",
+    style_direction: index === 1 ? "日系极简" : index === 2 ? "韩系高级" : "轻商务",
     items: [
       item("top", "短袖Polo", "浅灰色"),
       item("bottom", "九分休闲裤", "米白色"),
@@ -427,10 +431,158 @@ test("AI designs three complete male Clean Fit looks before product matching", (
 
   assert.equal(analysis.looks.length, 3);
   assert.equal(analysis.products.length, 12);
+  assert.equal(analysis.style_upgrade_level, "upgrade");
+  assert.deepEqual(analysis.looks.map((look) => look.style_direction), [
+    "日系极简",
+    "韩系高级",
+    "轻商务",
+  ]);
   assert.ok(analysis.looks.every((look) =>
     look.request_id === "request-male-clean" && look.gender === "male"));
   assert.ok(analysis.products.every((product) =>
     product.gender === "male" && product.search_keywords.every((keyword) => keyword.startsWith("男士"))));
+});
+
+test("upgrade mode rejects repeating a female user's white tee and black shorts", () => {
+  const repeatedLook = (index) => ({
+    look_id: `female-date-${index}`,
+    gender: "female",
+    scene: "日常约会",
+    style: "日常",
+    style_direction: `方向 ${index}`,
+    items: [
+      {category: "top", item_name: "白色T恤", color: "白色", search_keywords: ["女士 白色 T恤"], negative_keywords: ["男装"]},
+      {category: "bottom", item_name: "黑色短裤", color: "黑色", search_keywords: ["女士 黑色 短裤"], negative_keywords: ["男装"]},
+      {category: "shoes", item_name: "小白鞋", color: "白色", search_keywords: ["女士 白色 小白鞋"], negative_keywords: ["男鞋"]},
+      {category: "bag", item_name: "腋下包", color: "黑色", search_keywords: ["女士 黑色 腋下包"], negative_keywords: ["男包"]},
+    ],
+  });
+  const payload = JSON.stringify({
+    gender: "female",
+    bodyProfile: "160cm 49kg",
+    style: "日常约会",
+    style_upgrade_level: "upgrade",
+    recommendations: {
+      top: "白色T恤",
+      bottom: "黑色短裤",
+      shoes: "小白鞋",
+      accessories: "腋下包",
+      summary: "保持原搭配",
+    },
+    looks: [1, 2, 3].map(repeatedLook),
+  });
+
+  assert.throws(() => parseOutfitAnalysis(payload, {
+    gender: "female",
+    scene: "日常约会",
+    userInput: "女生160cm 49kg，当前穿：白T+黑短裤",
+  }), /未达到 style_upgrade_level=upgrade/);
+
+  const upgradedPayload = JSON.parse(payload);
+  upgradedPayload.looks.forEach((look, index) => {
+    const upgradedTop = index === 0 ? "短款针织衫" : index === 1 ? "垂感衬衫" : "翻领Polo针织衫";
+    const upgradedBottom = index === 0 ? "高腰阔腿裤" : index === 1 ? "直筒西裤" : "A字中长裙";
+    look.items[0] = {
+      ...look.items[0],
+      item_name: upgradedTop,
+      color: index === 0 ? "燕麦色" : index === 1 ? "雾蓝色" : "奶油色",
+      search_keywords: [`女士 ${upgradedTop}`],
+    };
+    look.items[1] = {
+      ...look.items[1],
+      item_name: upgradedBottom,
+      color: index === 2 ? "深灰色" : "米白色",
+      search_keywords: [`女士 ${upgradedBottom}`],
+    };
+  });
+  const upgraded = parseOutfitAnalysis(JSON.stringify(upgradedPayload), {
+    gender: "female",
+    scene: "日常约会",
+    userInput: "女生160cm 49kg，当前穿：白T+黑短裤",
+  });
+
+  assert.equal(upgraded.style_upgrade_level, "upgrade");
+  assert.ok(upgraded.looks.every((look) =>
+    !look.items.some((item) => item.item_name === "白色T恤" || item.item_name === "黑色短裤")));
+});
+
+test("American vintage menswear includes a hat requirement by styling decision", () => {
+  const coreItems = () => [
+    {category: "top", item_name: "复古牛仔衬衫", color: "靛蓝", search_keywords: ["男士 靛蓝 复古 牛仔衬衫"], negative_keywords: ["女装"]},
+    {category: "bottom", item_name: "直筒卡其裤", color: "卡其", search_keywords: ["男士 卡其 直筒裤 复古"], negative_keywords: ["女装"]},
+    {category: "shoes", item_name: "复古工装靴", color: "棕色", search_keywords: ["男士 棕色 复古 工装靴"], negative_keywords: ["女鞋"]},
+    {category: "hat", item_name: "复古牛仔帽", color: "靛蓝", style: "vintage", search_keywords: ["男士 牛仔帽 复古", "美式街头帽"], negative_keywords: ["女帽"]},
+  ];
+  const analysis = parseOutfitAnalysis(JSON.stringify({
+    gender: "male",
+    bodyProfile: "成年男性，比例均衡",
+    style: "美式复古男装",
+    style_upgrade_level: "upgrade",
+    recommendations: {
+      top: "复古牛仔衬衫",
+      bottom: "直筒卡其裤",
+      shoes: "工装靴",
+      accessories: "复古牛仔帽",
+      summary: "美式复古完整造型",
+    },
+    looks: [1, 2, 3].map((index) => ({
+      look_id: `vintage-${index}`,
+      gender: "male",
+      scene: "周末出行",
+      style: "美式复古",
+      style_direction: `美式复古方向 ${index}`,
+      accessories_decision: [
+        {category: "hat", include: true, reason: "强化美式复古轮廓和造型完整度"},
+        {category: "scarf", include: false, reason: "当前季节无需增加颈部层次"},
+      ],
+      items: coreItems(),
+    })),
+  }), {gender: "male", scene: "周末出行"});
+
+  const hats = analysis.products.filter((item) => item.category === "hat");
+  assert.equal(hats.length, 3);
+  assert.ok(hats.every((item) => item.accessory_type === "hat"));
+  assert.ok(hats.every((item) => item.search_keywords[0].includes("男士")));
+  assert.ok(analysis.looks.every((look) =>
+    look.accessories_decision.find((decision) => decision.category === "hat").include));
+});
+
+test("Clean Fit minimalist decisions remove a forced hat before product search", () => {
+  const analysis = parseOutfitAnalysis(JSON.stringify({
+    gender: "male",
+    bodyProfile: "成年男性，比例均衡",
+    style: "Clean Fit 极简",
+    style_upgrade_level: "upgrade",
+    recommendations: {
+      top: "针织Polo",
+      bottom: "九分西裤",
+      shoes: "极简德训鞋",
+      accessories: "无需帽子",
+      summary: "保持极简留白",
+    },
+    looks: [1, 2, 3].map((index) => ({
+      look_id: `clean-${index}`,
+      gender: "male",
+      scene: "日常约会",
+      style: "Clean Fit 极简",
+      style_direction: `Clean Fit 方向 ${index}`,
+      accessories_decision: [
+        {category: "hat", include: false, reason: "保持头肩线条简洁，避免过度造型"},
+      ],
+      items: [
+        {category: "top", item_name: "针织Polo", color: "燕麦色", search_keywords: ["男士 燕麦色 针织 Polo"], negative_keywords: ["女装"]},
+        {category: "bottom", item_name: "九分西裤", color: "深灰色", search_keywords: ["男士 深灰色 九分 西裤"], negative_keywords: ["女装"]},
+        {category: "shoes", item_name: "极简德训鞋", color: "白色", search_keywords: ["男士 白色 极简 德训鞋"], negative_keywords: ["女鞋"]},
+        {category: "hat", item_name: "棒球帽", color: "白色", search_keywords: ["男士 白色 棒球帽"], negative_keywords: ["女帽"]},
+      ],
+    })),
+  }), {gender: "male", scene: "日常约会"});
+
+  assert.equal(analysis.products.length, 9);
+  assert.equal(analysis.products.some((item) => item.category === "hat"), false);
+  assert.ok(analysis.looks.every((look) =>
+    look.accessories_decision[0].include === false &&
+    look.items.every((item) => item.category !== "hat")));
 });
 
 test("female French looks remain grouped through product search requirements", () => {
@@ -613,7 +765,7 @@ test("uses OPENAI_API_KEY with DashScope defaults", () => {
     result.baseURL,
     "https://dashscope.aliyuncs.com/compatible-mode/v1",
   );
-  assert.equal(result.model, "qwen-vl-plus");
+  assert.equal(result.model, "qwen3.7-plus");
   assert.equal(result.apiKey, "openai-test-key");
 });
 
@@ -627,8 +779,24 @@ test("selects DashScope defaults for a DashScope API key", () => {
     result.baseURL,
     "https://dashscope.aliyuncs.com/compatible-mode/v1",
   );
-  assert.equal(result.model, "qwen-vl-plus");
+  assert.equal(result.model, "qwen3.7-plus");
   assert.equal(result.apiKey, "dashscope-test-key");
+});
+
+test("uses qwen3.7-plus by default and keeps legacy rollback explicit", () => {
+  assert.equal(DEFAULT_AI_MODEL, "qwen3.7-plus");
+  assert.equal(LEGACY_AI_MODEL, "qwen-vl-plus");
+  assert.equal(resolveAiConfig({
+    DASHSCOPE_API_KEY: "dashscope-test-key",
+    AI_MODEL: LEGACY_AI_MODEL,
+  }).model, "qwen-vl-plus");
+});
+
+test("disables thinking for stable structured JSON output", () => {
+  assert.deepEqual(structuredJsonRequestOptions(), {
+    response_format: {type: "json_object"},
+    enable_thinking: false,
+  });
 });
 
 test("respects explicit compatible API configuration", () => {

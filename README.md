@@ -1,12 +1,12 @@
 # 树皮 Shupi（FitAI）
 
-树皮 Shupi 是一个 Flutter + Node.js 的 AI 穿搭推荐项目。用户上传正面、侧面和背面照片，填写身高、体重与场景后，应用会调用 DashScope 的 `qwen-vl-plus` 生成结构化穿搭分析，并在 Flutter 中展示身体分析、风格、搭配建议和推荐商品。
+树皮 Shupi 是一个 Flutter + Node.js 的 AI 穿搭推荐项目。用户上传正面、侧面和背面照片，填写身高、体重与场景后，应用会调用 DashScope 的 `qwen3.7-plus` 生成结构化穿搭分析，并在 Flutter 中展示身体分析、风格、搭配建议和推荐商品。
 
 当前已验证的主链路：
 
 ```text
 Flutter App -> 图片上传 -> POST /outfit -> Node Server
--> DashScope qwen-vl-plus -> 结构化 JSON -> Flutter 穿搭报告
+-> DashScope qwen3.7-plus -> 结构化 JSON -> Flutter 穿搭报告
 ```
 
 ## 目录
@@ -38,7 +38,7 @@ npm.cmd start
 ```env
 OPENAI_API_KEY=<DashScope API Key>
 AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-AI_MODEL=qwen-vl-plus
+AI_MODEL=qwen3.7-plus
 AI_FORCE_MOCK=false
 USE_PROXY=false
 ```

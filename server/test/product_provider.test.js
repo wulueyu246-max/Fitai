@@ -6,6 +6,7 @@ const {
   MockProductProvider,
   TaobaoProductProvider,
   UnavailableProductProvider,
+  budgetPreferenceAssessment,
   createProductProvider,
   mapTaobaoProduct,
   normalizePublicImageUrl,
@@ -97,7 +98,7 @@ test("missing secret is named safely without logging configured values", () => {
   assert.equal(JSON.stringify(warnings).includes("sensitive-app-key-value"), false);
 });
 
-test("authorized material search sends only official API parameters", async () => {
+test("authorized material search keeps budget soft and sends only official API parameters", async () => {
   const calls = [];
   const provider = providerWithClient({
     call: async (method, params, options) => {
@@ -112,10 +113,16 @@ test("authorized material search sends only official API parameters", async () =
       })]);
     },
   });
-  const products = await provider.recommend({category: "外套", style: "通勤", limit: 1});
+  const products = await provider.recommend({
+    category: "外套",
+    style: "通勤",
+    budget: 300,
+    limit: 1,
+  });
   assert.equal(calls[0].method, TAOBAO_MATERIAL_SEARCH_METHOD);
   assert.equal("site_id" in calls[0].params, false);
   assert.equal(calls[0].params.adzone_id, "300");
+  assert.equal("end_price" in calls[0].params, false);
   assert.equal(calls[0].options.siteId, "200");
   assert.equal(products.length, 1);
   assert.equal(products[0].category, "outerwear");
@@ -125,6 +132,27 @@ test("authorized material search sends only official API parameters", async () =
   assert.equal(products[0].sales, "268");
   assert.equal(products[0].commission_rate, 0.155);
   assert.equal(products[0].is_mock, false);
+  assert.equal(products[0].budget_preference_score, 55);
+  assert.match(products[0].budget_note, /高于单品预算/);
+});
+
+test("budget preference lowers ranking without filtering over-budget products", () => {
+  assert.deepEqual(budgetPreferenceAssessment({price: 180}, 200), {
+    budget_preference_score: 100,
+    budget_note: "",
+  });
+  const overBudget = budgetPreferenceAssessment({price: 230}, 200);
+  assert.equal(overBudget.budget_preference_score, 80);
+  assert.match(overBudget.budget_note, /略高于单品预算/);
+
+  const affordableOnLowBudget = budgetPreferenceAssessment({price: 180}, 200);
+  const premiumOnLowBudget = budgetPreferenceAssessment({price: 700}, 200);
+  const premiumOnHighBudget = budgetPreferenceAssessment({price: 700}, 1000);
+  assert.ok(
+    affordableOnLowBudget.budget_preference_score >
+      premiumOnLowBudget.budget_preference_score,
+  );
+  assert.equal(premiumOnHighBudget.budget_preference_score, 100);
 });
 
 test("empty 27939 search uses the authorized material recommendation API", async () => {
@@ -417,7 +445,7 @@ test("a Taobao no-result error continues with the next precise keyword", async (
   assert.ok(products.every((product) => product.source === "taobao"));
 });
 
-test("builds a twenty-item hard-filtered pool and returns up to six AI selections", async () => {
+test("builds a twenty-item quality-filtered pool and returns up to six AI selections", async () => {
   const pageSizes = [];
   const capturedGroups = [];
   const provider = new TaobaoProductProvider({

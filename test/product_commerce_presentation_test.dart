@@ -143,6 +143,8 @@ void main() {
       'source': 'taobao',
       'is_mock': false,
       'relevance_score': 88,
+      'brand_quality_score': 85,
+      'brand_fallback': false,
       'ai_taste_score': 94,
       'fit_score': 91,
       'outfit_coherence_score': 95,
@@ -155,6 +157,8 @@ void main() {
     });
 
     expect(parsed.relevanceScore, 88);
+    expect(parsed.brandQualityScore, 85);
+    expect(parsed.brandFallback, isFalse);
     expect(parsed.aiTasteScore, 94);
     expect(parsed.finalScore, 92.4);
     expect(parsed.aiRecommendationReason, '版型简洁，与整套穿搭协调。');

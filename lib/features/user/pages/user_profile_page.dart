@@ -31,7 +31,6 @@ class _UserProfilePageState extends State<UserProfilePage> {
   late String _bodyType;
   late Set<String> _styles;
   late Set<String> _brands;
-  late RangeValues _budget;
   String? _avatarBase64;
   bool _saving = false;
 
@@ -50,10 +49,6 @@ class _UserProfilePageState extends State<UserProfilePage> {
     _bodyType = account.bodyType;
     _styles = {...account.likedStyles};
     _brands = {...account.favoriteBrands};
-    _budget = RangeValues(
-      account.budgetMin.clamp(0, 3000),
-      account.budgetMax.clamp(0, 3000),
-    );
     _avatarBase64 = account.avatarBase64;
   }
 
@@ -108,8 +103,6 @@ class _UserProfilePageState extends State<UserProfilePage> {
         gender: _gender,
         bodyType: _bodyType,
         likedStyles: _styles.toList(growable: false),
-        budgetMin: _budget.start,
-        budgetMax: _budget.end,
         favoriteBrands: _brands.toList(growable: false),
       ),
     );
@@ -289,18 +282,6 @@ class _UserProfilePageState extends State<UserProfilePage> {
                   ),
                 ),
             ],
-          ),
-          const SizedBox(height: 20),
-          _Label(
-            '预算范围 ¥${_budget.start.toStringAsFixed(0)} - '
-            '¥${_budget.end.toStringAsFixed(0)}',
-          ),
-          RangeSlider(
-            values: _budget,
-            min: 0,
-            max: 3000,
-            divisions: 30,
-            onChanged: (value) => setState(() => _budget = value),
           ),
           const SizedBox(height: 20),
           FilledButton(

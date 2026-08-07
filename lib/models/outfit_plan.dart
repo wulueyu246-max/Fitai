@@ -1,4 +1,5 @@
 import 'product.dart';
+import 'outfit_look.dart';
 
 class OutfitPlan {
   const OutfitPlan({
@@ -11,6 +12,8 @@ class OutfitPlan {
     required this.createdTime,
     this.scene = '日常',
     this.style = '',
+    this.styleDirection = '',
+    this.accessoryDecisions = const [],
     this.gender = 'unisex',
     this.requestId = '',
     this.lookId = '',
@@ -29,6 +32,9 @@ class OutfitPlan {
       createdTime: DateTime.parse(json['createdTime'] as String),
       scene: json['scene'] as String? ?? '日常',
       style: json['style'] as String? ?? '',
+      styleDirection:
+          (json['style_direction'] ?? json['styleDirection'])?.toString() ?? '',
+      accessoryDecisions: _readAccessoryDecisions(json),
       gender: _normalizeGender(json['gender'] as String?),
       requestId:
           (json['request_id'] ?? json['requestId'])?.toString().trim() ?? '',
@@ -47,6 +53,8 @@ class OutfitPlan {
   final DateTime createdTime;
   final String scene;
   final String style;
+  final String styleDirection;
+  final List<AccessoryDecision> accessoryDecisions;
   final String gender;
   final String requestId;
   final String lookId;
@@ -73,6 +81,8 @@ class OutfitPlan {
       createdTime: createdTime,
       scene: scene,
       style: style,
+      styleDirection: styleDirection,
+      accessoryDecisions: accessoryDecisions,
       gender: gender,
       requestId: requestId,
       lookId: lookId,
@@ -105,6 +115,11 @@ class OutfitPlan {
       'reason': reason,
       'scene': scene,
       'style': style,
+      'style_direction': styleDirection,
+      if (accessoryDecisions.isNotEmpty)
+        'accessories_decision': accessoryDecisions
+            .map((decision) => decision.toJson())
+            .toList(growable: false),
       'gender': gender,
       'request_id': requestId,
       'look_id': lookId,
@@ -128,6 +143,16 @@ class OutfitPlan {
     if (value is! List) return const [];
     return List<Product>.unmodifiable(
       value.whereType<Map<String, dynamic>>().map(Product.fromJson),
+    );
+  }
+
+  static List<AccessoryDecision> _readAccessoryDecisions(
+    Map<String, dynamic> json,
+  ) {
+    final value = json['accessories_decision'] ?? json['accessoriesDecision'];
+    if (value is! List) return const [];
+    return List<AccessoryDecision>.unmodifiable(
+      value.whereType<Map<String, dynamic>>().map(AccessoryDecision.fromJson),
     );
   }
 }

@@ -211,18 +211,30 @@ class CatalogProductService implements ProductService {
               'gender': analysis.gender,
               'style': analysis.style,
               'scene': request.scene,
-              'budget': _budgetFromRequest(request.request),
+              'budget': _itemBudgetCeiling(
+                request.itemBudget,
+                request.request,
+              ),
+              'item_budget': request.itemBudget,
+              'outfit_budget': request.outfitBudget,
               'user_input': request.request,
               'user_profile': {
                 'gender': analysis.gender,
                 'height': request.height,
                 'weight': request.weight,
                 'body_profile': analysis.bodyAnalysis,
+                'item_budget': request.itemBudget,
+                'outfit_budget': request.outfitBudget,
               },
               'user_requirements': {
                 'scene': request.scene,
                 'style': analysis.style,
-                'budget': _budgetFromRequest(request.request),
+                'budget': _itemBudgetCeiling(
+                  request.itemBudget,
+                  request.request,
+                ),
+                'item_budget': request.itemBudget,
+                'outfit_budget': request.outfitBudget,
                 'user_input': request.request,
               },
               'outfit_plan': {
@@ -337,4 +349,16 @@ double _budgetFromRequest(String request) {
   final match =
       RegExp(r'(?:预算|不超过|以内)\s*[¥￥]?\s*(\d+(?:\.\d+)?)').firstMatch(request);
   return double.tryParse(match?.group(1) ?? '') ?? 0;
+}
+
+double _itemBudgetCeiling(String itemBudget, String request) {
+  final explicitBudget = _budgetFromRequest(request);
+  if (explicitBudget > 0) return explicitBudget;
+  return switch (itemBudget.trim()) {
+    '<50' => 50,
+    '50-200' => 200,
+    '200-500' => 500,
+    '500-1000' => 1000,
+    _ => 0,
+  };
 }

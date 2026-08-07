@@ -74,6 +74,18 @@ function readBoolean(value, fallback = false) {
   return fallback;
 }
 
+const DEFAULT_AI_MODEL = "qwen3.7-plus";
+// Manual rollback only: set AI_MODEL=qwen-vl-plus in the environment.
+// The server never switches to this legacy model automatically.
+const LEGACY_AI_MODEL = "qwen-vl-plus";
+
+function structuredJsonRequestOptions() {
+  return {
+    response_format: {type: "json_object"},
+    enable_thinking: false,
+  };
+}
+
 const proxyEnvironmentKeys = Object.freeze([
   "AI_PROXY_URL",
   "PROXY_URL",
@@ -112,7 +124,7 @@ function resolveAiConfig(environment = process.env) {
   const baseURL =
     readOptionalString(environment.AI_BASE_URL) ||
     "https://dashscope.aliyuncs.com/compatible-mode/v1";
-  const model = readOptionalString(environment.AI_MODEL) || "qwen-vl-plus";
+  const model = readOptionalString(environment.AI_MODEL) || DEFAULT_AI_MODEL;
   const apiKey = openAiApiKey || dashscopeApiKey;
   let provider;
 
@@ -158,8 +170,7 @@ const config = Object.freeze({
     30_000,
   ),
   aiMaxRetries: readNonNegativeInteger(process.env.AI_MAX_RETRIES, 0),
-  productRerankModel:
-    readOptionalString(process.env.PRODUCT_RERANK_MODEL) || aiConfig.model,
+  productRerankModel: aiConfig.model,
   productRerankTimeoutMs: readPositiveInteger(
     process.env.PRODUCT_RERANK_TIMEOUT_MS,
     45_000,
@@ -285,6 +296,13 @@ const imageRoleLabels = Object.freeze({
   side: "侧面全身照",
   back: "背面全身照",
 });
+
+const itemBudgetOptions = Object.freeze([
+  "<50", "50-200", "200-500", "500-1000", "1000+",
+]);
+const outfitBudgetOptions = Object.freeze([
+  "300以内", "300-800", "800-1500", "1500-3000", "3000+",
+]);
 
 const partialViewSafetyInstruction =
   "当前可能仅提供正面照。不得假装已观察到侧面或背面，只能根据实际可见信息进行保守判断。";
@@ -699,6 +717,25 @@ function validateImageDataUrl(role, value) {
   return value;
 }
 
+function normalizeBudgetOption(value, options, fallback, field) {
+  if (value == null || String(value).trim() === "") return fallback;
+  const normalized = String(value).trim();
+  if (!options.includes(normalized)) {
+    throw new RequestValidationError(`${field} 选项无效`);
+  }
+  return normalized;
+}
+
+function itemBudgetCeiling(value) {
+  return {
+    "<50": 50,
+    "50-200": 200,
+    "200-500": 500,
+    "500-1000": 1000,
+    "1000+": 0,
+  }[value] || 0;
+}
+
 function validateOutfitRequest(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new RequestValidationError("请求体必须是 JSON 对象");
@@ -710,6 +747,18 @@ function validateOutfitRequest(body) {
   const request =
     typeof body.request === "string" ? body.request.trim() : "";
   const gender = normalizeGender(body.gender);
+  const itemBudget = normalizeBudgetOption(
+    body.item_budget ?? body.itemBudget,
+    itemBudgetOptions,
+    "200-500",
+    "item_budget",
+  );
+  const outfitBudget = normalizeBudgetOption(
+    body.outfit_budget ?? body.outfitBudget,
+    outfitBudgetOptions,
+    "800-1500",
+    "outfit_budget",
+  );
   const images = body.images;
 
   if (!Number.isFinite(height) || height < 40 || height > 260) {
@@ -758,6 +807,8 @@ function validateOutfitRequest(body) {
     scene,
     request,
     gender,
+    itemBudget,
+    outfitBudget,
     images: normalizedImages,
   };
 }
@@ -933,6 +984,7 @@ function parseOutfitAnalysis(content, context = {}) {
       }
       return {
         ...requirement,
+        accessory_type: accessoryTypeForItem(product),
         search_keywords: buildSearchKeywords(requirement),
       };
     } catch (error) {
@@ -941,6 +993,10 @@ function parseOutfitAnalysis(content, context = {}) {
   };
 
   const parsedLooks = Array.isArray(parsed.looks) ? parsed.looks : null;
+  const styleUpgradeLevel = normalizeStyleUpgradeLevel(
+    parsed.style_upgrade_level || parsed.styleUpgradeLevel,
+  );
+  const usedStyleDirections = new Set();
   const looks = parsedLooks
     ? parsedLooks.map((look, lookIndex) => {
       if (!look || typeof look !== "object" || Array.isArray(look)) {
@@ -956,8 +1012,8 @@ function parseOutfitAnalysis(content, context = {}) {
         throw new Error(`AI 返回 looks[${lookIndex}] 性别与顶层 gender 不一致`);
       }
       const rawItems = look.items;
-      if (!Array.isArray(rawItems) || rawItems.length < 4 || rawItems.length > 8) {
-        throw new Error(`AI 返回 looks[${lookIndex}].items 必须包含 4 到 8 个单品`);
+      if (!Array.isArray(rawItems) || rawItems.length < 3 || rawItems.length > 10) {
+        throw new Error(`AI 返回 looks[${lookIndex}].items 必须包含 3 到 10 个单品`);
       }
       const lookId = readOptionalString(look.look_id || look.lookId) ||
         `look-${lookIndex + 1}`;
@@ -967,19 +1023,39 @@ function parseOutfitAnalysis(content, context = {}) {
         gender: lookGender,
         scene: readOptionalString(look.scene) || readOptionalString(context.scene),
         style: readOptionalString(look.style) || parsed.style.trim(),
+        style_direction: uniqueStyleDirection(
+          look.style_direction || look.styleDirection,
+          lookIndex,
+          usedStyleDirections,
+        ),
       };
-      const items = rawItems.map((item, itemIndex) =>
+      const hasAccessoryDecision = Object.prototype.hasOwnProperty.call(
+        look,
+        "accessories_decision",
+      ) || Object.prototype.hasOwnProperty.call(look, "accessoriesDecision");
+      const accessoriesDecision = normalizeAccessoriesDecision(
+        look.accessories_decision || look.accessoriesDecision,
+        lookIndex,
+      );
+      const normalizedItems = rawItems.map((item, itemIndex) =>
         normalizeItem(item, itemIndex, normalizedLook));
+      const items = hasAccessoryDecision
+        ? applyAccessoryDecisions(normalizedItems, accessoriesDecision, lookIndex)
+        : normalizedItems;
       const categories = new Set(items.map((item) => item.category));
-      const hasAccessory = ["accessory", "bag", "hat", "outerwear"]
-        .some((category) => categories.has(category));
       if (!categories.has("top") || !categories.has("bottom") ||
-          !categories.has("shoes") || !hasAccessory) {
+          !categories.has("shoes")) {
         throw new Error(
-          `AI 返回 looks[${lookIndex}] 必须包含上衣、下装、鞋和至少一个配饰类单品`,
+          `AI 返回 looks[${lookIndex}] 必须包含上衣、下装和鞋`,
         );
       }
-      return {...normalizedLook, items};
+      return {
+        ...normalizedLook,
+        ...(hasAccessoryDecision
+          ? {accessories_decision: accessoriesDecision}
+          : {}),
+        items,
+      };
     })
     : [{
       request_id: readOptionalString(context.requestId),
@@ -987,6 +1063,7 @@ function parseOutfitAnalysis(content, context = {}) {
       gender: analysisGender,
       scene: readOptionalString(context.scene),
       style: parsed.style.trim(),
+      style_direction: uniqueStyleDirection("", 0, usedStyleDirections),
       items: parsed.products.map((product, index) => normalizeItem(product, index, {
         look_id: "look-1",
         gender: analysisGender,
@@ -996,16 +1073,161 @@ function parseOutfitAnalysis(content, context = {}) {
   if (parsedLooks && looks.length !== 3) {
     throw new Error("AI 返回 looks 必须包含 3 套完整 Look");
   }
+  assertStyleUpgrade(
+    looks,
+    context.userInput || context.request || "",
+    styleUpgradeLevel,
+  );
   const products = looks.flatMap((look) => look.items);
 
   return {
     gender: analysisGender,
     bodyProfile: bodyProfile.trim(),
     style: parsed.style.trim(),
+    style_upgrade_level: styleUpgradeLevel,
     recommendations,
     looks,
     products,
   };
+}
+
+const STYLE_DIRECTION_FALLBACKS = ["Clean Fit 高级基础", "韩系氛围", "轻商务"];
+const ACCESSORY_DECISION_CATEGORIES = Object.freeze([
+  "hat", "bag", "glasses", "belt", "jewelry", "scarf", "watch",
+]);
+
+function normalizeAccessoryDecisionCategory(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (/帽|\b(?:hat|cap)\b/.test(normalized)) return "hat";
+  if (/包|\b(?:bag|handbag|tote)\b/.test(normalized)) return "bag";
+  if (/眼镜|墨镜|太阳镜|\b(?:glasses|sunglasses)\b/.test(normalized)) return "glasses";
+  if (/腰带|皮带|\bbelt\b/.test(normalized)) return "belt";
+  if (/珠宝|首饰|项链|耳环|耳饰|手链|戒指|\b(?:jewelry|necklace|earrings?)\b/.test(normalized)) {
+    return "jewelry";
+  }
+  if (/围巾|丝巾|\bscarf\b/.test(normalized)) return "scarf";
+  if (/手表|腕表|\bwatch\b/.test(normalized)) return "watch";
+  return ACCESSORY_DECISION_CATEGORIES.includes(normalized) ? normalized : "";
+}
+
+function accessoryTypeForItem(item) {
+  return normalizeAccessoryDecisionCategory(
+    item?.accessory_type || item?.accessoryType || item?.category,
+  ) || normalizeAccessoryDecisionCategory(item?.item_name || item?.itemName);
+}
+
+function normalizeAccessoriesDecision(value, lookIndex) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(`AI 返回 looks[${lookIndex}].accessories_decision 必须是数组`);
+  }
+  const seen = new Set();
+  return value.map((decision, decisionIndex) => {
+    if (!decision || typeof decision !== "object" || Array.isArray(decision)) {
+      throw new Error(
+        `AI 返回 looks[${lookIndex}].accessories_decision[${decisionIndex}] 必须是对象`,
+      );
+    }
+    const category = normalizeAccessoryDecisionCategory(decision.category);
+    if (!category || seen.has(category)) {
+      throw new Error(
+        `AI 返回 looks[${lookIndex}].accessories_decision 存在无效或重复 category`,
+      );
+    }
+    if (typeof decision.include !== "boolean") {
+      throw new Error(
+        `AI 返回 looks[${lookIndex}].accessories_decision[${decisionIndex}].include 必须是布尔值`,
+      );
+    }
+    const reason = readOptionalString(decision.reason);
+    if (!reason) {
+      throw new Error(
+        `AI 返回 looks[${lookIndex}].accessories_decision[${decisionIndex}].reason 不能为空`,
+      );
+    }
+    seen.add(category);
+    return {category, include: decision.include, reason};
+  });
+}
+
+function applyAccessoryDecisions(items, decisions, lookIndex) {
+  const included = new Set(decisions
+    .filter((decision) => decision.include)
+    .map((decision) => decision.category));
+  const filtered = items.filter((item) =>
+    !item.accessory_type || included.has(item.accessory_type));
+  for (const category of included) {
+    if (!filtered.some((item) => item.accessory_type === category)) {
+      throw new Error(
+        `AI 返回 looks[${lookIndex}] 已决定加入 ${category}，但未生成对应商品需求`,
+      );
+    }
+  }
+  return filtered;
+}
+
+function normalizeStyleUpgradeLevel(value) {
+  const normalized = readOptionalString(value).toLowerCase();
+  return ["maintain", "upgrade", "transform"].includes(normalized)
+    ? normalized
+    : "upgrade";
+}
+
+function assertStyleUpgrade(looks, userInput, level) {
+  if (level !== "upgrade" && level !== "transform") return;
+  const text = String(userInput || "");
+  const match = text.match(/(?:当前|现在|目前|身上)(?:穿着|穿的是|穿|搭配)[：:]?([^。；;，,\n]+)/);
+  if (!match) return;
+  const currentItems = match[1]
+    .split(/[+＋、，,和与]/)
+    .map(normalizeOutfitToken)
+    .filter((item) => item.length >= 2 && isLikelyOutfitItem(item));
+  if (currentItems.length < 2) return;
+  for (const look of looks) {
+    const evidence = look.items.map((item) => normalizeOutfitToken(
+      `${item.color || ""}${item.item_name || ""}`,
+    ));
+    const repeated = currentItems.every((current) =>
+      evidence.some((item) => item.includes(current) || current.includes(item)));
+    if (repeated) {
+      throw new Error("AI Look 重复了用户当前核心穿搭，未达到 style_upgrade_level=upgrade");
+    }
+  }
+}
+
+function isLikelyOutfitItem(value) {
+  return /t|polo|衫|衣|裤|裙|鞋|靴|外套|夹克|西装|针织|卫衣|背心|吊带|包|帽/.test(value);
+}
+
+function normalizeOutfitToken(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/白色/g, "白")
+    .replace(/黑色/g, "黑")
+    .replace(/t[- ]?shirt|t恤/g, "t")
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "");
+}
+
+function uniqueStyleDirection(value, lookIndex, usedDirections) {
+  const preferred = readOptionalString(value);
+  const preferredKey = preferred.toLowerCase();
+  if (preferred && !usedDirections.has(preferredKey)) {
+    usedDirections.add(preferredKey);
+    return preferred;
+  }
+  for (let offset = 0; offset < STYLE_DIRECTION_FALLBACKS.length; offset += 1) {
+    const fallback = STYLE_DIRECTION_FALLBACKS[(lookIndex + offset) %
+      STYLE_DIRECTION_FALLBACKS.length];
+    const key = fallback.toLowerCase();
+    if (!usedDirections.has(key)) {
+      usedDirections.add(key);
+      return fallback;
+    }
+  }
+  const fallback = `差异化方向 ${lookIndex + 1}`;
+  usedDirections.add(fallback.toLowerCase());
+  return fallback;
 }
 
 function createMockOutfitAnalysis(outfitRequest) {
@@ -1097,6 +1319,7 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
       style: analysis.style || "",
       items: analysis.products || [],
     }];
+  const usedStyleDirections = new Set();
   return sourceLooks.map((look, lookIndex) => {
     const explicitGender = Object.prototype.hasOwnProperty.call(look, "gender");
     const lookGender = explicitGender ? normalizeGender(look.gender) : gender;
@@ -1106,7 +1329,15 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
     }
     const lookId = readOptionalString(look.look_id || look.lookId) ||
       `look-${lookIndex + 1}`;
-    const items = (Array.isArray(look.items) ? look.items : []).map((product) => {
+    const hasAccessoryDecision = Object.prototype.hasOwnProperty.call(
+      look,
+      "accessories_decision",
+    ) || Object.prototype.hasOwnProperty.call(look, "accessoriesDecision");
+    const accessoriesDecision = normalizeAccessoriesDecision(
+      look.accessories_decision || look.accessoriesDecision,
+      lookIndex,
+    );
+    const normalizedItems = (Array.isArray(look.items) ? look.items : []).map((product) => {
       const requirement = normalizeProductRequirement({
         ...product,
         look_id: lookId,
@@ -1118,14 +1349,29 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
         scene: look.scene || outfitRequest.scene,
         style: look.style || analysis.style,
       });
-      return {...requirement, search_keywords: buildSearchKeywords(requirement)};
+      return {
+        ...requirement,
+        accessory_type: accessoryTypeForItem(product),
+        search_keywords: buildSearchKeywords(requirement),
+      };
     });
+    const items = hasAccessoryDecision
+      ? applyAccessoryDecisions(normalizedItems, accessoriesDecision, lookIndex)
+      : normalizedItems;
     return {
       request_id: readOptionalString(look.request_id || look.requestId || outfitRequest.requestId),
       look_id: lookId,
       gender: lookGender,
       scene: readOptionalString(look.scene) || readOptionalString(outfitRequest.scene),
       style: readOptionalString(look.style) || readOptionalString(analysis.style),
+      style_direction: uniqueStyleDirection(
+        look.style_direction || look.styleDirection,
+        lookIndex,
+        usedStyleDirections,
+      ),
+      ...(hasAccessoryDecision
+        ? {accessories_decision: accessoriesDecision}
+        : {}),
       items,
     };
   });
@@ -1138,6 +1384,9 @@ async function buildOutfitApiResponse(
 ) {
   const requestText = String(outfitRequest.request || "");
   const budgetMatch = requestText.match(/(?:预算|不超过|以内)\s*[¥￥]?\s*(\d+(?:\.\d+)?)/);
+  const preferredItemBudget = budgetMatch
+    ? Number(budgetMatch[1])
+    : itemBudgetCeiling(outfitRequest.itemBudget);
   const profileGender = normalizeGender(outfitRequest.gender);
   const analysisGender = normalizeGender(analysis.gender);
   const gender = analysisGender !== "unisex"
@@ -1156,17 +1405,23 @@ async function buildOutfitApiResponse(
       bodyType: analysis.bodyProfile,
       scene: outfitRequest.scene,
       gender: effectiveGender,
-      budget: budgetMatch ? Number(budgetMatch[1]) : 0,
+      budget: preferredItemBudget,
+      item_budget: outfitRequest.itemBudget,
+      outfit_budget: outfitRequest.outfitBudget,
       user_profile: {
         gender: effectiveGender,
         height: outfitRequest.height,
         weight: outfitRequest.weight,
         body_profile: analysis.bodyProfile,
+        item_budget: outfitRequest.itemBudget,
+        outfit_budget: outfitRequest.outfitBudget,
       },
       user_requirements: {
         scene: outfitRequest.scene,
         style: analysis.style,
-        budget: budgetMatch ? Number(budgetMatch[1]) : 0,
+        budget: preferredItemBudget,
+        item_budget: outfitRequest.itemBudget,
+        outfit_budget: outfitRequest.outfitBudget,
         user_input: outfitRequest.request,
       },
       outfit_plan: {
@@ -1767,6 +2022,8 @@ function productRecommendationFilters(input = {}, requestId = "") {
     fit: input?.fit,
     season: input?.season,
     budget: input?.budget,
+    item_budget: input?.item_budget ?? input?.itemBudget,
+    outfit_budget: input?.outfit_budget ?? input?.outfitBudget,
     keyword: directSearchKeyword,
     explicit_user_search: typeof directSearchKeyword === "string" &&
       directSearchKeyword.trim().length > 0,
@@ -1790,6 +2047,7 @@ function productRecommendationRequest(input = {}, requestId = "") {
     if (!Array.isArray(rawLooks) || rawLooks.length === 0 || rawLooks.length > 3) {
       throw new TypeError("looks must be an array containing 1 to 3 structured looks");
     }
+    const usedStyleDirections = new Set();
     const looks = rawLooks.map((look, lookIndex) => {
       if (!look || typeof look !== "object" || Array.isArray(look)) {
         throw new TypeError(`looks[${lookIndex}] must be an object`);
@@ -1807,10 +2065,18 @@ function productRecommendationRequest(input = {}, requestId = "") {
         throw new TypeError(`looks[${lookIndex}].gender conflicts with request gender`);
       }
       const rawLookItems = look.items;
-      if (!Array.isArray(rawLookItems) || rawLookItems.length < 3 || rawLookItems.length > 8) {
-        throw new TypeError(`looks[${lookIndex}].items must contain 3 to 8 requirements`);
+      if (!Array.isArray(rawLookItems) || rawLookItems.length < 3 || rawLookItems.length > 10) {
+        throw new TypeError(`looks[${lookIndex}].items must contain 3 to 10 requirements`);
       }
-      const items = rawLookItems.map((item, itemIndex) => {
+      const hasAccessoryDecision = Object.prototype.hasOwnProperty.call(
+        look,
+        "accessories_decision",
+      ) || Object.prototype.hasOwnProperty.call(look, "accessoriesDecision");
+      const accessoriesDecision = normalizeAccessoriesDecision(
+        look.accessories_decision || look.accessoriesDecision,
+        lookIndex,
+      );
+      const normalizedItems = rawLookItems.map((item, itemIndex) => {
         if (!item || typeof item !== "object" || Array.isArray(item)) {
           throw new TypeError(`looks[${lookIndex}].items[${itemIndex}] must be an object`);
         }
@@ -1832,13 +2098,24 @@ function productRecommendationRequest(input = {}, requestId = "") {
             `looks[${lookIndex}].items[${itemIndex}].gender conflicts with Look gender`,
           );
         }
-        return requirement;
+        return {...requirement, accessory_type: accessoryTypeForItem(item)};
       });
+      const items = hasAccessoryDecision
+        ? applyAccessoryDecisions(normalizedItems, accessoriesDecision, lookIndex)
+        : normalizedItems;
       return {
         look_id: lookId,
         gender: lookGender,
         scene: readOptionalString(look.scene) || readOptionalString(filters.scene),
         style: readOptionalString(look.style) || readOptionalString(filters.style),
+        style_direction: uniqueStyleDirection(
+          look.style_direction || look.styleDirection,
+          lookIndex,
+          usedStyleDirections,
+        ),
+        ...(hasAccessoryDecision
+          ? {accessories_decision: accessoriesDecision}
+          : {}),
         items,
       };
     });
@@ -1949,6 +2226,9 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
       {
         type: "text",
         text: [
+          "Budget preferences guide brand selection, price ranking, and recommendation reasons; they are not hard price filters. Slightly over-budget items are allowed when the benefit is explained.",
+          `单品预算偏好：${outfitRequest.itemBudget}`,
+          `整套预算偏好：${outfitRequest.outfitBudget}`,
           `身高：${outfitRequest.height} cm`,
           `体重：${outfitRequest.weight} kg`,
           `用户性别：${outfitRequest.gender}`,
@@ -1999,9 +2279,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
       response = await aiClient.chat.completions.create(
         {
           model: config.model,
-          response_format: {
-            type: "json_object",
-          },
+          ...structuredJsonRequestOptions(),
           messages: [
             {
               role: "system",
@@ -2013,7 +2291,12 @@ ${partialViewSafetyInstruction}
 
 安全与输出要求：
 0. 必须先完成 3 套结构化 Look 设计，再由后续商品服务按照每套 Look 的 items 搜索淘宝候选；不得根据淘宝结果反向编写 Look。
-0. 每套 Look 必须包含唯一 look_id、gender、scene、style 和 items；每套至少包含 top、bottom、shoes，以及 accessory、bag、hat、outerwear 中至少一个。
+0. style_upgrade_level 默认且优先输出 upgrade。先识别用户当前穿搭，再提供明显升级，不得只复述照片中已有服装；普通白 T + 短裤应升级为 Polo、衬衫、针织、不同裤型或更完整的鞋履组合。
+0. 每套 Look 必须包含唯一 look_id、gender、scene、style、style_direction、accessories_decision 和 items；top、bottom、shoes 为核心，配饰和包不是强制项。
+0. accessories_decision 必须是决策对象数组。你要综合风格、场景、季节、用户年龄、身材比例和当前搭配完整度，判断 hat、bag、glasses、belt、jewelry、scarf、watch 是否需要。
+0. Clean Fit 极简通常不应强加帽子；Streetwear、美式复古、Vintage、Vacation 等方向可按实际造型需要加入帽子，但不得让每套 Look 都机械使用帽子。
+0. accessories_decision 的 include=true 时，items 必须生成对应商品需求、item_name、style 和 2 到 3 个 search_keywords；include=false 时，items 中不得出现该类商品。
+0. 三套 Look 的 style_direction 必须互不相同，例如 Clean Fit 高级基础、韩系氛围、轻商务；同一品类的颜色、版型或设计语言也必须有明确差异，且每套至少在两个核心单品上区别于用户当前穿搭。
 0. 每个 item 必须包含 category、item_name、color、fit、material、style、search_keywords、negative_keywords。
 0. male 或 female 用户的 Look 和单品默认必须保持该性别；只有你明确判断为中性设计时才可输出 unisex，禁止自动降级。
 0. search_keywords 必须围绕已经设计好的 item，包含性别人群、核心品类、颜色和版型；不得只输出“上衣”“裤子”“鞋”等泛词。
@@ -2023,7 +2306,7 @@ ${partialViewSafetyInstruction}
 4. 只返回一个 JSON 对象，不使用 Markdown、代码块或额外解释。
 5. products 只描述适合用户的商品类型和检索条件，不得编造品牌、SKU、价格或购买链接；真实商品由商品数据库另行匹配。
 6. 顶层 gender 和 products 中每个单品的 gender 都必须根据用户资料输出，只能是 male、female 或 unisex；不得把性别写死，且两层必须一致，除非某个单品明确为中性款。
-7. category 至少支持 top、bottom、dress、shoes、outerwear、bag、hat、accessory。
+7. category 至少支持 top、bottom、dress、shoes、outerwear、hat、bag、glasses、belt、jewelry、scarf、watch、accessory。
 8. 每个单品输出 2 到 3 个 search_keywords。每个关键词必须包含性别人群词、具体品类词、颜色或风格词，并按需加入季节、版型或场景。
 9. negative_keywords 必须排除与用户性别和目标品类明显冲突的商品词。
 10. 必须严格使用以下结构；原有 recommendations 文案字段保持字符串：
@@ -2032,6 +2315,7 @@ ${partialViewSafetyInstruction}
   "gender": "",
   "bodyProfile": "",
   "style": "",
+  "style_upgrade_level": "upgrade",
   "recommendations": {
     "top": "",
     "bottom": "",
@@ -2044,7 +2328,15 @@ ${partialViewSafetyInstruction}
       "look_id": "look-1",
       "gender": "",
       "style": "",
+      "style_direction": "",
       "scene": "",
+      "accessories_decision": [
+        {
+          "category": "hat",
+          "include": false,
+          "reason": ""
+        }
+      ],
       "items": [
         {
           "category": "top",
@@ -2097,6 +2389,7 @@ ${partialViewSafetyInstruction}
       gender: outfitRequest.gender,
       scene: outfitRequest.scene,
       requestId: res.locals.requestId,
+      userInput: outfitRequest.request,
     });
     const parseDurationMs = Date.now() - parseStartedAt;
 
@@ -2116,6 +2409,8 @@ ${partialViewSafetyInstruction}
         gender: look.gender,
         scene: look.scene,
         style: look.style,
+        style_direction: look.style_direction,
+        accessories_decision: look.accessories_decision,
         items: look.items.map((item) => ({
           category: item.category,
           item_name: item.item_name,
@@ -2433,4 +2728,7 @@ module.exports = {
   partialViewSafetyInstruction,
   productRecommendationFilters,
   productRecommendationRequest,
+  DEFAULT_AI_MODEL,
+  LEGACY_AI_MODEL,
+  structuredJsonRequestOptions,
 };

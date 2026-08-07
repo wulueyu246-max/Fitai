@@ -181,6 +181,9 @@ class Product {
     this.recommendationReason = '',
     this.matchExplanation = '',
     this.relevanceScore = 0,
+    this.aestheticScore = 0,
+    this.brandQualityScore = 0,
+    this.diversityScore = 0,
     this.aiTasteScore = 0,
     this.fitScore = 0,
     this.outfitCoherenceScore = 0,
@@ -190,6 +193,7 @@ class Product {
     this.aiConcern = '',
     this.aiLabel = '',
     this.aiRerankFallback = false,
+    this.brandFallback = false,
     this.isMock = false,
     this.requestId,
     this.lookId = '',
@@ -330,6 +334,18 @@ class Product {
         json,
         ['relevanceScore', 'relevance_score'],
       ),
+      aestheticScore: _readOptionalDouble(
+        json,
+        ['aestheticScore', 'aesthetic_score'],
+      ),
+      brandQualityScore: _readOptionalDouble(
+        json,
+        ['brandQualityScore', 'brand_quality_score'],
+      ),
+      diversityScore: _readOptionalDouble(
+        json,
+        ['diversityScore', 'diversity_score'],
+      ),
       aiTasteScore: _readOptionalDouble(
         json,
         ['aiTasteScore', 'ai_taste_score'],
@@ -361,6 +377,9 @@ class Product {
       ),
       aiRerankFallback: json['aiRerankFallback'] as bool? ??
           json['ai_rerank_fallback'] as bool? ??
+          false,
+      brandFallback: json['brandFallback'] as bool? ??
+          json['brand_fallback'] as bool? ??
           false,
       isMock: json['isMock'] as bool? ??
           json['is_mock'] as bool? ??
@@ -449,6 +468,9 @@ class Product {
   final String recommendationReason;
   final String matchExplanation;
   final double relevanceScore;
+  final double aestheticScore;
+  final double brandQualityScore;
+  final double diversityScore;
   final double aiTasteScore;
   final double fitScore;
   final double outfitCoherenceScore;
@@ -458,6 +480,7 @@ class Product {
   final String aiConcern;
   final String aiLabel;
   final bool aiRerankFallback;
+  final bool brandFallback;
   final bool isMock;
   final String? requestId;
   final String lookId;
@@ -554,6 +577,9 @@ class Product {
     String? recommendationReason,
     String? matchExplanation,
     double? relevanceScore,
+    double? aestheticScore,
+    double? brandQualityScore,
+    double? diversityScore,
     double? aiTasteScore,
     double? fitScore,
     double? outfitCoherenceScore,
@@ -563,6 +589,7 @@ class Product {
     String? aiConcern,
     String? aiLabel,
     bool? aiRerankFallback,
+    bool? brandFallback,
     bool? isMock,
     String? requestId,
     String? lookId,
@@ -599,6 +626,9 @@ class Product {
       recommendationReason: recommendationReason ?? this.recommendationReason,
       matchExplanation: matchExplanation ?? this.matchExplanation,
       relevanceScore: relevanceScore ?? this.relevanceScore,
+      aestheticScore: aestheticScore ?? this.aestheticScore,
+      brandQualityScore: brandQualityScore ?? this.brandQualityScore,
+      diversityScore: diversityScore ?? this.diversityScore,
       aiTasteScore: aiTasteScore ?? this.aiTasteScore,
       fitScore: fitScore ?? this.fitScore,
       outfitCoherenceScore: outfitCoherenceScore ?? this.outfitCoherenceScore,
@@ -609,6 +639,7 @@ class Product {
       aiConcern: aiConcern ?? this.aiConcern,
       aiLabel: aiLabel ?? this.aiLabel,
       aiRerankFallback: aiRerankFallback ?? this.aiRerankFallback,
+      brandFallback: brandFallback ?? this.brandFallback,
       isMock: isMock ?? this.isMock,
       requestId: requestId ?? this.requestId,
       lookId: lookId ?? this.lookId,
@@ -642,6 +673,9 @@ class Product {
       'recommendationReason': recommendationReason,
       'matchExplanation': matchExplanation,
       'relevanceScore': relevanceScore,
+      'aestheticScore': aestheticScore,
+      'brandQualityScore': brandQualityScore,
+      'diversityScore': diversityScore,
       'aiTasteScore': aiTasteScore,
       'fitScore': fitScore,
       'outfitCoherenceScore': outfitCoherenceScore,
@@ -651,6 +685,7 @@ class Product {
       'aiConcern': aiConcern,
       'aiLabel': aiLabel,
       'aiRerankFallback': aiRerankFallback,
+      'brandFallback': brandFallback,
       'isMock': isMock,
       'requestId': requestId,
       'lookId': lookId,

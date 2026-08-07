@@ -41,6 +41,10 @@ const LOW_VALUE_PRODUCT_GROUPS = Object.freeze([
   ])}),
 ]);
 
+const LOW_QUALITY_TITLE_TERMS = Object.freeze([
+  "厂家", "批发", "清仓", "爆款", "地摊", "学生党", "高仿", "仿款", "仿",
+]);
+
 const CATEGORY_TERMS = Object.freeze({
   top: ["polo", "t恤", "衬衫", "针织衫", "毛衣", "卫衣", "上衣", "背心", "短袖", "长袖"],
   bottom: ["休闲裤", "西裤", "阔腿裤", "牛仔裤", "长裤", "短裤", "九分裤", "半身裙", "裙裤", "裤"],
@@ -119,8 +123,8 @@ function normalizeProductCategory(value) {
   if (/连衣裙|礼服裙|裙装|(^|[^a-z])dress([^a-z]|$)/.test(normalized)) return "dress";
   if (/包|(^|[^a-z])(bag|handbag|tote)([^a-z]|$)/.test(normalized)) return "bag";
   if (/帽|(^|[^a-z])(hat|cap)([^a-z]|$)/.test(normalized)) return "hat";
-  if (/项链|耳环|耳饰|手链|腰带|领带|围巾|手表|配饰/.test(normalized) ||
-      /(^|[^a-z])(accessory|accessories|scarf|watch|belt|tie)([^a-z]|$)/.test(normalized)) {
+  if (/眼镜|墨镜|太阳镜|珠宝|首饰|项链|耳环|耳饰|手链|戒指|腰带|皮带|领带|丝巾|围巾|手表|腕表|配饰/.test(normalized) ||
+      /(^|[^a-z])(accessory|accessories|glasses|sunglasses|jewelry|necklace|earrings?|scarf|watch|belt|tie)([^a-z]|$)/.test(normalized)) {
     return "accessory";
   }
   if (/外套|夹克|西装|大衣|风衣|防晒衣/.test(normalized) ||
@@ -229,6 +233,7 @@ function scoreProduct(product, requirement, searchKeyword = "") {
   if (matchesSeason(title, requirement.season)) score += 5;
   score += Math.min(keywordOverlapScore(title, searchKeyword, requirement), 15);
   score += categoryPriorityScore(requirement.category);
+  if (title.includes("同款")) score -= 10;
 
   const {_category_text: _, ...publicProduct} = product;
   return {
@@ -247,7 +252,16 @@ function productQualityBlock(product, requirement = {}) {
     product?._category_text,
     product?.category,
   ].filter(Boolean).join(" "));
-  if (!evidence || explicitlyRequestsLowValueProduct(requirement)) return null;
+  if (!evidence) return null;
+  const lowQualityKeyword = LOW_QUALITY_TITLE_TERMS.find((term) =>
+    evidence.includes(normalizeText(term)));
+  if (lowQualityKeyword) {
+    return {
+      blocked_category: "low_quality_merchandising",
+      blocked_keyword: lowQualityKeyword,
+    };
+  }
+  if (explicitlyRequestsLowValueProduct(requirement)) return null;
   for (const group of LOW_VALUE_PRODUCT_GROUPS) {
     const blockedKeyword = group.terms.find((term) => evidence.includes(normalizeText(term)));
     if (blockedKeyword) {
@@ -422,6 +436,7 @@ function uniqueStrings(values) {
 
 module.exports = {
   CATEGORY_TERMS,
+  LOW_QUALITY_TITLE_TERMS,
   LOW_VALUE_PRODUCT_GROUPS,
   PRODUCT_CATEGORY_PRIORITY,
   SUPPORTED_PRODUCT_CATEGORIES,

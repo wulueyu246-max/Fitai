@@ -168,8 +168,6 @@ class _AccountPageState extends State<AccountPage> {
                 _FashionIdentityTile(
                   bodyType: account.bodyType,
                   styles: account.likedStyles,
-                  budgetMin: account.budgetMin,
-                  budgetMax: account.budgetMax,
                 ),
               ],
               const Divider(height: 1, indent: 56),
@@ -274,14 +272,10 @@ class _FashionIdentityTile extends StatelessWidget {
   const _FashionIdentityTile({
     required this.bodyType,
     required this.styles,
-    required this.budgetMin,
-    required this.budgetMax,
   });
 
   final String bodyType;
   final List<String> styles;
-  final double budgetMin;
-  final double budgetMax;
 
   @override
   Widget build(BuildContext context) {
@@ -289,9 +283,7 @@ class _FashionIdentityTile extends StatelessWidget {
       leading: const Icon(Icons.face_retouching_natural_outlined),
       title: const Text('AI个人穿搭画像'),
       subtitle: Text(
-        '$bodyType · ${styles.take(2).join(' / ')} · '
-        '预算 ¥${budgetMin.toStringAsFixed(0)}-'
-        '¥${budgetMax.toStringAsFixed(0)}',
+        '$bodyType · ${styles.take(2).join(' / ')}',
       ),
       trailing: const Icon(Icons.chevron_right),
     );

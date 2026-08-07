@@ -98,8 +98,6 @@ class _FirstRunGateState extends State<FirstRunGate> {
         weight: firstLaunchProfile.weight,
         age: firstLaunchProfile.representativeAge,
         occupation: firstLaunchProfile.occupation,
-        budgetMin: firstLaunchProfile.budgetMin,
-        budgetMax: firstLaunchProfile.budgetMax,
         sceneNeeds: sceneNeeds,
       ),
     );
@@ -115,8 +113,6 @@ class _FirstRunGateState extends State<FirstRunGate> {
           'ageRange': firstLaunchProfile.ageRange,
           'occupation': firstLaunchProfile.occupation,
           'scene': firstLaunchProfile.scene,
-          'budgetRange':
-              '${firstLaunchProfile.budgetMin.round()}-${firstLaunchProfile.budgetMax.round()}',
         },
       ),
     ]);

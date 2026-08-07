@@ -214,6 +214,33 @@ test("homepage quality policy blocks underwear and other low-value products", ()
   );
 });
 
+test("low-quality Taobao marketing titles are filtered before ranking", () => {
+  const requirement = normalizeProductRequirement({
+    category: "top",
+    gender: "male",
+    item_name: "男士白色T恤",
+    search_keywords: ["男士 白色 T恤"],
+    negative_keywords: [],
+  });
+  const keywords = ["厂家", "批发", "清仓", "爆款", "地摊", "学生党", "仿"];
+
+  for (const keyword of keywords) {
+    const blocked = productQualityBlock(
+      product(`blocked-${keyword}`, `男士白色T恤 ${keyword}`),
+      requirement,
+    );
+    assert.equal(blocked.blocked_category, "low_quality_merchandising");
+    assert.ok(blocked.blocked_keyword);
+  }
+  assert.deepEqual(
+    rankProducts([
+      product("ordinary", "男士白色纯棉T恤"),
+      product("wholesale", "厂家批发男士白色T恤"),
+    ], requirement, "男士 白色 T恤").map((item) => item.product_id),
+    ["ordinary"],
+  );
+});
+
 test("low-value products are allowed only for an explicit matching search", () => {
   const productItem = product("underwear", "男士纯棉内裤");
   assert.equal(productQualityBlock(productItem, {

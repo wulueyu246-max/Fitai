@@ -10,8 +10,6 @@ void main() {
       ageRange: '25-34',
       occupation: '城市职场',
       scene: '工作',
-      budgetMin: 300,
-      budgetMax: 1500,
     );
 
     final restored = FirstLaunchProfile.fromJson(profile.toJson());
@@ -20,6 +18,5 @@ void main() {
     expect(restored.weight, 50);
     expect(restored.scene, '工作');
     expect(restored.representativeAge, 29);
-    expect(restored.budgetMax, 1500);
   });
 }

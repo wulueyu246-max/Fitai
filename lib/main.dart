@@ -254,7 +254,7 @@ class _MainPageState extends State<MainPage> {
         initialGender: widget.firstLaunchProfile?.gender,
         initialRequest: widget.firstLaunchProfile == null
             ? null
-            : '职业：${widget.firstLaunchProfile!.occupation}；预算：¥${widget.firstLaunchProfile!.budgetMin.round()}-¥${widget.firstLaunchProfile!.budgetMax.round()}',
+            : '职业：${widget.firstLaunchProfile!.occupation}',
       ),
       WardrobePage(
         repository: _wardrobeRepository,

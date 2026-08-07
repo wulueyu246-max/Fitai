@@ -43,6 +43,11 @@ void main() {
             'gender': 'male',
             'scene': 'date',
             'style': 'Clean Fit',
+            'style_direction': index == 1
+                ? '日系极简'
+                : index == 2
+                    ? '韩系高级'
+                    : '轻商务',
             'items': [
               item('top', '浅灰色短袖Polo', '浅灰色'),
               item('bottom', '九分休闲裤', '米白色'),
@@ -54,6 +59,10 @@ void main() {
     });
 
     expect(analysis.looks, hasLength(3));
+    expect(
+      analysis.looks.map((look) => look.styleDirection).toSet(),
+      hasLength(3),
+    );
     expect(analysis.productRequirements, hasLength(12));
     expect(
       analysis.looks.every(
@@ -187,6 +196,63 @@ void main() {
     );
 
     expect(find.byType(OutfitPlanCard), findsNWidgets(3));
+    expect(find.text('日系极简'), findsOneWidget);
+    expect(find.text('造型建议'), findsNWidgets(3));
+    expect(
+      find.text('本套 Look 无需帽子，保持极简轮廓，不增加多余视觉重量'),
+      findsNWidgets(3),
+    );
+  });
+
+  test('American vintage keeps a hat while Clean Fit removes it', () {
+    Map<String, dynamic> lookJson({required bool includeHat}) => {
+          'request_id': includeHat ? 'vintage-request' : 'clean-request',
+          'look_id': includeHat ? 'vintage-look' : 'clean-look',
+          'gender': 'male',
+          'scene': 'date',
+          'style': includeHat ? '美式复古' : 'Clean Fit 极简',
+          'accessories_decision': [
+            {
+              'category': 'hat',
+              'include': includeHat,
+              'reason': includeHat ? '强化美式复古轮廓' : '保持极简轮廓',
+            },
+          ],
+          'items': [
+            {
+              'category': 'top',
+              'gender': 'male',
+              'item_name': '复古衬衫',
+              'search_keywords': ['男士 复古 衬衫'],
+            },
+            {
+              'category': 'bottom',
+              'gender': 'male',
+              'item_name': '直筒裤',
+              'search_keywords': ['男士 复古 直筒裤'],
+            },
+            {
+              'category': 'shoes',
+              'gender': 'male',
+              'item_name': '工装靴',
+              'search_keywords': ['男士 复古 工装靴'],
+            },
+            {
+              'category': 'hat',
+              'gender': 'male',
+              'item_name': '复古牛仔帽',
+              'search_keywords': ['男士 牛仔帽 复古', '美式街头帽'],
+            },
+          ],
+        };
+
+    final vintage = OutfitLook.fromJson(lookJson(includeHat: true));
+    final cleanFit = OutfitLook.fromJson(lookJson(includeHat: false));
+
+    expect(vintage.items.any((item) => item.category == 'hat'), isTrue);
+    expect(cleanFit.items.any((item) => item.category == 'hat'), isFalse);
+    expect(vintage.accessoryDecisions.single.include, isTrue);
+    expect(cleanFit.accessoryDecisions.single.include, isFalse);
   });
 }
 
@@ -219,6 +285,18 @@ OutfitLook _look({
     gender: gender,
     scene: 'date',
     style: style,
+    accessoryDecisions: const [
+      AccessoryDecision(
+        category: 'hat',
+        include: false,
+        reason: '保持极简轮廓，不增加多余视觉重量',
+      ),
+    ],
+    styleDirection: lookId.endsWith('1')
+        ? '日系极简'
+        : lookId.endsWith('2')
+            ? '韩系高级'
+            : '轻商务',
     items: [
       item('top', gender == 'male' ? '短袖Polo' : '短款针织衫'),
       item('bottom', gender == 'male' ? '九分休闲裤' : '高腰阔腿裤'),

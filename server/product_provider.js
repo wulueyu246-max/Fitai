@@ -261,10 +261,14 @@ class TaobaoProductProvider extends ProductProvider {
       products = uniqueProducts([...products, ...sampled])
         .sort((left, right) => right.relevance_score - left.relevance_score);
     }
-    const budget = Number(filters.budget);
-    const hardFiltered = Number.isFinite(budget) && budget > 0
-      ? products.filter((product) => Number(product.price) <= budget)
-      : products;
+    const budgetAssessed = products
+      .map((product) => ({
+        ...product,
+        ...budgetPreferenceAssessment(product, filters.budget),
+      }))
+      .sort((left, right) =>
+        right.budget_preference_score - left.budget_preference_score ||
+        right.relevance_score - left.relevance_score);
     this.logger.info?.("淘宝返回候选", {
       requestId: filters.requestId || undefined,
       look_id: requirement.look_id || undefined,
@@ -272,9 +276,10 @@ class TaobaoProductProvider extends ProductProvider {
       gender: requirement.gender,
       category: requirement.category,
       candidateCount: products.length,
-      hardFilteredCount: hardFiltered.length,
+      budgetPreferredCount: budgetAssessed.filter((product) =>
+        product.budget_preference_score >= 80).length,
     });
-    return hardFiltered.slice(0, candidateLimit);
+    return budgetAssessed.slice(0, candidateLimit);
   }
 
   async #search(filters) {
@@ -286,7 +291,6 @@ class TaobaoProductProvider extends ProductProvider {
         page_no: String(filters.pageNo || 1),
         page_size: String(filters.limit),
         platform: "2",
-        ...(filters.budget > 0 ? {end_price: String(filters.budget)} : {}),
       }, {
         requestId: filters.requestId || undefined,
         provider: "taobao",
@@ -950,6 +954,40 @@ function asProductProviderError(error) {
   });
 }
 
+function budgetPreferenceAssessment(product, preferredMaximum) {
+  const price = Number(product?.price);
+  const budget = Number(preferredMaximum);
+  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(budget) || budget <= 0) {
+    return {
+      budget_preference_score: 70,
+      budget_note: "",
+    };
+  }
+  if (price <= budget) {
+    return {
+      budget_preference_score: 100,
+      budget_note: "",
+    };
+  }
+  const ratio = price / budget;
+  if (ratio <= 1.2) {
+    return {
+      budget_preference_score: 80,
+      budget_note: `价格略高于单品预算（约 ¥${Math.round(budget)}），但可因品质或搭配效果考虑。`,
+    };
+  }
+  if (ratio <= 1.5) {
+    return {
+      budget_preference_score: 55,
+      budget_note: `价格高于单品预算（约 ¥${Math.round(budget)}），建议确认材质、品牌与使用频率后再选择。`,
+    };
+  }
+  return {
+    budget_preference_score: 30,
+    budget_note: `价格明显高于单品预算（约 ¥${Math.round(budget)}），仅在设计或品质优势明确时考虑。`,
+  };
+}
+
 module.exports = {
   AutoProductProvider,
   MockProductProvider,
@@ -957,6 +995,7 @@ module.exports = {
   ProductProviderError,
   TaobaoProductProvider,
   UnavailableProductProvider,
+  budgetPreferenceAssessment,
   createProductProvider,
   extractTaobaoItems,
   mapTaobaoProduct,

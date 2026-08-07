@@ -41,6 +41,8 @@ void main() {
       expect(body['height'], 170);
       expect(body['weight'], 60);
       expect(body['scene'], '日常');
+      expect(body['item_budget'], '200-500');
+      expect(body['outfit_budget'], '800-1500');
       expect((body['images'] as Map)['front'], startsWith('data:image/jpeg'));
 
       return http.Response(
@@ -134,6 +136,8 @@ void main() {
       'scene': '工作',
       'request': '生成通勤穿搭',
       'gender': 'unisex',
+      'item_budget': '200-500',
+      'outfit_budget': '800-1500',
       'images': {
         'front': 'data:image/jpeg;base64,AA==',
       },

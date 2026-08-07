@@ -6,8 +6,6 @@ class FirstLaunchProfile {
     required this.ageRange,
     required this.occupation,
     required this.scene,
-    required this.budgetMin,
-    required this.budgetMax,
   });
 
   factory FirstLaunchProfile.fromJson(Map<String, dynamic> json) {
@@ -25,8 +23,6 @@ class FirstLaunchProfile {
       ageRange: json['ageRange'] as String? ?? '25-34',
       occupation: json['occupation'] as String? ?? '城市职场',
       scene: json['scene'] as String? ?? '日常',
-      budgetMin: number('budgetMin', 200),
-      budgetMax: number('budgetMax', 1200),
     );
   }
 
@@ -36,8 +32,6 @@ class FirstLaunchProfile {
   final String ageRange;
   final String occupation;
   final String scene;
-  final double budgetMin;
-  final double budgetMax;
 
   int get representativeAge {
     final first = int.tryParse(ageRange.split('-').first);
@@ -52,8 +46,6 @@ class FirstLaunchProfile {
       'ageRange': ageRange,
       'occupation': occupation,
       'scene': scene,
-      'budgetMin': budgetMin,
-      'budgetMax': budgetMax,
     };
   }
 }

@@ -17,6 +17,7 @@ import '../models/outfit.dart';
 import '../models/outfit_plan.dart';
 import '../models/outfit_request.dart';
 import '../models/outfit_generation_state.dart';
+import '../models/shopping_budget.dart';
 import '../models/product.dart';
 import '../models/product_analytics.dart';
 import '../models/recommendation_feedback.dart';
@@ -113,6 +114,8 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
     'back': '背面照',
   };
   late String _scene;
+  String _itemBudget = '200-500';
+  String _outfitBudget = '800-1500';
 
   XFile? _frontImage;
 
@@ -712,6 +715,8 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         weight: weight,
         scene: _scene,
         gender: _resolvedProfileGender,
+        itemBudget: _itemBudget,
+        outfitBudget: _outfitBudget,
         request: [userRequest, weatherInstruction]
             .where((value) => value.isNotEmpty)
             .join(' '),
@@ -1501,6 +1506,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
 
   Widget _buildBodyInfo() {
     return Container(
+      key: const Key('ai-body-info'),
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -1544,6 +1550,68 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
                   ),
                 ),
               ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBudgetSelector() {
+    return Container(
+      key: const Key('ai-request-budget'),
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '本次预算',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            '仅用于本次 Look 与商品推荐，不会保存到个人资料。',
+            style: TextStyle(color: Colors.black54, height: 1.4),
+          ),
+          const SizedBox(height: 16),
+          const Text('单品预算', style: TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final option in itemBudgetOptions)
+                ChoiceChip(
+                  key: Key('ai-item-budget-$option'),
+                  label: Text(option),
+                  selected: _itemBudget == option,
+                  onSelected: _isGenerating
+                      ? null
+                      : (_) => setState(() => _itemBudget = option),
+                ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          const Text('整套预算', style: TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final option in outfitBudgetOptions)
+                ChoiceChip(
+                  key: Key('ai-outfit-budget-$option'),
+                  label: Text(option),
+                  selected: _outfitBudget == option,
+                  onSelected: _isGenerating
+                      ? null
+                      : (_) => setState(() => _outfitBudget = option),
+                ),
             ],
           ),
         ],
@@ -1647,6 +1715,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
 
   Widget _buildPhotoSection() {
     return Column(
+      key: const Key('ai-photo-scan'),
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
@@ -2131,6 +2200,8 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
                       _buildSceneSelector(),
                       const SizedBox(height: 28),
                       _buildBodyInfo(),
+                      const SizedBox(height: 28),
+                      _buildBudgetSelector(),
                       const SizedBox(height: 28),
                       _buildPhotoSection(),
                       const SizedBox(height: 28),

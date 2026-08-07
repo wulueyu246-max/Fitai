@@ -23,7 +23,6 @@ class _OnboardingPageState extends State<OnboardingPage> {
   String _ageRange = '25-34';
   String _occupation = '城市职场';
   String _scene = '日常';
-  RangeValues _budget = const RangeValues(200, 1200);
   bool _submitting = false;
 
   static const _scenes = ['日常', '工作', '约会', '聚会', '旅行'];
@@ -88,8 +87,6 @@ class _OnboardingPageState extends State<OnboardingPage> {
       ageRange: _ageRange,
       occupation: _occupation,
       scene: _scene,
-      budgetMin: _budget.start,
-      budgetMax: _budget.end,
     );
     setState(() => _submitting = true);
     try {
@@ -142,7 +139,6 @@ class _OnboardingPageState extends State<OnboardingPage> {
                     gender: _gender,
                     ageRange: _ageRange,
                     occupation: _occupation,
-                    budget: _budget,
                     heightController: _height,
                     weightController: _weight,
                     onSceneSelected: (value) => setState(() => _scene = value),
@@ -152,7 +148,6 @@ class _OnboardingPageState extends State<OnboardingPage> {
                         setState(() => _ageRange = value),
                     onOccupationSelected: (value) =>
                         setState(() => _occupation = value),
-                    onBudgetChanged: (value) => setState(() => _budget = value),
                   ),
                 ],
               ),
@@ -302,14 +297,12 @@ class _FirstTaskPage extends StatelessWidget {
     required this.gender,
     required this.ageRange,
     required this.occupation,
-    required this.budget,
     required this.heightController,
     required this.weightController,
     required this.onSceneSelected,
     required this.onGenderSelected,
     required this.onAgeRangeSelected,
     required this.onOccupationSelected,
-    required this.onBudgetChanged,
   });
 
   final List<String> scenes;
@@ -317,14 +310,12 @@ class _FirstTaskPage extends StatelessWidget {
   final String gender;
   final String ageRange;
   final String occupation;
-  final RangeValues budget;
   final TextEditingController heightController;
   final TextEditingController weightController;
   final ValueChanged<String> onSceneSelected;
   final ValueChanged<String> onGenderSelected;
   final ValueChanged<String> onAgeRangeSelected;
   final ValueChanged<String> onOccupationSelected;
-  final ValueChanged<RangeValues> onBudgetChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -463,19 +454,6 @@ class _FirstTaskPage extends StatelessWidget {
                       ),
                     ),
                 ],
-              ),
-              const SizedBox(height: 16),
-              _FieldLabel(
-                '预算 ¥${budget.start.toStringAsFixed(0)} - '
-                '¥${budget.end.toStringAsFixed(0)}',
-              ),
-              RangeSlider(
-                key: const Key('onboarding-budget'),
-                values: budget,
-                min: 0,
-                max: 3000,
-                divisions: 30,
-                onChanged: onBudgetChanged,
               ),
             ],
           ),
