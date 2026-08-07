@@ -1,9 +1,12 @@
 class ProductSearchRequirement {
   const ProductSearchRequirement({
+    this.lookId = '',
     required this.category,
     required this.gender,
     required this.itemName,
     required this.color,
+    this.fit = '',
+    this.material = '',
     required this.style,
     required this.season,
     required this.scene,
@@ -27,12 +30,17 @@ class ProductSearchRequirement {
         json['searchKeywords'] ??
         (legacyKeyword == null ? const <String>[] : [legacyKeyword]);
     return ProductSearchRequirement(
+      lookId: _optionalString(json['look_id']) ??
+          _optionalString(json['lookId']) ??
+          '',
       category: _requiredString(json['category'], 'category'),
       gender: _normalizeGender(
         _optionalString(json['gender']) ?? fallbackGender,
       ),
       itemName: itemName,
       color: _optionalString(json['color']) ?? '',
+      fit: _optionalString(json['fit']) ?? '',
+      material: _optionalString(json['material']) ?? '',
       style: _optionalString(json['style']) ?? '',
       season: _optionalString(json['season']) ?? '',
       scene: _optionalString(json['scene']) ?? '',
@@ -44,10 +52,13 @@ class ProductSearchRequirement {
     );
   }
 
+  final String lookId;
   final String category;
   final String gender;
   final String itemName;
   final String color;
+  final String fit;
+  final String material;
   final String style;
   final String season;
   final String scene;
@@ -55,10 +66,13 @@ class ProductSearchRequirement {
   final List<String> negativeKeywords;
 
   Map<String, dynamic> toJson() => {
+        'look_id': lookId,
         'category': category,
         'gender': gender,
         'item_name': itemName,
         'color': color,
+        'fit': fit,
+        'material': material,
         'style': style,
         'season': season,
         'scene': scene,

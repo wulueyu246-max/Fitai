@@ -129,10 +129,12 @@ function normalizeProductRequirement(input = {}, context = {}) {
     30,
   );
   return {
+    look_id: optionalText(input.look_id || input.lookId || context.look_id || context.lookId, "look_id"),
     category,
     gender,
     item_name: itemName,
     color: optionalText(input.color || context.color, "color"),
+    material: optionalText(input.material || context.material, "material"),
     style: optionalText(input.style || context.style, "style"),
     season: normalizeSeason(input.season || context.season),
     scene: optionalText(input.scene || context.scene, "scene"),
@@ -192,6 +194,7 @@ function scoreProduct(product, requirement, searchKeyword = "") {
   const {_category_text: _, ...publicProduct} = product;
   return {
     ...publicProduct,
+    look_id: requirement.look_id,
     category: requirement.category,
     gender: requirement.gender,
     search_keyword: normalizeWhitespace(searchKeyword),

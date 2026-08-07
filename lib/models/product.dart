@@ -149,6 +149,7 @@ class Product {
     this.aiRerankFallback = false,
     this.isMock = false,
     this.requestId,
+    this.lookId = '',
     String? purchaseUrl,
     double? commission,
     double? commissionRate,
@@ -326,6 +327,11 @@ class Product {
         ['requestId', 'request_id'],
         fallback: '',
       ),
+      lookId: _readOptionalAliasedString(
+        json,
+        ['lookId', 'look_id'],
+        fallback: '',
+      ),
       tryOnAvailable: json['tryOnAvailable'] as bool? ??
           json['try_on_available'] as bool? ??
           true,
@@ -411,6 +417,7 @@ class Product {
   final bool aiRerankFallback;
   final bool isMock;
   final String? requestId;
+  final String lookId;
   final int stock;
   final String description;
   final String style;
@@ -511,6 +518,7 @@ class Product {
     bool? aiRerankFallback,
     bool? isMock,
     String? requestId,
+    String? lookId,
     double? commission,
     double? commissionRate,
   }) {
@@ -556,6 +564,7 @@ class Product {
       aiRerankFallback: aiRerankFallback ?? this.aiRerankFallback,
       isMock: isMock ?? this.isMock,
       requestId: requestId ?? this.requestId,
+      lookId: lookId ?? this.lookId,
       commissionRate: commissionRate ?? commission ?? this.commissionRate,
     );
   }
@@ -597,6 +606,7 @@ class Product {
       'aiRerankFallback': aiRerankFallback,
       'isMock': isMock,
       'requestId': requestId,
+      'lookId': lookId,
       'stock': stock,
       'description': description,
       'style': style,

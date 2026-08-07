@@ -298,6 +298,20 @@ class _FailingProductService extends _BaseProductService {
 
 abstract class _BaseProductService implements ProductService {
   @override
+  Future<List<OutfitPlan>> createOutfitPlans({
+    required List<Product> products,
+    required OutfitAnalysis analysis,
+    required OutfitRequest request,
+  }) async =>
+      [
+        await createOutfitPlan(
+          products: products,
+          analysis: analysis,
+          request: request,
+        ),
+      ];
+
+  @override
   Future<OutfitPlan> createOutfitPlan({
     required List<Product> products,
     required OutfitAnalysis analysis,

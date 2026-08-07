@@ -1,5 +1,6 @@
 import '../data/mock_product_database.dart';
 import '../models/outfit_plan.dart';
+import '../models/outfit_look.dart';
 import '../models/outfit_post.dart';
 import '../models/product.dart';
 import '../models/user_preference.dart';
@@ -100,6 +101,8 @@ class RecommendationService {
     required String scene,
     String requestId = '',
     String gender = 'unisex',
+    String lookId = '',
+    List<Product> additionalProducts = const [],
     DateTime? createdTime,
     List<Product>? catalog,
   }) {
@@ -139,8 +142,59 @@ class RecommendationService {
       style: normalizedStyle,
       gender: gender,
       requestId: requestId.trim(),
+      lookId: lookId.trim(),
+      additionalProducts: additionalProducts,
       matchScore: 88 + (products.length.clamp(3, 10) - 3),
     );
+  }
+
+  List<OutfitPlan> buildOutfitPlans({
+    required List<Product> products,
+    required List<OutfitLook> looks,
+    required String requestId,
+    required String gender,
+    DateTime? createdTime,
+  }) {
+    final plans = <OutfitPlan>[];
+    for (final look in looks) {
+      if (!look.matches(requestId: requestId, gender: gender)) continue;
+      final lookProducts = products
+          .where((product) => product.lookId == look.lookId)
+          .toList(growable: false);
+      final categories =
+          lookProducts.map((product) => product.wardrobeSlot).toSet();
+      if (!categories.contains(ProductCategory.top) ||
+          !categories.contains(ProductCategory.bottom) ||
+          !categories.contains(ProductCategory.shoes)) {
+        continue;
+      }
+      final extras = <Product>[];
+      for (final category in const [
+        ProductCategory.outerwear,
+        ProductCategory.accessories,
+      ]) {
+        final matches = lookProducts.where(
+          (product) => product.wardrobeSlot == category,
+        );
+        if (matches.isNotEmpty) extras.add(matches.first);
+      }
+      plans.add(
+        buildOutfitPlan(
+          products: lookProducts,
+          style: look.style,
+          scene: look.scene,
+          requestId: requestId,
+          gender: gender,
+          lookId: look.lookId,
+          additionalProducts: extras,
+          createdTime: createdTime,
+        ),
+      );
+    }
+    if (plans.isEmpty) {
+      throw StateError('当前商品没有组成与 AI Look 对应的完整搭配');
+    }
+    return List<OutfitPlan>.unmodifiable(plans);
   }
 
   List<OutfitPost> recommendPosts({

@@ -381,6 +381,128 @@ test("preserves a male AI gender when a product omits its gender", () => {
   ]);
 });
 
+test("AI designs three complete male Clean Fit looks before product matching", () => {
+  const item = (category, itemName, color) => ({
+    category,
+    item_name: itemName,
+    color,
+    fit: "合体",
+    material: "棉混纺",
+    style: "Clean Fit",
+    season: "summer",
+    scene: "date",
+    search_keywords: [`${color} ${itemName}`, `Clean Fit ${itemName}`],
+    negative_keywords: ["女装", "吊带", "连衣裙"],
+  });
+  const looks = [1, 2, 3].map((index) => ({
+    look_id: `male-clean-${index}`,
+    gender: "male",
+    scene: "date",
+    style: "Clean Fit",
+    items: [
+      item("top", "短袖Polo", "浅灰色"),
+      item("bottom", "九分休闲裤", "米白色"),
+      item("shoes", "德训鞋", "白色"),
+      item("accessory", "简约腕表", "银色"),
+    ],
+  }));
+
+  const analysis = parseOutfitAnalysis(JSON.stringify({
+    gender: "male",
+    bodyProfile: "男性身体比例分析",
+    style: "Clean Fit",
+    recommendations: {
+      top: "浅灰 Polo",
+      bottom: "米白休闲裤",
+      shoes: "白色德训鞋",
+      accessories: "简约腕表",
+      summary: "夏季约会完整搭配",
+    },
+    looks,
+  }), {
+    gender: "male",
+    scene: "date",
+    requestId: "request-male-clean",
+  });
+
+  assert.equal(analysis.looks.length, 3);
+  assert.equal(analysis.products.length, 12);
+  assert.ok(analysis.looks.every((look) =>
+    look.request_id === "request-male-clean" && look.gender === "male"));
+  assert.ok(analysis.products.every((product) =>
+    product.gender === "male" && product.search_keywords.every((keyword) => keyword.startsWith("男士"))));
+});
+
+test("female French looks remain grouped through product search requirements", () => {
+  const result = productRecommendationRequest({
+    gender: "female",
+    style: "法式",
+    scene: "约会",
+    looks: [{
+      look_id: "female-french-1",
+      gender: "female",
+      style: "法式",
+      scene: "约会",
+      items: [
+        {
+          category: "top",
+          item_name: "短款针织衫",
+          color: "米白色",
+          fit: "短款合体",
+          material: "针织",
+          search_keywords: ["女士 米白色 短款针织衫"],
+          negative_keywords: ["男装"],
+        },
+        {
+          category: "bottom",
+          item_name: "高腰阔腿裤",
+          color: "杏色",
+          search_keywords: ["女士 杏色 高腰阔腿裤"],
+          negative_keywords: ["男装"],
+        },
+        {
+          category: "shoes",
+          item_name: "玛丽珍鞋",
+          color: "黑色",
+          search_keywords: ["女士 黑色 玛丽珍鞋"],
+          negative_keywords: ["男鞋"],
+        },
+        {
+          category: "bag",
+          item_name: "法式腋下包",
+          color: "棕色",
+          search_keywords: ["女士 棕色 法式腋下包"],
+          negative_keywords: ["男包"],
+        },
+      ],
+    }],
+  }, "request-female-french");
+
+  assert.equal(result.looks.length, 1);
+  assert.equal(result.items.length, 4);
+  assert.ok(result.items.every((item) =>
+    item.look_id === "female-french-1" && item.gender === "female"));
+  assert.equal(result.items[0].fit, "短款合体");
+  assert.equal(result.items[0].material, "针织");
+});
+
+test("product search rejects an opposite-gender Look before Taobao is called", () => {
+  assert.throws(() => productRecommendationRequest({
+    gender: "male",
+    looks: [{
+      look_id: "wrong-gender-look",
+      gender: "female",
+      scene: "date",
+      style: "法式",
+      items: [
+        {category: "top", item_name: "针织衫", search_keywords: ["女士 针织衫"], negative_keywords: []},
+        {category: "bottom", item_name: "半身裙", search_keywords: ["女士 半身裙"], negative_keywords: []},
+        {category: "shoes", item_name: "玛丽珍鞋", search_keywords: ["女士 玛丽珍鞋"], negative_keywords: []},
+      ],
+    }],
+  }, "request-male"), /conflicts with request gender/);
+});
+
 test("accepts structured product requirements with normalized gender", () => {
   const result = productRecommendationRequest({
     gender: "女士",

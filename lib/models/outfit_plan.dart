@@ -13,6 +13,8 @@ class OutfitPlan {
     this.style = '',
     this.gender = 'unisex',
     this.requestId = '',
+    this.lookId = '',
+    this.additionalProducts = const [],
     this.matchScore = 90,
   });
 
@@ -30,6 +32,8 @@ class OutfitPlan {
       gender: _normalizeGender(json['gender'] as String?),
       requestId:
           (json['request_id'] ?? json['requestId'])?.toString().trim() ?? '',
+      lookId: (json['look_id'] ?? json['lookId'])?.toString().trim() ?? '',
+      additionalProducts: _readAdditionalProducts(json),
       matchScore: (json['matchScore'] as num?)?.round() ?? 90,
     );
   }
@@ -45,6 +49,8 @@ class OutfitPlan {
   final String style;
   final String gender;
   final String requestId;
+  final String lookId;
+  final List<Product> additionalProducts;
   final int matchScore;
 
   String get look => title;
@@ -53,6 +59,7 @@ class OutfitPlan {
         top,
         bottom,
         shoes,
+        ...additionalProducts,
       ]);
 
   OutfitPlan replaceProduct(Product product) {
@@ -68,6 +75,10 @@ class OutfitPlan {
       style: style,
       gender: gender,
       requestId: requestId,
+      lookId: lookId,
+      additionalProducts: additionalProducts
+          .map((item) => item.id == product.id ? product : item)
+          .toList(growable: false),
       matchScore: matchScore,
     );
   }
@@ -96,6 +107,9 @@ class OutfitPlan {
       'style': style,
       'gender': gender,
       'request_id': requestId,
+      'look_id': lookId,
+      'additionalProducts':
+          additionalProducts.map((product) => product.toJson()).toList(),
       'matchScore': matchScore,
       'createdTime': createdTime.toIso8601String(),
     };
@@ -107,5 +121,13 @@ class OutfitPlan {
       'female' || '女' || '女性' || '女士' => 'female',
       _ => 'unisex',
     };
+  }
+
+  static List<Product> _readAdditionalProducts(Map<String, dynamic> json) {
+    final value = json['additionalProducts'] ?? json['additional_products'];
+    if (value is! List) return const [];
+    return List<Product>.unmodifiable(
+      value.whereType<Map<String, dynamic>>().map(Product.fromJson),
+    );
   }
 }

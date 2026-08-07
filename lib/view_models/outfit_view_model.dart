@@ -47,6 +47,10 @@ class OutfitViewModel extends ChangeNotifier {
         productRecommendations: const [],
         requestId: effectiveRequestId,
         outfitPlan: null,
+        outfitPlans: const [],
+        looks: response.looks
+            .map((look) => look.copyWith(requestId: effectiveRequestId))
+            .toList(growable: false),
       );
       _requestId = effectiveRequestId;
       return true;
@@ -66,6 +70,7 @@ class OutfitViewModel extends ChangeNotifier {
   bool attachRecommendations(
     List<Product> products, {
     OutfitPlan? outfitPlan,
+    List<OutfitPlan> outfitPlans = const [],
     required String expectedRequestId,
     required String expectedGender,
   }) {
@@ -78,13 +83,25 @@ class OutfitViewModel extends ChangeNotifier {
             !outfitPlan.matchesCurrentResult(
               requestId: expectedRequestId,
               gender: expectedGender,
-            ))) {
+            )) ||
+        outfitPlans.any(
+          (plan) => !plan.matchesCurrentResult(
+            requestId: expectedRequestId,
+            gender: expectedGender,
+          ),
+        )) {
       return false;
     }
 
+    final effectivePlans = outfitPlans.isNotEmpty
+        ? List<OutfitPlan>.unmodifiable(outfitPlans)
+        : outfitPlan == null
+            ? analysis.outfitPlans
+            : List<OutfitPlan>.unmodifiable([outfitPlan]);
     _analysis = analysis.copyWith(
       recommendedProducts: List<Product>.unmodifiable(products),
-      outfitPlan: outfitPlan,
+      outfitPlan: effectivePlans.isEmpty ? outfitPlan : effectivePlans.first,
+      outfitPlans: effectivePlans,
     );
     _notifyListeners();
     return true;
@@ -111,7 +128,13 @@ class OutfitViewModel extends ChangeNotifier {
     if (analysis == null || plan == null) {
       return;
     }
-    _analysis = analysis.copyWith(outfitPlan: plan.replaceProduct(product));
+    final updated = plan.replaceProduct(product);
+    _analysis = analysis.copyWith(
+      outfitPlan: updated,
+      outfitPlans: analysis.outfitPlans
+          .map((item) => item.id == plan.id ? updated : item)
+          .toList(growable: false),
+    );
     _notifyListeners();
   }
 

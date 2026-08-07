@@ -279,7 +279,11 @@ class RemoteBrandProductService implements BrandProductService {
           final id = product['product_id']?.toString() ??
               product['id']?.toString() ??
               '';
-          if (id.isEmpty || ids.add(id)) products.add(product);
+          final lookId = product['look_id']?.toString() ??
+              product['lookId']?.toString() ??
+              '';
+          final scopedId = '$lookId:$id';
+          if (id.isEmpty || ids.add(scopedId)) products.add(product);
         }
       }
       if (products.isNotEmpty) return products;

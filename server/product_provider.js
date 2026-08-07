@@ -174,7 +174,7 @@ class TaobaoProductProvider extends ProductProvider {
   async recommendForQueries(queries, context = {}) {
     const values = Array.isArray(queries) ? queries : [];
     if (values.length === 0) return [];
-    if (values.length > 8) {
+    if (values.length > 24) {
       throw new ProductProviderError("商品需求不能超过 8 项", {
         status: 400,
         code: "INVALID_PRODUCT_REQUIREMENTS",
@@ -199,6 +199,12 @@ class TaobaoProductProvider extends ProductProvider {
           selectionLimit: 6,
         })
         : groups.flatMap((group) => group.candidates.slice(0, 6));
+      this.logger.info?.("AI最终选择", {
+        requestId: context.requestId || undefined,
+        provider: "taobao",
+        selectedCount: products.length,
+        looks: summarizeProductsByLook(products),
+      });
       this.status = "taobao";
       return uniqueProducts(products).slice(0, values.length * 6);
     } catch (error) {
@@ -218,6 +224,7 @@ class TaobaoProductProvider extends ProductProvider {
     const keywords = buildSearchKeywords(requirement);
     this.logger.info?.("淘宝商品搜索需求", {
       requestId: filters.requestId || undefined,
+      look_id: requirement.look_id || undefined,
       search_requirement_gender: requirement.gender,
       search_keywords: keywords,
       category: requirement.category,
@@ -255,8 +262,9 @@ class TaobaoProductProvider extends ProductProvider {
     const hardFiltered = Number.isFinite(budget) && budget > 0
       ? products.filter((product) => Number(product.price) <= budget)
       : products;
-    this.logger.info?.("淘宝候选商品池完成", {
+    this.logger.info?.("淘宝返回候选", {
       requestId: filters.requestId || undefined,
+      look_id: requirement.look_id || undefined,
       search_keyword: keywords[0],
       gender: requirement.gender,
       category: requirement.category,
@@ -530,9 +538,11 @@ function normalizeFilters(filters = {}) {
     fit: text(filters.fit, "fit"),
     season: text(filters.season, "season"),
     requestId: text(filters.requestId, "requestId"),
+    lookId: text(filters.look_id ?? filters.lookId, "look_id"),
     budget: optionalNumber(filters.budget) || 0,
     keyword: text(filters.keyword, "keyword"),
     itemName: text(filters.item_name ?? filters.itemName, "item_name"),
+    material: text(filters.material, "material"),
     searchKeywords: normalizeFilterList(
       filters.search_keywords ?? filters.searchKeywords,
       "search_keywords",
@@ -851,10 +861,20 @@ function uniqueProducts(products) {
   const seen = new Set();
   return products.filter((product) => {
     const id = product?.product_id || product?.id;
-    if (!id || seen.has(id)) return false;
-    seen.add(id);
+    const key = `${product?.look_id || ""}:${id || ""}`;
+    if (!id || seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
+}
+
+function summarizeProductsByLook(products) {
+  const counts = {};
+  for (const product of products) {
+    const lookId = String(product?.look_id || "unbound");
+    counts[lookId] = (counts[lookId] || 0) + 1;
+  }
+  return counts;
 }
 
 function requireConfig(value, field) {

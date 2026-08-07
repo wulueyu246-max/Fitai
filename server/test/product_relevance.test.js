@@ -166,3 +166,25 @@ test("AI candidate mode admits neutral low-score items without weakening hard fi
     ["neutral"],
   );
 });
+
+test("ranked candidates keep the AI Look identity and material requirement", () => {
+  const ranked = rankProducts([
+    product("look-polo", "男士浅灰色短袖Polo夏季上衣"),
+  ], {
+    look_id: "look-male-clean-1",
+    category: "top",
+    gender: "male",
+    item_name: "浅灰色短袖Polo",
+    color: "浅灰色",
+    fit: "合体",
+    material: "珠地棉",
+    style: "clean fit",
+    season: "summer",
+    search_keywords: ["男士 浅灰色 短袖 Polo"],
+    negative_keywords: ["女装", "吊带"],
+  }, "男士 浅灰色 短袖 Polo");
+
+  assert.equal(ranked.length, 1);
+  assert.equal(ranked[0].look_id, "look-male-clean-1");
+  assert.equal(ranked[0].gender, "male");
+});

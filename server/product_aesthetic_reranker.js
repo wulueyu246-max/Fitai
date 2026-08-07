@@ -228,7 +228,7 @@ function buildMessages(groups, context) {
       "color_preferences", "colorPreferences", "user_input", "userInput",
     ]),
     outfit_plan: pickFields(context.outfit_plan || context.outfitPlan || {}, [
-      "top", "bottom", "dress", "shoes", "outerwear", "bag", "accessories", "summary",
+      "looks", "top", "bottom", "dress", "shoes", "outerwear", "bag", "accessories", "summary",
     ]),
     product_groups: groups.map((group, index) => ({
       requirement_index: index,
@@ -237,6 +237,7 @@ function buildMessages(groups, context) {
       requirement: compactObject(group.requirement),
       candidates: group.candidates.map((product) => compactObject({
         product_id: product.product_id,
+        look_id: product.look_id,
         title: product.title,
         price: product.price,
         image_url: product.image_url,
@@ -250,6 +251,7 @@ function buildMessages(groups, context) {
     {
       role: "system",
       content: [
+        "Each selected_products entry must include the source requirement_index and product_id.",
         "你是 FitAI 商品审美复选器。只能从候选商品中选择，不得编造或修改 product_id。",
         "综合整套穿搭、用户身材比例、性别、场景、季节、预算、颜色、版型、材质和设计语言判断。",
         "淘汰廉价感明显、设计杂乱、印花夸张、版型冲突或与整套不协调的商品。男性和女性规则必须由输入决定。",
@@ -270,17 +272,28 @@ function validateSelection(payload, groups, selectionLimit) {
     throw new Error("AI_RERANK_INVALID_RESPONSE");
   }
   const candidates = new Map();
+  const productGroups = new Map();
   groups.forEach((group, groupIndex) => {
     group.candidates.forEach((product) => {
-      candidates.set(String(product.product_id), {product, groupIndex});
+      const id = String(product.product_id);
+      candidates.set(`${groupIndex}:${id}`, {product, groupIndex});
+      const indexes = productGroups.get(id) || [];
+      indexes.push(groupIndex);
+      productGroups.set(id, indexes);
     });
   });
   const selectedByGroup = groups.map(() => []);
   const seen = new Set();
   for (const item of payload.selected_products) {
     const id = String(item?.product_id || "").trim();
-    const match = candidates.get(id);
-    if (!match || seen.has(id)) continue;
+    const requestedGroup = Number(item?.requirement_index);
+    const inferredGroups = productGroups.get(id) || [];
+    const groupIndex = Number.isInteger(requestedGroup) && requestedGroup >= 0
+      ? requestedGroup
+      : inferredGroups.length === 1 ? inferredGroups[0] : -1;
+    const match = candidates.get(`${groupIndex}:${id}`);
+    const selectionKey = `${groupIndex}:${id}`;
+    if (!match || seen.has(selectionKey)) continue;
     const values = {
       ai_taste_score: score(item.ai_taste_score),
       fit_score: score(item.fit_score),
@@ -290,7 +303,7 @@ function validateSelection(payload, groups, selectionLimit) {
     if (Object.values(values).some((value) => value == null)) continue;
     const groupProducts = selectedByGroup[match.groupIndex];
     if (groupProducts.length >= selectionLimit) continue;
-    seen.add(id);
+    seen.add(selectionKey);
     const finalScore = roundScore(
       Number(match.product.relevance_score || 0) * 0.2 +
       values.ai_taste_score * 0.35 +
@@ -316,18 +329,22 @@ function validateSelection(payload, groups, selectionLimit) {
 }
 
 function groupsBelowMinimum(groups, products) {
-  const selectedIds = new Set(products.map((product) => String(product.product_id)));
+  const selectedIds = new Set(products.map(productGroupKey));
   return groups.filter((group) => group.candidates.length >= 4 &&
-    group.candidates.filter((product) => selectedIds.has(String(product.product_id))).length < 4);
+    group.candidates.filter((product) => selectedIds.has(productGroupKey(product))).length < 4);
 }
 
 function replaceGroupProducts(products, replacements, groups) {
   const groupIds = new Set(groups.flatMap((group) =>
-    group.candidates.map((product) => String(product.product_id))));
+    group.candidates.map(productGroupKey)));
   return [
-    ...products.filter((product) => !groupIds.has(String(product.product_id))),
+    ...products.filter((product) => !groupIds.has(productGroupKey(product))),
     ...replacements,
   ];
+}
+
+function productGroupKey(product) {
+  return `${product?.look_id || ""}:${product?.product_id || ""}`;
 }
 
 function ruleFallback(groups, selectionLimit) {
@@ -371,9 +388,7 @@ function normalizeGroups(groups, selectionLimit) {
 }
 
 function buildCacheKey(groups, context) {
-  const normalizedContext = compactObject(context);
-  delete normalizedContext.requestId;
-  delete normalizedContext.request_id;
+  const normalizedContext = stripRequestIds(compactObject(context));
   const key = JSON.stringify({
     context: normalizedContext,
     groups: groups.map((group) => ({
@@ -386,6 +401,14 @@ function buildCacheKey(groups, context) {
     })),
   });
   return crypto.createHash("sha256").update(key).digest("hex");
+}
+
+function stripRequestIds(value) {
+  if (Array.isArray(value)) return value.map(stripRequestIds);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => key !== "requestId" && key !== "request_id")
+    .map(([key, item]) => [key, stripRequestIds(item)]));
 }
 
 function parseJsonResponse(text) {

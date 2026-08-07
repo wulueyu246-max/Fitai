@@ -42,6 +42,12 @@ abstract interface class ProductService {
     required OutfitAnalysis analysis,
     required OutfitRequest request,
   });
+
+  Future<List<OutfitPlan>> createOutfitPlans({
+    required List<Product> products,
+    required OutfitAnalysis analysis,
+    required OutfitRequest request,
+  });
 }
 
 class MockProductService implements ProductService {
@@ -129,6 +135,30 @@ class MockProductService implements ProductService {
     );
   }
 
+  @override
+  Future<List<OutfitPlan>> createOutfitPlans({
+    required List<Product> products,
+    required OutfitAnalysis analysis,
+    required OutfitRequest request,
+  }) async {
+    await _waitForMockDelay();
+    if (analysis.looks.isEmpty) {
+      return [
+        await createOutfitPlan(
+          products: products,
+          analysis: analysis,
+          request: request,
+        ),
+      ];
+    }
+    return recommendationService.buildOutfitPlans(
+      products: products,
+      looks: analysis.looks,
+      requestId: analysis.requestId ?? '',
+      gender: analysis.gender,
+    );
+  }
+
   Future<void> _waitForMockDelay() {
     return delay == Duration.zero
         ? Future<void>.value()
@@ -160,10 +190,13 @@ class CatalogProductService implements ProductService {
           'requirements': analysis.productRequirements
               .map(
                 (requirement) => {
+                  'lookId': requirement.lookId,
                   'searchRequirementGender': requirement.gender,
                   'searchKeywords': requirement.searchKeywords,
                   'category': requirement.category,
                   'itemName': requirement.itemName,
+                  'fit': requirement.fit,
+                  'material': requirement.material,
                 },
               )
               .toList(growable: false),
@@ -193,12 +226,18 @@ class CatalogProductService implements ProductService {
                 'user_input': request.request,
               },
               'outfit_plan': {
+                'looks': analysis.looks
+                    .map((look) => look.toJson())
+                    .toList(growable: false),
                 'top': analysis.top,
                 'bottom': analysis.bottom,
                 'shoes': analysis.shoes,
                 'accessories': analysis.accessories,
                 'summary': analysis.suggestion,
               },
+              'looks': analysis.looks
+                  .map((look) => look.toJson())
+                  .toList(growable: false),
               'items': analysis.productRequirements
                   .map((requirement) => requirement.toJson())
                   .toList(growable: false),
@@ -263,6 +302,31 @@ class CatalogProductService implements ProductService {
       products: products,
       style: analysis.style,
       scene: request.scene,
+      requestId: analysis.requestId ?? '',
+      gender: analysis.gender,
+      lookId: analysis.outfitPlan?.lookId ??
+          (analysis.looks.isEmpty ? '' : analysis.looks.first.lookId),
+    );
+  }
+
+  @override
+  Future<List<OutfitPlan>> createOutfitPlans({
+    required List<Product> products,
+    required OutfitAnalysis analysis,
+    required OutfitRequest request,
+  }) async {
+    if (analysis.looks.isEmpty) {
+      return [
+        await createOutfitPlan(
+          products: products,
+          analysis: analysis,
+          request: request,
+        ),
+      ];
+    }
+    return recommendationService.buildOutfitPlans(
+      products: products,
+      looks: analysis.looks,
       requestId: analysis.requestId ?? '',
       gender: analysis.gender,
     );

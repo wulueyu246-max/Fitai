@@ -1,4 +1,5 @@
 import 'outfit_plan.dart';
+import 'outfit_look.dart';
 import 'product.dart';
 import 'product_recommendation.dart';
 import 'product_search_requirement.dart';
@@ -19,6 +20,8 @@ class OutfitAnalysis {
     this.productRequirements = const [],
     this.requestId,
     this.outfitPlan,
+    this.looks = const [],
+    this.outfitPlans = const [],
   });
 
   factory OutfitAnalysis.fromJson(Map<String, dynamic> json) {
@@ -57,6 +60,30 @@ class OutfitAnalysis {
         fallback: '',
       ),
       outfitPlan: _readOutfitPlan(json['outfit_plan']),
+      looks: _readLooks(
+        json['looks'],
+        fallbackRequestId: _readOptionalAliasedString(
+          json,
+          const ['request_id', 'requestId'],
+          fallback: '',
+        ),
+        fallbackGender: _readOptionalAliasedString(
+          json,
+          const ['gender'],
+          fallback: 'unisex',
+        ),
+        fallbackScene: _readOptionalAliasedString(
+          json,
+          const ['scene'],
+          fallback: '',
+        ),
+        fallbackStyle: _readOptionalAliasedString(
+          json,
+          const ['style'],
+          fallback: '',
+        ),
+      ),
+      outfitPlans: _readOutfitPlans(json['outfit_plans']),
     );
   }
 
@@ -73,10 +100,30 @@ class OutfitAnalysis {
       const ['gender'],
       fallback: 'unisex',
     );
-    final productRequirements = _readProductRequirements(
-      json['products'],
-      fallbackGender: responseGender,
+    final requestId = _readOptionalAliasedString(
+      json,
+      const ['request_id', 'requestId'],
+      fallback: '',
     );
+    final outfitLooks = _readLooks(
+      json['looks'],
+      fallbackRequestId: requestId,
+      fallbackGender: responseGender,
+      fallbackScene: '',
+      fallbackStyle: _readOptionalAliasedString(
+        json,
+        const ['style'],
+        fallback: '',
+      ),
+    );
+    final productRequirements = outfitLooks.isNotEmpty
+        ? List<ProductSearchRequirement>.unmodifiable(
+            outfitLooks.expand((look) => look.items),
+          )
+        : _readProductRequirements(
+            json['products'],
+            fallbackGender: responseGender,
+          );
     final gender = responseGender == 'unisex'
         ? _commonRequirementGender(productRequirements)
         : responseGender;
@@ -126,11 +173,8 @@ class OutfitAnalysis {
             ),
       productRecommendations: productRecommendations,
       productRequirements: productRequirements,
-      requestId: _readOptionalAliasedString(
-        json,
-        const ['request_id', 'requestId'],
-        fallback: '',
-      ),
+      requestId: requestId,
+      looks: outfitLooks,
     );
   }
 
@@ -148,6 +192,8 @@ class OutfitAnalysis {
   final List<ProductSearchRequirement> productRequirements;
   final String? requestId;
   final OutfitPlan? outfitPlan;
+  final List<OutfitLook> looks;
+  final List<OutfitPlan> outfitPlans;
 
   bool get isMock => analysisMode == 'mock';
 
@@ -166,6 +212,8 @@ class OutfitAnalysis {
     List<ProductSearchRequirement>? productRequirements,
     String? requestId,
     OutfitPlan? outfitPlan,
+    List<OutfitLook>? looks,
+    List<OutfitPlan>? outfitPlans,
   }) {
     return OutfitAnalysis(
       bodyAnalysis: bodyAnalysis ?? this.bodyAnalysis,
@@ -183,6 +231,8 @@ class OutfitAnalysis {
       productRequirements: productRequirements ?? this.productRequirements,
       requestId: requestId ?? this.requestId,
       outfitPlan: outfitPlan ?? this.outfitPlan,
+      looks: looks ?? this.looks,
+      outfitPlans: outfitPlans ?? this.outfitPlans,
     );
   }
 
@@ -207,6 +257,9 @@ class OutfitAnalysis {
           .toList(),
       'request_id': requestId,
       'outfit_plan': outfitPlan?.toJson(),
+      'looks': looks.map((look) => look.toJson()).toList(growable: false),
+      'outfit_plans':
+          outfitPlans.map((plan) => plan.toJson()).toList(growable: false),
     };
   }
 
@@ -350,5 +403,39 @@ class OutfitAnalysis {
       throw const FormatException('outfit_plan 必须是对象');
     }
     return OutfitPlan.fromJson(value);
+  }
+
+  static List<OutfitLook> _readLooks(
+    dynamic value, {
+    required String fallbackRequestId,
+    required String fallbackGender,
+    required String fallbackScene,
+    required String fallbackStyle,
+  }) {
+    if (value == null) return const [];
+    if (value is! List) throw const FormatException('looks 必须是数组');
+    return List<OutfitLook>.unmodifiable(value.map((item) {
+      if (item is! Map<String, dynamic>) {
+        throw const FormatException('looks 中的元素必须是对象');
+      }
+      return OutfitLook.fromJson(
+        item,
+        fallbackRequestId: fallbackRequestId,
+        fallbackGender: fallbackGender,
+        fallbackScene: fallbackScene,
+        fallbackStyle: fallbackStyle,
+      );
+    }));
+  }
+
+  static List<OutfitPlan> _readOutfitPlans(dynamic value) {
+    if (value == null) return const [];
+    if (value is! List) throw const FormatException('outfit_plans 必须是数组');
+    return List<OutfitPlan>.unmodifiable(value.map((item) {
+      if (item is! Map<String, dynamic>) {
+        throw const FormatException('outfit_plans 中的元素必须是对象');
+      }
+      return OutfitPlan.fromJson(item);
+    }));
   }
 }

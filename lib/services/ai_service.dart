@@ -140,8 +140,13 @@ class AIService {
     }
 
     try {
-      final analysis = OutfitAnalysis.fromJson(payload).copyWith(
-        requestId: serverRequestId ?? clientRequestId,
+      final parsedAnalysis = OutfitAnalysis.fromJson(payload);
+      final effectiveRequestId = serverRequestId ?? clientRequestId;
+      final analysis = parsedAnalysis.copyWith(
+        requestId: effectiveRequestId,
+        looks: parsedAnalysis.looks
+            .map((look) => look.copyWith(requestId: effectiveRequestId))
+            .toList(growable: false),
       );
       AppLogger.instance.info(
         'ai_gender_resolved',

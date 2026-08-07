@@ -990,7 +990,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
     );
 
     try {
-      final outfitPlan = await _productService.createOutfitPlan(
+      final outfitPlans = await _productService.createOutfitPlans(
         products: products,
         analysis: analysis,
         request: request,
@@ -998,9 +998,9 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       if (!mounted || generationId != _generationSequence) {
         return;
       }
-      if (!_attachCurrentLook(
+      if (!_attachCurrentLooks(
         products: products,
-        plan: outfitPlan,
+        plans: outfitPlans,
         analysisRequestId: analysis.requestId ?? '',
         analysisGender: analysis.gender,
       )) {
@@ -1022,19 +1022,23 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       if (!mounted || generationId != _generationSequence) {
         return;
       }
-      await _profileService.recordOutfit(mergedProfile, outfitPlan.id);
+      for (final plan in outfitPlans) {
+        await _profileService.recordOutfit(mergedProfile, plan.id);
+      }
       final createdTime = DateTime.now();
       try {
-        await _wardrobeRepository.saveAIRecommendation(
-          AIRecommendationRecord(
-            id: 'ai-${createdTime.microsecondsSinceEpoch}',
-            scene: request.scene,
-            bodyAnalysis: analysis.bodyAnalysis,
-            style: analysis.style,
-            outfitPlan: outfitPlan,
-            createdTime: createdTime,
-          ),
-        );
+        for (final (index, plan) in outfitPlans.indexed) {
+          await _wardrobeRepository.saveAIRecommendation(
+            AIRecommendationRecord(
+              id: 'ai-${createdTime.microsecondsSinceEpoch}-$index',
+              scene: request.scene,
+              bodyAnalysis: analysis.bodyAnalysis,
+              style: analysis.style,
+              outfitPlan: plan,
+              createdTime: createdTime,
+            ),
+          );
+        }
       } catch (_) {
         // Recommendation history must not block the current result.
       }
@@ -1218,9 +1222,31 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
     required String analysisRequestId,
     required String analysisGender,
   }) {
+    final existingPlans = _viewModel.analysis?.outfitPlans ?? const [];
+    final plans = existingPlans.isEmpty
+        ? <OutfitPlan>[plan]
+        : existingPlans
+            .map((item) => item.lookId == plan.lookId ? plan : item)
+            .toList(growable: false);
+    return _attachCurrentLooks(
+      products: products,
+      plans: plans,
+      analysisRequestId: analysisRequestId,
+      analysisGender: analysisGender,
+    );
+  }
+
+  bool _attachCurrentLooks({
+    required List<Product> products,
+    required List<OutfitPlan> plans,
+    required String analysisRequestId,
+    required String analysisGender,
+  }) {
+    if (plans.isEmpty) return false;
     final attached = _viewModel.attachRecommendations(
       products,
-      outfitPlan: plan,
+      outfitPlan: plans.first,
+      outfitPlans: plans,
       expectedRequestId: analysisRequestId,
       expectedGender: analysisGender,
     );
@@ -1228,27 +1254,31 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       AppLogger.instance.warning(
         'stale_or_gender_mismatched_look_ignored',
         metadata: {
-          'look_request_id': plan.requestId,
-          'look_gender': plan.gender,
+          'look_request_id': plans.first.requestId,
+          'look_gender': plans.first.gender,
           'expected_request_id': analysisRequestId,
           'expected_gender': analysisGender,
         },
       );
       return false;
     }
-    for (final product in plan.products) {
-      AppLogger.instance.info(
-        'look_image_selected',
-        metadata: {
-          'look_request_id': plan.requestId,
-          'look_gender': plan.gender,
-          'look_style': plan.style,
-          'look_scene': plan.scene,
-          'image_source':
-              product.imageUrl.isEmpty ? 'placeholder' : product.sourceProvider,
-          'product_id': product.id,
-        },
-      );
+    for (final plan in plans) {
+      for (final product in plan.products) {
+        AppLogger.instance.info(
+          'look_image_selected',
+          metadata: {
+            'look_request_id': plan.requestId,
+            'look_id': plan.lookId,
+            'look_gender': plan.gender,
+            'look_style': plan.style,
+            'look_scene': plan.scene,
+            'image_source': product.imageUrl.isEmpty
+                ? 'placeholder'
+                : product.sourceProvider,
+            'product_id': product.id,
+          },
+        );
+      }
     }
     return true;
   }
@@ -1833,14 +1863,29 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       request: request,
       analysis: analysis,
     );
+    final visiblePlans = analysis.outfitPlans
+        .where(
+          (plan) => plan.matchesCurrentResult(
+            requestId: analysis.requestId ?? '',
+            gender: analysis.gender,
+          ),
+        )
+        .toList(growable: false);
     final currentPlan = analysis.outfitPlan;
-    final visiblePlan = currentPlan != null &&
-            currentPlan.matchesCurrentResult(
-              requestId: analysis.requestId ?? '',
-              gender: analysis.gender,
-            )
-        ? currentPlan
-        : null;
+    final visiblePlan = visiblePlans.isNotEmpty
+        ? visiblePlans.first
+        : currentPlan != null &&
+                currentPlan.matchesCurrentResult(
+                  requestId: analysis.requestId ?? '',
+                  gender: analysis.gender,
+                )
+            ? currentPlan
+            : null;
+    final allVisiblePlans = visiblePlans.isNotEmpty
+        ? visiblePlans
+        : visiblePlan == null
+            ? const <OutfitPlan>[]
+            : <OutfitPlan>[visiblePlan];
 
     return Container(
       key: _resultKey,
@@ -1889,7 +1934,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
           ],
           AiOutfitReport(analysis: analysis, profile: profile),
           const SizedBox(height: 18),
-          if (visiblePlan case final plan?) ...[
+          if (visiblePlan case final primaryPlan?) ...[
             const Text(
               '今日推荐 Look',
               style: TextStyle(
@@ -1899,17 +1944,29 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
               ),
             ),
             const SizedBox(height: 12),
-            OutfitPlanCard(
-              plan: plan,
-              favorite: _favoriteService.isOutfitPlanFavorite(plan.id),
-              onFavorite: _toggleFavoritePlan,
-              onTryOn: widget.onTryOn == null ? null : _openVirtualTryOn,
-              onProductTap: _showProductDetails,
-              onReplaceCategory: _replacePlanProduct,
-              onRegenerate: _regenerateOutfitPlan,
-              isRegenerating: _isRegeneratingPlan,
-              isTryOnLoading: _tryingOnProductId != null,
-            ),
+            for (final (index, plan) in allVisiblePlans.indexed) ...[
+              Text(
+                'Look ${index + 1} · ${plan.style}',
+                style: const TextStyle(
+                  color: Color(0xFF48423C),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 8),
+              OutfitPlanCard(
+                plan: plan,
+                favorite: _favoriteService.isOutfitPlanFavorite(plan.id),
+                onFavorite: _toggleFavoritePlan,
+                onTryOn: widget.onTryOn == null ? null : _openVirtualTryOn,
+                onProductTap: _showProductDetails,
+                onReplaceCategory: index == 0 ? _replacePlanProduct : null,
+                onRegenerate: index == 0 ? _regenerateOutfitPlan : null,
+                isRegenerating: index == 0 && _isRegeneratingPlan,
+                isTryOnLoading: _tryingOnProductId != null,
+              ),
+              const SizedBox(height: 14),
+            ],
             const SizedBox(height: 10),
             SizedBox(
               width: double.infinity,
@@ -1920,12 +1977,12 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
                     _analytics.track(
                       'outfit_share_opened',
                       userId: _session.account?.id ?? 'local-demo-user',
-                      properties: {'outfitPlanId': plan.id},
+                      properties: {'outfitPlanId': primaryPlan.id},
                     ),
                   );
                   showShareOutfitSheet(
                     context,
-                    outfitPlan: plan,
+                    outfitPlan: primaryPlan,
                     userName: _session.account?.displayName ?? '我的树皮穿搭',
                     avatarBase64: _session.account?.avatarBase64,
                   );

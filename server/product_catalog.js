@@ -226,16 +226,22 @@ class ProductCatalog {
         gender: context.gender,
         fit: context.fit,
         budget: perItemBudget,
-        keyword: query.keyword,
+        keyword: query.search_keywords?.[0] || query.item_name || query.keyword,
         limit: 3,
       });
       for (const item of results) {
-        if (!matched.has(item.product_id)) {
-          matched.set(item.product_id, item);
+        const lookId = String(query.look_id || query.lookId || "");
+        const key = `${lookId}:${item.product_id}`;
+        if (!matched.has(key)) {
+          matched.set(key, {
+            ...item,
+            look_id: lookId,
+            gender: query.gender || context.gender || "unisex",
+          });
         }
       }
     }
-    return [...matched.values()].slice(0, 12);
+    return [...matched.values()].slice(0, 72);
   }
 }
 
