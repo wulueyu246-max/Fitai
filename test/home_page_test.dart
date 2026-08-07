@@ -1,4 +1,3 @@
-import 'package:fit_ai/components/outfit_post_card.dart';
 import 'package:fit_ai/pages/home_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -39,16 +38,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('热门AI Look'), findsOneWidget);
-    expect(find.text('173cm身材比例优化方案'), findsWidgets);
-
-    final firstFeedCard = find.byType(OutfitPostCard).first;
-    expect(tester.getSize(firstFeedCard).width, lessThan(180));
-
-    await tester.tap(
-      find.byKey(const Key('favorite-post-commute-proportion')),
-    );
-    await tester.pump();
-    expect(find.textContaining('已收藏'), findsOneWidget);
+    expect(find.text('没有匹配的AI Look'), findsOneWidget);
 
     await tester.ensureVisible(find.text('适合我的'));
     await tester.pump(const Duration(milliseconds: 300));

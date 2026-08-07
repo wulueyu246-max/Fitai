@@ -1,4 +1,4 @@
-import 'package:fit_ai/data/mock_outfit_post_database.dart';
+import 'package:fit_ai/data/mock_product_database.dart';
 import 'package:fit_ai/models/outfit_post.dart';
 import 'package:fit_ai/models/user_preference.dart';
 import 'package:fit_ai/services/brand_service.dart';
@@ -7,7 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('OutfitPost supports community serialization with products', () {
-    final post = MockOutfitPostDatabase.posts.first;
+    final post = _testPost;
     final restored = OutfitPost.fromJson(post.toJson());
 
     expect(restored.id, post.id);
@@ -17,6 +17,8 @@ void main() {
     expect(restored.comments, greaterThan(0));
     expect(restored.saves, greaterThan(0));
     expect(restored.authorId, isNotEmpty);
+    expect(restored.requestId, 'test-look-request');
+    expect(restored.gender, 'unisex');
   });
 
   test('user preferences affect the community recommendation channel', () {
@@ -29,7 +31,7 @@ void main() {
     );
     final restored = UserPreference.fromJson(preference.toJson());
     final posts = const RecommendationService().recommendPosts(
-      posts: MockOutfitPostDatabase.posts,
+      posts: [_testPost],
       preference: restored,
       channel: '旅行',
     );
@@ -53,3 +55,22 @@ void main() {
     await service.synchronizeCatalog('uniqlo');
   });
 }
+
+final _testPost = OutfitPost(
+  id: 'test-travel-look',
+  user: '测试用户',
+  authorId: 'test-author',
+  image: 'assets/images/home/summer_clean.jpg',
+  imageSource: 'test',
+  requestId: 'test-look-request',
+  gender: 'unisex',
+  style: '极简',
+  scene: '旅行',
+  title: '旅行轻装方案',
+  description: '旅行场景的轻量组合',
+  products: MockProductDatabase.products.take(3).toList(growable: false),
+  likes: 10,
+  comments: 2,
+  saves: 3,
+  createdAt: DateTime(2026, 7, 30),
+);

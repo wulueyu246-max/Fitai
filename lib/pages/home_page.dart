@@ -742,57 +742,59 @@ class _HomePageState extends State<HomePage> {
                       _HomeNotice(message: error, onRetry: _loadFeedData),
                     ],
                     const SizedBox(height: 18),
-                    FeedReveal(
-                      child: TodayAiRecommendationCard(
-                        feed: _feed,
-                        saved: _favoriteService.isOutfitPlanFavorite(
-                          _feed.dailyPlan.id,
-                        ),
-                        onGenerate: widget.onExploreAi,
-                        onSave: _toggleDailyLook,
-                      ),
-                    ),
-                    const SizedBox(height: 32),
-                    const HomeSectionHeader(
-                      title: '穿搭场景',
-                      subtitle: '选择今天要进入的生活状态',
-                    ),
-                    const SizedBox(height: 14),
-                    FeedReveal(
-                      child: SceneEntryCarousel(
-                        scenes: _feed.scenes,
-                        selectedScene: _selectedScene,
-                        onSelected: _selectScene,
-                      ),
-                    ),
-                    const SizedBox(height: 36),
-                    HomeSectionHeader(
-                      title: '热门AI Look',
-                      subtitle: '$_selectedScene · AI分析与关联商品',
-                    ),
-                    const SizedBox(height: 15),
-                    if (posts.isEmpty)
-                      const _EmptySearchResult(label: '没有匹配的AI Look')
-                    else
-                      AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 300),
-                        child: FeedReveal(
-                          key: ValueKey(
-                            'looks-$_selectedScene-$_searchQuery',
+                    if (!kReleaseMode || explicitMockMode) ...[
+                      FeedReveal(
+                        child: TodayAiRecommendationCard(
+                          feed: _feed,
+                          saved: _favoriteService.isOutfitPlanFavorite(
+                            _feed.dailyPlan.id,
                           ),
-                          child: _CommunityPostGrid(
-                            posts: posts,
-                            engagement: _community,
-                            onFavorite: _togglePostFavorite,
-                            onLike: _togglePostLike,
-                            onComment: _commentPost,
-                            onFollow: _toggleFollow,
-                            onOpen: _openPost,
-                            onTryOn: null,
-                          ),
+                          onGenerate: widget.onExploreAi,
+                          onSave: _toggleDailyLook,
                         ),
                       ),
-                    const SizedBox(height: 38),
+                      const SizedBox(height: 32),
+                      const HomeSectionHeader(
+                        title: '穿搭场景',
+                        subtitle: '选择今天要进入的生活状态',
+                      ),
+                      const SizedBox(height: 14),
+                      FeedReveal(
+                        child: SceneEntryCarousel(
+                          scenes: _feed.scenes,
+                          selectedScene: _selectedScene,
+                          onSelected: _selectScene,
+                        ),
+                      ),
+                      const SizedBox(height: 36),
+                      HomeSectionHeader(
+                        title: '热门AI Look',
+                        subtitle: '$_selectedScene · AI分析与关联商品',
+                      ),
+                      const SizedBox(height: 15),
+                      if (posts.isEmpty)
+                        const _EmptySearchResult(label: '没有匹配的AI Look')
+                      else
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 300),
+                          child: FeedReveal(
+                            key: ValueKey(
+                              'looks-$_selectedScene-$_searchQuery',
+                            ),
+                            child: _CommunityPostGrid(
+                              posts: posts,
+                              engagement: _community,
+                              onFavorite: _togglePostFavorite,
+                              onLike: _togglePostLike,
+                              onComment: _commentPost,
+                              onFollow: _toggleFollow,
+                              onOpen: _openPost,
+                              onTryOn: null,
+                            ),
+                          ),
+                        ),
+                      const SizedBox(height: 38),
+                    ],
                     HomeSectionHeader(
                       title: '适合我的',
                       subtitle: _feed.personalizationSummary,
@@ -824,23 +826,25 @@ class _HomePageState extends State<HomePage> {
                           onBrandTap: _selectBrand,
                         ),
                       ),
-                    const SizedBox(height: 40),
-                    const HomeSectionHeader(
-                      title: '用户分享',
-                      subtitle: '真实用户的 AI Look 与关联商品',
-                    ),
-                    const SizedBox(height: 16),
-                    FeedReveal(
-                      child: CommunityLookCarousel(
-                        posts: _feed.communityLooks,
-                        engagement: _community,
-                        onFavorite: _togglePostFavorite,
-                        onLike: _togglePostLike,
-                        onComment: _commentPost,
-                        onFollow: _toggleFollow,
-                        onOpen: _openPost,
+                    if (!kReleaseMode || explicitMockMode) ...[
+                      const SizedBox(height: 40),
+                      const HomeSectionHeader(
+                        title: '用户分享',
+                        subtitle: '真实用户的 AI Look 与关联商品',
                       ),
-                    ),
+                      const SizedBox(height: 16),
+                      FeedReveal(
+                        child: CommunityLookCarousel(
+                          posts: _feed.communityLooks,
+                          engagement: _community,
+                          onFavorite: _togglePostFavorite,
+                          onLike: _togglePostLike,
+                          onComment: _commentPost,
+                          onFollow: _toggleFollow,
+                          onOpen: _openPost,
+                        ),
+                      ),
+                    ],
                     if (const bool.fromEnvironment(
                       'ENABLE_EXPERIMENTS',
                       defaultValue: false,

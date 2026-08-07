@@ -98,15 +98,23 @@ class RecommendationService {
     required List<Product> products,
     required String style,
     required String scene,
+    String requestId = '',
+    String gender = 'unisex',
     DateTime? createdTime,
     List<Product>? catalog,
   }) {
     Product firstFor(String slot) {
       return products.firstWhere(
         (product) => product.wardrobeSlot == slot,
-        orElse: () => (catalog ?? MockProductDatabase.products).firstWhere(
-          (product) => product.isAvailable && product.wardrobeSlot == slot,
-        ),
+        orElse: () {
+          final fallbackCatalog = catalog;
+          if (fallbackCatalog == null) {
+            throw StateError('当前结果缺少 $slot，禁止使用默认 Look 补位');
+          }
+          return fallbackCatalog.firstWhere(
+            (product) => product.isAvailable && product.wardrobeSlot == slot,
+          );
+        },
       );
     }
 
@@ -128,6 +136,9 @@ class RecommendationService {
           '最后用${shoes.name}统一视觉重心。',
       createdTime: timestamp,
       scene: normalizedScene,
+      style: normalizedStyle,
+      gender: gender,
+      requestId: requestId.trim(),
       matchScore: 88 + (products.length.clamp(3, 10) - 3),
     );
   }

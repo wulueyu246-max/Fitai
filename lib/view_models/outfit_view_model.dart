@@ -36,14 +36,19 @@ class OutfitViewModel extends ChangeNotifier {
 
     try {
       final response = await _repository.generateOutfit(request);
+      final responseRequestId = response.requestId?.trim() ?? '';
+      final effectiveRequestId = responseRequestId.isNotEmpty
+          ? responseRequestId
+          : 'client-look-${DateTime.now().microsecondsSinceEpoch}';
       // AI product entries are non-purchasable suggestions. ProductService
       // replaces them with catalog-backed products after matching succeeds.
       _analysis = response.copyWith(
         recommendedProducts: const [],
         productRecommendations: const [],
+        requestId: effectiveRequestId,
         outfitPlan: null,
       );
-      _requestId = response.requestId;
+      _requestId = effectiveRequestId;
       return true;
     } on AIServiceException catch (error) {
       _errorMessage = error.message;
@@ -58,14 +63,23 @@ class OutfitViewModel extends ChangeNotifier {
     }
   }
 
-  void attachRecommendations(
+  bool attachRecommendations(
     List<Product> products, {
     OutfitPlan? outfitPlan,
+    required String expectedRequestId,
+    required String expectedGender,
   }) {
     final analysis = _analysis;
 
-    if (analysis == null) {
-      return;
+    if (analysis == null ||
+        analysis.requestId?.trim() != expectedRequestId.trim() ||
+        _normalizeGender(analysis.gender) != _normalizeGender(expectedGender) ||
+        (outfitPlan != null &&
+            !outfitPlan.matchesCurrentResult(
+              requestId: expectedRequestId,
+              gender: expectedGender,
+            ))) {
+      return false;
     }
 
     _analysis = analysis.copyWith(
@@ -73,6 +87,15 @@ class OutfitViewModel extends ChangeNotifier {
       outfitPlan: outfitPlan,
     );
     _notifyListeners();
+    return true;
+  }
+
+  String _normalizeGender(String value) {
+    return switch (value.trim().toLowerCase()) {
+      'male' || '男' || '男性' || '男士' => 'male',
+      'female' || '女' || '女性' || '女士' => 'female',
+      _ => 'unisex',
+    };
   }
 
   void clearResult() {

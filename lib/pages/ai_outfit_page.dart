@@ -14,6 +14,7 @@ import '../components/recommendation_feedback_card.dart';
 import '../models/ai_recommendation_record.dart';
 import '../models/app_location.dart';
 import '../models/outfit.dart';
+import '../models/outfit_plan.dart';
 import '../models/outfit_request.dart';
 import '../models/outfit_generation_state.dart';
 import '../models/product.dart';
@@ -633,6 +634,8 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         _selectedProductIds = {};
         _isLoadingProducts = false;
         _productLoadError = null;
+        _isRegeneratingPlan = false;
+        _tryingOnProductId = null;
       });
 
       final warmupFuture = _backendWarmupService?.wake() ??
@@ -910,7 +913,21 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         }
       }
 
-      _viewModel.attachRecommendations(products);
+      final attached = _viewModel.attachRecommendations(
+        products,
+        expectedRequestId: analysis.requestId ?? '',
+        expectedGender: analysis.gender,
+      );
+      if (!attached) {
+        AppLogger.instance.warning(
+          'stale_product_recommendations_ignored',
+          metadata: {
+            'look_request_id': analysis.requestId,
+            'look_gender': analysis.gender,
+          },
+        );
+        return;
+      }
       setState(() {
         _selectedProductIds = selectedProductIds;
         _isLoadingProducts = false;
@@ -981,7 +998,14 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       if (!mounted || generationId != _generationSequence) {
         return;
       }
-      _viewModel.attachRecommendations(products, outfitPlan: outfitPlan);
+      if (!_attachCurrentLook(
+        products: products,
+        plan: outfitPlan,
+        analysisRequestId: analysis.requestId ?? '',
+        analysisGender: analysis.gender,
+      )) {
+        return;
+      }
       final profile = await _profileService.load();
       if (!mounted || generationId != _generationSequence) {
         return;
@@ -1102,6 +1126,9 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
     if (analysis == null || request == null || currentPlan == null) {
       return;
     }
+    final generationId = _generationSequence;
+    final requestId = analysis.requestId ?? '';
+    final gender = analysis.gender;
     setState(() => _isRegeneratingPlan = true);
     try {
       Product nextFor(String slot) {
@@ -1135,10 +1162,17 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         analysis: analysis,
         request: request,
       );
-      _viewModel.attachRecommendations(
-        analysis.recommendedProducts,
-        outfitPlan: plan,
-      );
+      if (!mounted || generationId != _generationSequence) {
+        return;
+      }
+      if (!_attachCurrentLook(
+        products: analysis.recommendedProducts,
+        plan: plan,
+        analysisRequestId: requestId,
+        analysisGender: gender,
+      )) {
+        return;
+      }
       await Future.wait([
         _profileService
             .load()
@@ -1176,6 +1210,47 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         setState(() => _isRegeneratingPlan = false);
       }
     }
+  }
+
+  bool _attachCurrentLook({
+    required List<Product> products,
+    required OutfitPlan plan,
+    required String analysisRequestId,
+    required String analysisGender,
+  }) {
+    final attached = _viewModel.attachRecommendations(
+      products,
+      outfitPlan: plan,
+      expectedRequestId: analysisRequestId,
+      expectedGender: analysisGender,
+    );
+    if (!attached) {
+      AppLogger.instance.warning(
+        'stale_or_gender_mismatched_look_ignored',
+        metadata: {
+          'look_request_id': plan.requestId,
+          'look_gender': plan.gender,
+          'expected_request_id': analysisRequestId,
+          'expected_gender': analysisGender,
+        },
+      );
+      return false;
+    }
+    for (final product in plan.products) {
+      AppLogger.instance.info(
+        'look_image_selected',
+        metadata: {
+          'look_request_id': plan.requestId,
+          'look_gender': plan.gender,
+          'look_style': plan.style,
+          'look_scene': plan.scene,
+          'image_source':
+              product.imageUrl.isEmpty ? 'placeholder' : product.sourceProvider,
+          'product_id': product.id,
+        },
+      );
+    }
+    return true;
   }
 
   Future<void> _openVirtualTryOn([Product? focusedProduct]) async {
@@ -1758,6 +1833,14 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       request: request,
       analysis: analysis,
     );
+    final currentPlan = analysis.outfitPlan;
+    final visiblePlan = currentPlan != null &&
+            currentPlan.matchesCurrentResult(
+              requestId: analysis.requestId ?? '',
+              gender: analysis.gender,
+            )
+        ? currentPlan
+        : null;
 
     return Container(
       key: _resultKey,
@@ -1806,7 +1889,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
           ],
           AiOutfitReport(analysis: analysis, profile: profile),
           const SizedBox(height: 18),
-          if (analysis.outfitPlan case final plan?) ...[
+          if (visiblePlan case final plan?) ...[
             const Text(
               '今日推荐 Look',
               style: TextStyle(
@@ -1876,7 +1959,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
               tryingOnProductId: _tryingOnProductId,
             ),
           ),
-          if (analysis.outfitPlan case final plan?) ...[
+          if (visiblePlan case final plan?) ...[
             const SizedBox(height: 18),
             RecommendationFeedbackCard(
               key: ValueKey('feedback-${plan.id}'),

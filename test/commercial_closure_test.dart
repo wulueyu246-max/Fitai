@@ -187,6 +187,24 @@ void main() {
     expect(metadata['productId'], 'product-1');
   });
 
+  test('AppLogger keeps the safe Look image source label', () {
+    final logger = AppLogger.instance;
+    logger.clear();
+    logger.info(
+      'look_image_selected',
+      metadata: const {
+        'look_request_id': 'request-1',
+        'look_gender': 'male',
+        'image_source': 'taobao',
+      },
+    );
+
+    final metadata = logger.entries.first.metadata;
+    expect(metadata['look_request_id'], 'request-1');
+    expect(metadata['look_gender'], 'male');
+    expect(metadata['image_source'], 'taobao');
+  });
+
   test('VirtualTryOnService supports createTask, getStatus and getResult',
       () async {
     final products = MockProductDatabase.products;

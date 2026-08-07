@@ -56,7 +56,8 @@ void main() {
 
     expect(feed.dailyReason, contains('25℃'));
     expect(feed.dailyPlan.products, hasLength(3));
-    expect(feed.hotLooks, isNotEmpty);
+    expect(feed.hotLooks, isEmpty);
+    expect(feed.communityLooks, isEmpty);
     expect(feed.products, hasLength(10));
     expect(
       fashionProfile.isWithinBudget(feed.products.first.price),

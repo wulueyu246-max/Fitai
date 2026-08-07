@@ -124,6 +124,8 @@ class MockProductService implements ProductService {
       products: products,
       style: analysis.style,
       scene: request.scene,
+      requestId: analysis.requestId ?? '',
+      gender: analysis.gender,
     );
   }
 
@@ -261,7 +263,8 @@ class CatalogProductService implements ProductService {
       products: products,
       style: analysis.style,
       scene: request.scene,
-      catalog: await source.fetchProducts(),
+      requestId: analysis.requestId ?? '',
+      gender: analysis.gender,
     );
   }
 }

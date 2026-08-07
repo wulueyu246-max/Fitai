@@ -1,6 +1,5 @@
 import 'package:flutter/foundation.dart';
 
-import '../../../data/mock_outfit_post_database.dart';
 import '../../../models/fashion_profile.dart';
 import '../../../models/outfit_post.dart';
 import '../../../models/product.dart';
@@ -68,8 +67,7 @@ class FeedRecommendationService {
                   product.sourceProvider.trim().toLowerCase() == 'taobao',
             )
             .toList(growable: false);
-    final postCatalog =
-        allowMockContent ? MockOutfitPostDatabase.posts : const <OutfitPost>[];
+    const postCatalog = <OutfitPost>[];
     final profile = input.userProfile.copyWith(
       stylePreference: {
         ...input.fashionProfile.likedStyles,

@@ -109,6 +109,9 @@ class AppLogger {
 
   bool _isSensitive(String key) {
     final normalized = key.toLowerCase();
+    if (normalized == 'image_source') {
+      return false;
+    }
     return const [
       'password',
       'token',

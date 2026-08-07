@@ -10,6 +10,9 @@ class OutfitPlan {
     required this.reason,
     required this.createdTime,
     this.scene = '日常',
+    this.style = '',
+    this.gender = 'unisex',
+    this.requestId = '',
     this.matchScore = 90,
   });
 
@@ -23,6 +26,10 @@ class OutfitPlan {
       reason: json['reason'] as String,
       createdTime: DateTime.parse(json['createdTime'] as String),
       scene: json['scene'] as String? ?? '日常',
+      style: json['style'] as String? ?? '',
+      gender: _normalizeGender(json['gender'] as String?),
+      requestId:
+          (json['request_id'] ?? json['requestId'])?.toString().trim() ?? '',
       matchScore: (json['matchScore'] as num?)?.round() ?? 90,
     );
   }
@@ -35,6 +42,9 @@ class OutfitPlan {
   final String reason;
   final DateTime createdTime;
   final String scene;
+  final String style;
+  final String gender;
+  final String requestId;
   final int matchScore;
 
   String get look => title;
@@ -55,8 +65,21 @@ class OutfitPlan {
       reason: reason,
       createdTime: createdTime,
       scene: scene,
+      style: style,
+      gender: gender,
+      requestId: requestId,
       matchScore: matchScore,
     );
+  }
+
+  bool matchesCurrentResult({
+    required String requestId,
+    required String gender,
+  }) {
+    final expectedRequestId = requestId.trim();
+    return expectedRequestId.isNotEmpty &&
+        this.requestId == expectedRequestId &&
+        this.gender == _normalizeGender(gender);
   }
 
   Map<String, dynamic> toJson() {
@@ -70,8 +93,19 @@ class OutfitPlan {
       'shoes': shoes.toJson(),
       'reason': reason,
       'scene': scene,
+      'style': style,
+      'gender': gender,
+      'request_id': requestId,
       'matchScore': matchScore,
       'createdTime': createdTime.toIso8601String(),
+    };
+  }
+
+  static String _normalizeGender(String? value) {
+    return switch (value?.trim().toLowerCase()) {
+      'male' || '男' || '男性' || '男士' => 'male',
+      'female' || '女' || '女性' || '女士' => 'female',
+      _ => 'unisex',
     };
   }
 }

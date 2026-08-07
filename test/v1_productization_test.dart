@@ -1,4 +1,3 @@
-import 'package:fit_ai/data/mock_outfit_post_database.dart';
 import 'package:fit_ai/features/share/models/share_outfit.dart';
 import 'package:fit_ai/features/share/widgets/share_outfit_card.dart';
 import 'package:fit_ai/models/recommendation_feedback.dart';
@@ -28,7 +27,7 @@ void main() {
     expect(restored.tryOnHistory, contains('cos-clean-tee'));
   });
 
-  test('RecommendationEngine returns products, look and home feed', () {
+  test('RecommendationEngine returns products without a default Look pool', () {
     final result = const RecommendationEngine().generate(
       input: RecommendationEngineInput(
         userProfile: profile,
@@ -47,13 +46,13 @@ void main() {
         ],
         scene: '通勤',
       ),
-      postCatalog: MockOutfitPostDatabase.posts,
+      postCatalog: const [],
       productLimit: 8,
     );
 
     expect(result.products, hasLength(8));
     expect(result.outfitPlan.products, hasLength(3));
-    expect(result.homePosts, isNotEmpty);
+    expect(result.homePosts, isEmpty);
     expect(result.personalizationSummary, contains('行为反馈'));
   });
 
@@ -82,7 +81,7 @@ void main() {
         feedback: [],
         scene: '正式场合',
       ),
-      postCatalog: MockOutfitPostDatabase.posts,
+      postCatalog: const [],
     );
     final shareOutfit = ShareOutfit(
       id: 'share-test',

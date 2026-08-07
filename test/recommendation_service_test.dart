@@ -62,12 +62,54 @@ void main() {
       products: products,
       style: '极简',
       scene: '通勤',
+      requestId: 'request-male-look',
+      gender: 'male',
       createdTime: DateTime(2026, 7, 30),
     );
     expect(plan.products, hasLength(3));
     expect(plan.title, contains('通勤'));
     expect(plan.scene, '通勤');
     expect(plan.matchScore, inInclusiveRange(0, 100));
-    expect(OutfitPlan.fromJson(plan.toJson()).matchScore, plan.matchScore);
+    final restored = OutfitPlan.fromJson(plan.toJson());
+    expect(restored.matchScore, plan.matchScore);
+    expect(restored.requestId, 'request-male-look');
+    expect(restored.gender, 'male');
+    expect(restored.style, '极简');
+    expect(
+      restored.matchesCurrentResult(
+        requestId: 'request-male-look',
+        gender: 'male',
+      ),
+      isTrue,
+    );
+    expect(
+      restored.matchesCurrentResult(
+        requestId: 'request-male-look',
+        gender: 'female',
+      ),
+      isFalse,
+    );
+  });
+
+  test('current AI Look never fills a missing slot from the Mock catalog', () {
+    final products = MockProductDatabase.products
+        .where(
+          (product) =>
+              product.wardrobeSlot == ProductCategory.top ||
+              product.wardrobeSlot == ProductCategory.bottom,
+        )
+        .take(2)
+        .toList(growable: false);
+
+    expect(
+      () => service.buildOutfitPlan(
+        products: products,
+        style: '极简',
+        scene: '通勤',
+        requestId: 'request-no-shoes',
+        gender: 'male',
+      ),
+      throwsStateError,
+    );
   });
 }
