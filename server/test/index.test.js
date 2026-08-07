@@ -34,6 +34,7 @@ const {
   validateProductionConfig,
   validateOutfitRequest,
   DEFAULT_AI_MODEL,
+  DEFAULT_AI_TIMEOUT_MS,
   LEGACY_AI_MODEL,
   structuredJsonRequestOptions,
 } = require("../index");
@@ -785,6 +786,7 @@ test("selects DashScope defaults for a DashScope API key", () => {
 
 test("uses qwen3.7-plus by default and keeps legacy rollback explicit", () => {
   assert.equal(DEFAULT_AI_MODEL, "qwen3.7-plus");
+  assert.equal(DEFAULT_AI_TIMEOUT_MS, 90_000);
   assert.equal(LEGACY_AI_MODEL, "qwen-vl-plus");
   assert.equal(resolveAiConfig({
     DASHSCOPE_API_KEY: "dashscope-test-key",
@@ -922,6 +924,7 @@ test("reports live readiness and classifies provider fallback reasons", () => {
     "vision_model_ready",
   );
   assert.equal(resolveAiFallbackReason({message: "Request timed out."}), "AI_TIMEOUT");
+  assert.equal(resolveAiFallbackReason({message: "Request was aborted."}), "AI_TIMEOUT");
   assert.equal(resolveAiFallbackReason({status: 401}), "AI_AUTH_FAILED");
   assert.equal(resolveAiFallbackReason({status: 429}), "AI_RATE_LIMITED");
 });

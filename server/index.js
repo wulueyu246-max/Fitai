@@ -75,6 +75,7 @@ function readBoolean(value, fallback = false) {
 }
 
 const DEFAULT_AI_MODEL = "qwen3.7-plus";
+const DEFAULT_AI_TIMEOUT_MS = 90_000;
 // Manual rollback only: set AI_MODEL=qwen-vl-plus in the environment.
 // The server never switches to this legacy model automatically.
 const LEGACY_AI_MODEL = "qwen-vl-plus";
@@ -164,7 +165,10 @@ const config = Object.freeze({
   model: aiConfig.model,
   baseURL: aiConfig.baseURL,
   apiKey: aiConfig.apiKey,
-  aiTimeoutMs: readPositiveInteger(process.env.AI_TIMEOUT_MS, 60_000),
+  aiTimeoutMs: readPositiveInteger(
+    process.env.AI_TIMEOUT_MS,
+    DEFAULT_AI_TIMEOUT_MS,
+  ),
   aiConnectTimeoutMs: readPositiveInteger(
     process.env.AI_CONNECT_TIMEOUT_MS,
     30_000,
@@ -513,7 +517,7 @@ function resolveAiFallbackReason(error) {
     error?.name === "AbortError" ||
     error?.name === "APIUserAbortError" ||
     error?.code === "ETIMEDOUT" ||
-    /timed out/i.test(error?.message || "")
+    /timed out|\babort(?:ed)?\b/i.test(error?.message || "")
   ) {
     return "AI_TIMEOUT";
   }
@@ -2511,11 +2515,14 @@ ${partialViewSafetyInstruction}
       dashscope: elapsedMs,
       total: Date.now() - requestStartedAt,
     });
+    const publicErrorMessage = fallbackReason === "AI_TIMEOUT"
+      ? "AI 服务响应较慢，本次任务已停止，请重试"
+      : errorDetails.error_message;
     return sendError(
       res,
       aiFailureHttpStatus(fallbackReason),
       fallbackReason,
-      errorDetails.error_message,
+      publicErrorMessage,
       errorDetails,
     );
   }
@@ -2729,6 +2736,7 @@ module.exports = {
   productRecommendationFilters,
   productRecommendationRequest,
   DEFAULT_AI_MODEL,
+  DEFAULT_AI_TIMEOUT_MS,
   LEGACY_AI_MODEL,
   structuredJsonRequestOptions,
 };
