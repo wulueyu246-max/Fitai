@@ -80,6 +80,13 @@ const DEFAULT_AI_TIMEOUT_MS = 90_000;
 // The server never switches to this legacy model automatically.
 const LEGACY_AI_MODEL = "qwen-vl-plus";
 
+function resolveAiTimeoutMs(value) {
+  return Math.max(
+    readPositiveInteger(value, DEFAULT_AI_TIMEOUT_MS),
+    DEFAULT_AI_TIMEOUT_MS,
+  );
+}
+
 function structuredJsonRequestOptions() {
   return {
     response_format: {type: "json_object"},
@@ -165,10 +172,7 @@ const config = Object.freeze({
   model: aiConfig.model,
   baseURL: aiConfig.baseURL,
   apiKey: aiConfig.apiKey,
-  aiTimeoutMs: readPositiveInteger(
-    process.env.AI_TIMEOUT_MS,
-    DEFAULT_AI_TIMEOUT_MS,
-  ),
+  aiTimeoutMs: resolveAiTimeoutMs(process.env.AI_TIMEOUT_MS),
   aiConnectTimeoutMs: readPositiveInteger(
     process.env.AI_CONNECT_TIMEOUT_MS,
     30_000,
@@ -2721,6 +2725,7 @@ module.exports = {
   resolveAiFallbackReason,
   resolveAiModeReason,
   resolveAiConfig,
+  resolveAiTimeoutMs,
   listenForRequests,
   shouldUseMockAi,
   validateOutfitRequest,

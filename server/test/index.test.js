@@ -27,6 +27,7 @@ const {
   resolveAiFallbackReason,
   resolveAiModeReason,
   resolveAiConfig,
+  resolveAiTimeoutMs,
   sanitizeAiErrorMessage,
   shouldUseMockAi,
   isAllowedOrigin,
@@ -787,6 +788,8 @@ test("selects DashScope defaults for a DashScope API key", () => {
 test("uses qwen3.7-plus by default and keeps legacy rollback explicit", () => {
   assert.equal(DEFAULT_AI_MODEL, "qwen3.7-plus");
   assert.equal(DEFAULT_AI_TIMEOUT_MS, 90_000);
+  assert.equal(resolveAiTimeoutMs("60000"), 90_000);
+  assert.equal(resolveAiTimeoutMs("120000"), 120_000);
   assert.equal(LEGACY_AI_MODEL, "qwen-vl-plus");
   assert.equal(resolveAiConfig({
     DASHSCOPE_API_KEY: "dashscope-test-key",
