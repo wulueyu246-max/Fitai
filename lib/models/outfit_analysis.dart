@@ -4,6 +4,7 @@ import 'product.dart';
 import 'product_recommendation.dart';
 import 'product_search_requirement.dart';
 import 'styling_strategy.dart';
+import 'style_profile.dart';
 
 class OutfitAnalysis {
   const OutfitAnalysis({
@@ -16,6 +17,7 @@ class OutfitAnalysis {
     required this.suggestion,
     this.gender = 'unisex',
     this.styleExpression = 'auto',
+    this.styleProfile = const StyleProfile(),
     this.analysisMode = 'ai',
     this.stylingStrategy = const StylingStrategy(),
     this.recommendedProducts = const [],
@@ -52,6 +54,9 @@ class OutfitAnalysis {
         json,
         const ['style_expression', 'styleExpression'],
         fallback: 'auto',
+      ),
+      styleProfile: StyleProfile.fromJson(
+        json['style_profile'] ?? json['styleProfile'],
       ),
       analysisMode: json['analysis_mode'] is String
           ? json['analysis_mode'] as String
@@ -175,6 +180,9 @@ class OutfitAnalysis {
         const ['style_expression', 'styleExpression'],
         fallback: 'auto',
       ),
+      styleProfile: StyleProfile.fromJson(
+        json['style_profile'] ?? json['styleProfile'],
+      ),
       analysisMode: _readOptionalAliasedString(
         json,
         const ['analysisMode', 'analysis_mode'],
@@ -206,6 +214,7 @@ class OutfitAnalysis {
   final String suggestion;
   final String gender;
   final String styleExpression;
+  final StyleProfile styleProfile;
   final String analysisMode;
   final StylingStrategy stylingStrategy;
   final List<Product> recommendedProducts;
@@ -228,6 +237,7 @@ class OutfitAnalysis {
     String? suggestion,
     String? gender,
     String? styleExpression,
+    StyleProfile? styleProfile,
     String? analysisMode,
     StylingStrategy? stylingStrategy,
     List<Product>? recommendedProducts,
@@ -248,6 +258,7 @@ class OutfitAnalysis {
       suggestion: suggestion ?? this.suggestion,
       gender: gender ?? this.gender,
       styleExpression: styleExpression ?? this.styleExpression,
+      styleProfile: styleProfile ?? this.styleProfile,
       analysisMode: analysisMode ?? this.analysisMode,
       stylingStrategy: stylingStrategy ?? this.stylingStrategy,
       recommendedProducts: recommendedProducts ?? this.recommendedProducts,
@@ -272,6 +283,7 @@ class OutfitAnalysis {
       'suggestion': suggestion,
       'gender': gender,
       'style_expression': styleExpression,
+      'style_profile': styleProfile.toJson(),
       'analysis_mode': analysisMode,
       'styling_strategy': stylingStrategy.toJson(),
       'recommended_products':

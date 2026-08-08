@@ -210,6 +210,7 @@ class CatalogProductService implements ProductService {
                 'request_id': analysis.requestId!.trim(),
               'gender': analysis.gender,
               'style_expression': analysis.styleExpression,
+              'style_profile': analysis.styleProfile.toJson(),
               'style': analysis.style,
               'scene': request.scene,
               'budget': _itemBudgetCeiling(
@@ -222,6 +223,7 @@ class CatalogProductService implements ProductService {
               'user_profile': {
                 'gender': analysis.gender,
                 'style_expression': analysis.styleExpression,
+                'style_profile': analysis.styleProfile.toJson(),
                 'height': request.height,
                 'weight': request.weight,
                 'body_profile': analysis.bodyAnalysis,
@@ -232,6 +234,7 @@ class CatalogProductService implements ProductService {
               'user_requirements': {
                 'scene': request.scene,
                 'style': analysis.style,
+                'style_profile': analysis.styleProfile.toJson(),
                 'budget': _itemBudgetCeiling(
                   request.itemBudget,
                   request.request,
@@ -241,6 +244,7 @@ class CatalogProductService implements ProductService {
                 'user_input': request.request,
               },
               'outfit_plan': {
+                'style_profile': analysis.styleProfile.toJson(),
                 'styling_strategy': analysis.stylingStrategy.toJson(),
                 'looks': analysis.looks
                     .map((look) => look.toJson())

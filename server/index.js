@@ -50,7 +50,12 @@ const {
   assertContextGender,
   createRecommendationContext,
   logRecommendationStage,
+  resolveStyleExpression,
 } = require("./recommendation_context");
+const {
+  buildStyleInterpreterPrompt,
+  normalizeStyleProfile,
+} = require("./style_interpreter");
 
 require("dotenv").config({
   path: path.join(__dirname, ".env"),
@@ -1193,6 +1198,18 @@ function parseOutfitAnalysis(content, context = {}) {
     throw new Error("AI 返回缺少字符串字段：style");
   }
 
+  const styleProfile = normalizeStyleProfile(
+    parsed.style_profile || parsed.styleProfile,
+    {sourceText: context.userInput || parsed.style},
+  );
+  const styleExpression = resolveStyleExpression({
+    explicit: parsed.style_expression ||
+      parsed.styleExpression ||
+      context.style_expression ||
+      context.styleExpression,
+    styleProfile,
+  });
+
   const stylingStrategy = normalizeStylingStrategy(
     parsed.styling_strategy || parsed.stylingStrategy,
     {bodyProfile: bodyProfile.trim(), scene: context.scene},
@@ -1385,13 +1402,14 @@ function parseOutfitAnalysis(content, context = {}) {
   );
   assertStyleExpressionConsistency(looks, {
     gender: analysisGender,
-    styleExpression: context.style_expression || context.styleExpression,
+    styleExpression,
   });
   const products = looks.flatMap((look) => look.items);
 
   return {
     gender: analysisGender,
-    style_expression: context.style_expression || context.styleExpression || "auto",
+    style_expression: styleExpression,
+    style_profile: styleProfile,
     bodyProfile: bodyProfile.trim(),
     style: parsed.style.trim(),
     style_upgrade_level: styleUpgradeLevel,
@@ -1849,6 +1867,7 @@ async function buildOutfitApiResponse(
     scene: outfitRequest.scene,
     requestedStyle: analysis.style,
     styleExpression: analysis.style_expression,
+    styleProfile: analysis.style_profile,
     bodyProfile: {
       height: outfitRequest.height,
       weight: outfitRequest.weight,
@@ -1872,6 +1891,7 @@ async function buildOutfitApiResponse(
       scene: outfitRequest.scene,
       gender: effectiveGender,
       style_expression: recommendationContext.style_expression,
+      style_profile: recommendationContext.style_profile,
       recommendation_context: recommendationContext,
       budget: preferredItemBudget,
       item_budget: outfitRequest.itemBudget,
@@ -1888,12 +1908,14 @@ async function buildOutfitApiResponse(
       user_requirements: {
         scene: outfitRequest.scene,
         style: analysis.style,
+        style_profile: recommendationContext.style_profile,
         budget: preferredItemBudget,
         item_budget: outfitRequest.itemBudget,
         outfit_budget: outfitRequest.outfitBudget,
         user_input: outfitRequest.request,
       },
       outfit_plan: {
+        style_profile: recommendationContext.style_profile,
         styling_strategy: analysis.styling_strategy,
         looks,
         top: analysis.recommendations.top,
@@ -2433,6 +2455,7 @@ async function handleProductRecommendations(req, res, next) {
       scene: filters.scene,
       requestedStyle: filters.style,
       styleExpression: filters.style_expression,
+      styleProfile: filters.style_profile,
       bodyProfile: filters.user_profile,
       weather: filters.user_requirements?.weather,
       budget: {
@@ -2444,6 +2467,7 @@ async function handleProductRecommendations(req, res, next) {
     });
     filters.gender = recommendationContext.gender;
     filters.style_expression = recommendationContext.style_expression;
+    filters.style_profile = recommendationContext.style_profile;
     filters.recommendation_context = recommendationContext;
     logRecommendationStage(console, "product_request", recommendationContext, {
       requirement_count: items.length,
@@ -2514,6 +2538,7 @@ function productRecommendationFilters(input = {}, requestId = "") {
     category: input?.category,
     style: input?.style,
     style_expression: input?.style_expression ?? input?.styleExpression,
+    style_profile: input?.style_profile ?? input?.styleProfile,
     color: input?.color,
     bodyType: input?.bodyType,
     scene: input?.scene,
@@ -2817,6 +2842,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
 ${partialViewSafetyInstruction}
 Stylist V2 workflow (mandatory): analyze visual proportions first, then output styling_strategy, then design three Looks from that strategy. Never infer proportion from height alone.
 All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.
+${buildStyleInterpreterPrompt()}
 The immutable request context gender is ${requestContext.gender} and style_expression is ${requestContext.style_expression}. Every Look and item must preserve that gender; downstream stages must never infer it again. When style_expression=feminine, explicitly evaluate waistline, garment-length ratio, leg-line continuity, shoe shape/heel, skin exposure, and refined accessories without mechanically requiring skirts or heels.
 styling_strategy must contain body_strengths[], proportion_issues[], visual_goals[], waistline_strategy, top_length_strategy, bottom_strategy, shoe_strategy, color_strategy, silhouette_strategy, skin_exposure_strategy, accessory_strategy, and weather_strategy.
 Use height, weight, photographed shoulder/waist/leg proportions, current clothing, scene, weather, comfort, and requested style together. Valid visual_goals include elongate_legs, raise_visual_waistline, shorten_visual_torso, emphasize_waist, balance_shoulders, create_vertical_line, reduce_lower_body_bulk, enhance_body_curve, create_lightness, and create_structure.
@@ -2850,6 +2876,33 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
   "gender": "",
   "bodyProfile": "",
   "style": "",
+  "style_expression": "auto",
+  "style_profile": {
+    "source_text": "",
+    "interpretation": "",
+    "primary_style": "",
+    "secondary_styles": [],
+    "blend_rationale": "",
+    "dimensions": {
+      "maturity": 50,
+      "femininity": 50,
+      "masculinity": 50,
+      "structure": 50,
+      "minimalism": 50,
+      "romantic": 50,
+      "sportiness": 50,
+      "sexiness": 50,
+      "youthfulness": 50,
+      "luxury": 50,
+      "casualness": 50
+    },
+    "silhouette": "",
+    "preferred_items": [],
+    "preferred_colors": [],
+    "preferred_materials": [],
+    "positive_keywords": [],
+    "negative_keywords": []
+  },
   "style_upgrade_level": "upgrade",
   "styling_strategy": {
     "body_strengths": [],

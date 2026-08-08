@@ -379,11 +379,12 @@ function buildMessages(groups, context) {
       user_input: context.userInput,
     }, [
       "scene", "style", "season", "weather", "budget",
+      "style_profile", "styleProfile",
       "item_budget", "itemBudget", "outfit_budget", "outfitBudget",
       "color_preferences", "colorPreferences", "user_input", "userInput",
     ]),
     outfit_plan: pickFields(context.outfit_plan || context.outfitPlan || {}, [
-      "styling_strategy", "stylingStrategy", "looks", "top", "bottom", "dress",
+      "style_profile", "styleProfile", "styling_strategy", "stylingStrategy", "looks", "top", "bottom", "dress",
       "shoes", "outerwear", "bag", "accessories", "summary",
     ]),
     product_groups: groups.map((group, index) => ({

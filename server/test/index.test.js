@@ -884,6 +884,48 @@ function validAiOutfitPayloadForNormalization() {
   };
 }
 
+test("AI Style Interpreter preserves an unknown blended style through Look parsing", () => {
+  const payload = validAiOutfitPayloadForNormalization();
+  payload.style = "韩系Clean Fit学长感";
+  payload.style_profile = {
+    source_text: "韩系Clean Fit学长感",
+    interpretation: "以干净克制的轮廓融合韩系年轻学院氛围",
+    primary_style: "Clean Fit",
+    secondary_styles: ["韩系", "学长感"],
+    blend_rationale: "Clean Fit 为主，韩系学院感为辅",
+    dimensions: {
+      maturity: 48,
+      femininity: 18,
+      masculinity: 72,
+      structure: 62,
+      minimalism: 86,
+      romantic: 20,
+      sportiness: 24,
+      sexiness: 12,
+      youthfulness: 76,
+      luxury: 42,
+      casualness: 58,
+    },
+    silhouette: "利落但不过度正式的直线轮廓",
+    preferred_items: ["短夹克", "直筒裤"],
+    preferred_colors: ["灰色", "海军蓝"],
+    preferred_materials: ["精梳棉", "轻薄羊毛"],
+    positive_keywords: ["干净", "克制", "学院感"],
+    negative_keywords: ["繁复印花", "松垮"],
+  };
+
+  const analysis = parseOutfitAnalysis(JSON.stringify(payload), {
+    gender: "male",
+    userInput: "想要韩系Clean Fit学长感，但不要普通休闲",
+  });
+
+  assert.equal(analysis.style_profile.source_text, "韩系Clean Fit学长感");
+  assert.equal(analysis.style_profile.primary_style, "Clean Fit");
+  assert.deepEqual(analysis.style_profile.secondary_styles, ["韩系", "学长感"]);
+  assert.equal(analysis.style_expression, "masculine");
+  assert.doesNotMatch(analysis.style_profile.interpretation, /普通休闲/);
+});
+
 test("normalizes blank explanatory AI fields before strict outfit validation", () => {
   const analysis = parseOutfitAnalysis(
     JSON.stringify(validAiOutfitPayloadForNormalization()),

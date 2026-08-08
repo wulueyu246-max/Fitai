@@ -1,29 +1,17 @@
 const {normalizeGender} = require("./product_relevance");
+const {
+  normalizeStyleProfile,
+  resolveExpressionFromStyleProfile,
+} = require("./style_interpreter");
 
 const STYLE_EXPRESSIONS = new Set(["feminine", "neutral", "masculine", "auto"]);
-const FEMININE_TERMS = [
-  "御姐", "轻熟", "法式女", "女性约会", "优雅", "性感但得体", "甜酷女", "女人味",
-];
-const NEUTRAL_TERMS = ["中性", "工装", "无性别", "boyish"];
 
-function resolveStyleExpression({gender, requestedStyle, scene, userInput, explicit} = {}) {
+function resolveStyleExpression({explicit, styleProfile} = {}) {
   const normalizedExplicit = String(explicit || "").trim().toLowerCase();
-  if (STYLE_EXPRESSIONS.has(normalizedExplicit)) return normalizedExplicit;
-  const normalizedGender = normalizeGender(gender);
-  const evidence = [requestedStyle, scene, userInput]
-    .map((value) => String(value || "").trim().toLowerCase())
-    .filter(Boolean)
-    .join(" ");
-  if (NEUTRAL_TERMS.some((term) => evidence.includes(term))) {
-    return evidence.includes("boyish") || evidence.includes("工装")
-      ? "masculine"
-      : "neutral";
+  if (STYLE_EXPRESSIONS.has(normalizedExplicit) && normalizedExplicit !== "auto") {
+    return normalizedExplicit;
   }
-  if (normalizedGender === "female" &&
-      FEMININE_TERMS.some((term) => evidence.includes(term))) {
-    return "feminine";
-  }
-  return "auto";
+  return resolveExpressionFromStyleProfile(styleProfile);
 }
 
 function createRecommendationContext({
@@ -32,24 +20,26 @@ function createRecommendationContext({
   scene,
   requestedStyle,
   styleExpression,
+  styleProfile,
   bodyProfile,
   weather,
   budget,
   userInput,
 } = {}) {
   const normalizedGender = normalizeGender(gender);
+  const normalizedStyleProfile = normalizeStyleProfile(styleProfile, {
+    sourceText: requestedStyle || userInput,
+  });
   const value = {
     request_id: String(requestId || "").trim(),
     gender: normalizedGender,
     scene: String(scene || "").trim(),
     requested_style: String(requestedStyle || userInput || "").trim(),
     style_expression: resolveStyleExpression({
-      gender: normalizedGender,
-      requestedStyle,
-      scene,
-      userInput,
       explicit: styleExpression,
+      styleProfile: normalizedStyleProfile,
     }),
+    style_profile: normalizedStyleProfile,
     body_profile: Object.freeze({...bodyProfile}),
     weather: Object.freeze({...weather}),
     budget: Object.freeze({...budget}),
@@ -74,6 +64,7 @@ function logRecommendationStage(logger, stage, context, details = {}) {
     request_id: context?.request_id || undefined,
     gender: context?.gender || "unisex",
     style_expression: context?.style_expression || "auto",
+    style_profile_configured: Boolean(context?.style_profile?.source_text),
     ...details,
   });
 }
