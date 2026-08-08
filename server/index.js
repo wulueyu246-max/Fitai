@@ -1020,8 +1020,8 @@ function parseOutfitAnalysis(content, context = {}) {
         throw new Error(`AI 返回 looks[${lookIndex}] 性别与顶层 gender 不一致`);
       }
       const rawItems = look.items;
-      if (!Array.isArray(rawItems) || rawItems.length < 3 || rawItems.length > 10) {
-        throw new Error(`AI 返回 looks[${lookIndex}].items 必须包含 3 到 10 个单品`);
+      if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > 10) {
+        throw new Error(`AI 返回 looks[${lookIndex}].items 必须包含 1 到 10 个单品`);
       }
       const lookId = readOptionalString(look.look_id || look.lookId) ||
         `look-${lookIndex + 1}`;
@@ -1051,10 +1051,9 @@ function parseOutfitAnalysis(content, context = {}) {
         ? applyAccessoryDecisions(normalizedItems, accessoriesDecision, lookIndex)
         : normalizedItems;
       const categories = new Set(items.map((item) => item.category));
-      if (!categories.has("top") || !categories.has("bottom") ||
-          !categories.has("shoes")) {
+      if (!isValidLookComposition(categories, lookGender)) {
         throw new Error(
-          `AI 返回 looks[${lookIndex}] 必须包含上衣、下装和鞋`,
+          `AI 返回 looks[${lookIndex}] 缺少完整穿搭组合`,
         );
       }
       return {
@@ -1103,6 +1102,17 @@ const STYLE_DIRECTION_FALLBACKS = ["Clean Fit 高级基础", "韩系氛围", "�
 const ACCESSORY_DECISION_CATEGORIES = Object.freeze([
   "hat", "bag", "glasses", "belt", "jewelry", "scarf", "watch",
 ]);
+
+function isValidLookComposition(categories, gender) {
+  if (!(categories instanceof Set) || categories.size === 0) return false;
+  const hasTop = categories.has("top");
+  const hasBottom = categories.has("bottom");
+  const hasShoes = categories.has("shoes");
+  return (hasTop && hasBottom && hasShoes) ||
+    (gender === "female" && categories.has("dress") && hasShoes) ||
+    (hasTop && hasBottom) ||
+    (categories.has("outerwear") && hasBottom && hasShoes);
+}
 
 function normalizeAccessoryDecisionCategory(value) {
   const normalized = String(value || "").trim().toLowerCase();

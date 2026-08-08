@@ -628,6 +628,51 @@ test("duplicate accessory categories keep the first valid decision", () => {
   assert.deepEqual(analysis.looks[2].accessories_decision, []);
 });
 
+test("female French dress Looks pass without separate top and bottom items", () => {
+  const analysis = parseOutfitAnalysis(JSON.stringify({
+    gender: "female",
+    bodyProfile: "adult female",
+    style: "French date",
+    style_upgrade_level: "maintain",
+    recommendations: {
+      top: "one-piece dress",
+      bottom: "the dress defines the complete silhouette",
+      shoes: "Mary Jane shoes",
+      accessories: "small shoulder bag",
+      summary: "a complete French dress look",
+    },
+    looks: [1, 2, 3].map((index) => ({
+      look_id: `french-dress-${index}`,
+      gender: "female",
+      scene: "date",
+      style: "French",
+      style_direction: `French dress direction ${index}`,
+      items: [
+        {
+          category: "dress",
+          item_name: "French midi dress",
+          color: "cream",
+          search_keywords: ["women cream French midi dress"],
+          negative_keywords: ["menswear"],
+        },
+        {
+          category: "shoes",
+          item_name: "Mary Jane shoes",
+          color: "black",
+          search_keywords: ["women black Mary Jane shoes"],
+          negative_keywords: ["mens shoes"],
+        },
+      ],
+    })),
+  }), {gender: "female", scene: "date"});
+
+  assert.equal(analysis.looks.length, 3);
+  assert.ok(analysis.looks.every((look) => look.items.length === 2));
+  assert.ok(analysis.looks.every((look) =>
+    look.items.some((item) => item.category === "dress") &&
+    look.items.some((item) => item.category === "shoes")));
+});
+
 test("female French looks remain grouped through product search requirements", () => {
   const result = productRecommendationRequest({
     gender: "female",
