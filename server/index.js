@@ -1117,14 +1117,17 @@ function normalizeAiOutfitPayload(payload) {
           if (!decision || typeof decision !== "object" || Array.isArray(decision)) {
             return decision;
           }
+          const category = normalizeAccessoryDecisionCategory(decision.category);
+          if (!category) return null;
           const reason = userFacingChineseText(decision.reason, "");
           return {
             ...decision,
+            category,
             reason: reason || (decision.include === true
               ? "该配饰有助于提升整体造型完成度"
               : "当前造型无需额外加入该配饰"),
           };
-        });
+        }).filter(Boolean);
       }
       return normalizedLook;
     });
@@ -1471,7 +1474,7 @@ function normalizeAccessoryDecisionCategory(value) {
   if (/包|\b(?:bag|handbag|tote)\b/.test(normalized)) return "bag";
   if (/眼镜|墨镜|太阳镜|\b(?:glasses|sunglasses)\b/.test(normalized)) return "glasses";
   if (/腰带|皮带|\bbelt\b/.test(normalized)) return "belt";
-  if (/珠宝|首饰|项链|耳环|耳饰|手链|戒指|\b(?:jewelry|necklace|earrings?)\b/.test(normalized)) {
+  if (/珠宝|首饰|项链|耳环|耳饰|耳钉|手链|戒指|胸针|\b(?:jewelry|necklace|earrings?|bracelet|ring|brooch)\b/.test(normalized)) {
     return "jewelry";
   }
   if (/围巾|丝巾|\bscarf\b/.test(normalized)) return "scarf";

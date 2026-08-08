@@ -787,6 +787,35 @@ test("duplicate accessory categories keep the first valid decision", () => {
   assert.deepEqual(analysis.looks[2].accessories_decision, []);
 });
 
+test("unknown AI accessory decisions are discarded without weakening core Looks", () => {
+  const payload = validAiOutfitPayloadForNormalization();
+  payload.looks[0].accessories_decision.push({
+    category: "decorative-object",
+    include: true,
+    reason: "Adds decoration.",
+  });
+  payload.looks[1].accessories_decision.push({
+    category: "bracelet",
+    include: true,
+    reason: "Adds polish.",
+  });
+
+  const analysis = parseOutfitAnalysis(JSON.stringify(payload), {
+    gender: "male",
+    requestId: "accessory-tolerance-request",
+  });
+
+  assert.equal(analysis.looks.length, 3);
+  assert.ok(analysis.looks.every((look) =>
+    look.items.some((item) => item.category === "top") &&
+    look.items.some((item) => item.category === "bottom") &&
+    look.items.some((item) => item.category === "shoes")));
+  assert.ok(analysis.looks[0].accessories_decision.every((decision) =>
+    decision.category !== "decorative-object"));
+  assert.ok(analysis.looks[1].accessories_decision.some((decision) =>
+    decision.category === "jewelry"));
+});
+
 function validAiOutfitPayloadForNormalization() {
   const coreItems = [
     {
