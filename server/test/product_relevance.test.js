@@ -49,6 +49,11 @@ test("gender and category aliases normalize for male female and unisex", () => {
   assert.equal(normalizeProductCategory("玛丽珍鞋"), "shoes");
   assert.equal(normalizeProductCategory("法式连衣裙"), "dress");
   assert.equal(normalizeProductCategory("托特包"), "bag");
+  assert.equal(normalizeProductCategory("cap"), "hat");
+  assert.equal(normalizeProductCategory("jewelry"), "accessory");
+  assert.equal(normalizeProductCategory("belt"), "accessory");
+  assert.equal(normalizeProductCategory("scarf"), "accessory");
+  assert.equal(normalizeProductCategory("accessory"), "accessory");
 });
 
 test("query builder prefixes every genderless male French shirt keyword", () => {

@@ -1100,8 +1100,23 @@ function parseOutfitAnalysis(content, context = {}) {
 
 const STYLE_DIRECTION_FALLBACKS = ["Clean Fit 高级基础", "韩系氛围", "轻商务"];
 const ACCESSORY_DECISION_CATEGORIES = Object.freeze([
-  "hat", "bag", "glasses", "belt", "jewelry", "scarf", "watch",
+  "hat", "bag", "glasses", "belt", "jewelry", "scarf", "watch", "accessory",
 ]);
+
+const ACCESSORY_REQUIREMENT_DEFAULTS = Object.freeze({
+  hat: Object.freeze({category: "hat", names: ["简约帽子", "百搭棒球帽"]}),
+  bag: Object.freeze({category: "bag", names: ["简约包袋", "质感通勤包"]}),
+  glasses: Object.freeze({category: "accessory", names: ["简约眼镜", "轻量太阳镜"]}),
+  belt: Object.freeze({category: "accessory", names: ["简约腰带", "质感皮带"]}),
+  jewelry: Object.freeze({
+    category: "accessory",
+    femaleNames: ["珍珠耳饰", "简约金属耳饰"],
+    names: ["简约金属首饰", "极简项链"],
+  }),
+  scarf: Object.freeze({category: "accessory", names: ["简约围巾", "质感丝巾"]}),
+  watch: Object.freeze({category: "accessory", names: ["简约腕表", "质感金属腕表"]}),
+  accessory: Object.freeze({category: "accessory", names: ["简约配饰", "质感造型配饰"]}),
+});
 
 function isValidLookComposition(categories, gender) {
   if (!(categories instanceof Set) || categories.size === 0) return false;
@@ -1125,13 +1140,20 @@ function normalizeAccessoryDecisionCategory(value) {
   }
   if (/围巾|丝巾|\bscarf\b/.test(normalized)) return "scarf";
   if (/手表|腕表|\bwatch\b/.test(normalized)) return "watch";
+  if (/配饰|饰品|\baccessor(?:y|ies)\b/.test(normalized)) return "accessory";
   return ACCESSORY_DECISION_CATEGORIES.includes(normalized) ? normalized : "";
 }
 
 function accessoryTypeForItem(item) {
-  return normalizeAccessoryDecisionCategory(
+  const categoryType = normalizeAccessoryDecisionCategory(
     item?.accessory_type || item?.accessoryType || item?.category,
-  ) || normalizeAccessoryDecisionCategory(item?.item_name || item?.itemName);
+  );
+  const itemNameType = normalizeAccessoryDecisionCategory(
+    item?.item_name || item?.itemName,
+  );
+  return categoryType && categoryType !== "accessory"
+    ? categoryType
+    : itemNameType || categoryType;
 }
 
 function normalizeAccessoriesDecision(value, lookIndex) {
@@ -1179,12 +1201,39 @@ function applyAccessoryDecisions(items, decisions, lookIndex) {
     !item.accessory_type || included.has(item.accessory_type));
   for (const category of included) {
     if (!filtered.some((item) => item.accessory_type === category)) {
-      throw new Error(
-        `AI 返回 looks[${lookIndex}] 已决定加入 ${category}，但未生成对应商品需求`,
-      );
+      filtered.push(buildAccessoryRequirement(category, filtered, lookIndex));
     }
   }
   return filtered;
+}
+
+function buildAccessoryRequirement(accessoryType, items, lookIndex) {
+  const defaults = ACCESSORY_REQUIREMENT_DEFAULTS[accessoryType];
+  if (!defaults) {
+    throw new Error(`AI 返回 looks[${lookIndex}] 存在无法映射的配饰类型`);
+  }
+  const context = items.find((item) => !item.accessory_type) || items[0] || {};
+  const gender = normalizeGender(context.gender);
+  const audience = gender === "male" ? "男士" : gender === "female" ? "女士" : "";
+  const names = gender === "female" && defaults.femaleNames
+    ? defaults.femaleNames
+    : defaults.names;
+  const requirement = normalizeProductRequirement({
+    look_id: context.look_id,
+    category: defaults.category,
+    gender,
+    item_name: names[0],
+    style: context.style,
+    season: context.season,
+    scene: context.scene,
+    search_keywords: names.map((name) => [audience, name].filter(Boolean).join(" ")),
+    negative_keywords: context.negative_keywords || [],
+  });
+  return {
+    ...requirement,
+    accessory_type: accessoryType,
+    search_keywords: buildSearchKeywords(requirement),
+  };
 }
 
 function normalizeStyleUpgradeLevel(value) {
@@ -2086,8 +2135,8 @@ function productRecommendationRequest(input = {}, requestId = "") {
         throw new TypeError(`looks[${lookIndex}].gender conflicts with request gender`);
       }
       const rawLookItems = look.items;
-      if (!Array.isArray(rawLookItems) || rawLookItems.length < 3 || rawLookItems.length > 10) {
-        throw new TypeError(`looks[${lookIndex}].items must contain 3 to 10 requirements`);
+      if (!Array.isArray(rawLookItems) || rawLookItems.length === 0 || rawLookItems.length > 10) {
+        throw new TypeError(`looks[${lookIndex}].items must contain 1 to 10 requirements`);
       }
       const hasAccessoryDecision = Object.prototype.hasOwnProperty.call(
         look,

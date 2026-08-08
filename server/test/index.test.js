@@ -628,6 +628,72 @@ test("duplicate accessory categories keep the first valid decision", () => {
   assert.deepEqual(analysis.looks[2].accessories_decision, []);
 });
 
+test("included jewelry, hat and bag decisions create product requirements without failing", () => {
+  const coreItems = [
+    {category: "top", item_name: "法式针织衫", color: "米白色", search_keywords: ["女士 米白色 法式针织衫"], negative_keywords: ["男装"]},
+    {category: "bottom", item_name: "高腰阔腿裤", color: "杏色", search_keywords: ["女士 杏色 高腰阔腿裤"], negative_keywords: ["男装"]},
+    {category: "shoes", item_name: "玛丽珍鞋", color: "黑色", search_keywords: ["女士 黑色 玛丽珍鞋"], negative_keywords: ["男鞋"]},
+  ];
+  const decisions = [
+    {category: "jewelry", include: true, reason: "增加法式精致感"},
+    {category: "cap", include: true, reason: "补充休闲层次"},
+    {category: "bag", include: true, reason: "完成约会造型"},
+  ];
+  const analysis = parseOutfitAnalysis(JSON.stringify({
+    gender: "female",
+    bodyProfile: "adult female",
+    style: "French date",
+    style_upgrade_level: "maintain",
+    recommendations: {
+      top: "French knit top",
+      bottom: "high-waisted trousers",
+      shoes: "Mary Jane shoes",
+      accessories: "jewelry, hat and bag",
+      summary: "complete French date outfit",
+    },
+    looks: [1, 2, 3].map((index) => ({
+      look_id: `accessory-look-${index}`,
+      gender: "female",
+      scene: "date",
+      style: "French",
+      style_direction: `French direction ${index}`,
+      accessories_decision: decisions,
+      items: coreItems,
+    })),
+  }), {gender: "female", scene: "date"});
+
+  assert.equal(analysis.looks.length, 3);
+  assert.ok(analysis.looks.every((look) => look.items.length === 6));
+  assert.ok(analysis.looks.every((look) =>
+    ["jewelry", "hat", "bag"].every((category) =>
+      look.items.some((item) => item.accessory_type === category))));
+  const jewelry = analysis.looks[0].items.find((item) =>
+    item.accessory_type === "jewelry");
+  assert.equal(jewelry.category, "accessory");
+  assert.equal(jewelry.item_name, "珍珠耳饰");
+  assert.deepEqual(jewelry.search_keywords.slice(0, 2), [
+    "女士 珍珠耳饰",
+    "女士 简约金属耳饰",
+  ]);
+
+  const productRequest = productRecommendationRequest({
+    gender: "female",
+    scene: "date",
+    style: "French",
+    looks: [{
+      look_id: "accessory-product-look",
+      gender: "female",
+      scene: "date",
+      style: "French",
+      accessories_decision: decisions,
+      items: coreItems,
+    }],
+  }, "accessory-request");
+  assert.equal(productRequest.items.length, 6);
+  assert.ok(["jewelry", "hat", "bag"].every((category) =>
+    productRequest.items.some((item) => item.accessory_type === category)));
+});
+
 test("female French dress Looks pass without separate top and bottom items", () => {
   const analysis = parseOutfitAnalysis(JSON.stringify({
     gender: "female",
@@ -671,6 +737,17 @@ test("female French dress Looks pass without separate top and bottom items", () 
   assert.ok(analysis.looks.every((look) =>
     look.items.some((item) => item.category === "dress") &&
     look.items.some((item) => item.category === "shoes")));
+  const productRequest = productRecommendationRequest({
+    gender: "female",
+    scene: "date",
+    style: "French",
+    looks: [analysis.looks[0]],
+  }, "french-dress-request");
+  assert.equal(productRequest.items.length, 2);
+  assert.deepEqual(productRequest.items.map((item) => item.category), [
+    "dress",
+    "shoes",
+  ]);
 });
 
 test("female French looks remain grouped through product search requirements", () => {

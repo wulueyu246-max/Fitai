@@ -445,6 +445,50 @@ test("a Taobao no-result error continues with the next precise keyword", async (
   assert.ok(products.every((product) => product.source === "taobao"));
 });
 
+test("an empty accessory result preserves matching core products", async () => {
+  const provider = providerWithClient({
+    call: async (method, params) => {
+      if (method === TAOBAO_MATERIAL_SAMPLE_METHOD ||
+          /耳饰|首饰/.test(String(params.q || ""))) {
+        return response(method, []);
+      }
+      return response(method, Array.from({length: 20}, (_, index) => taobaoItem({
+        item_basic_info: {
+          item_id: `knit-${index}`,
+          title: `女士米白色法式针织衫${index}`,
+          category_name: "女士上衣",
+          pict_url: `//img.example.com/knit-${index}.jpg`,
+        },
+        publish_info: {click_url: `//s.click.taobao.com/knit-${index}`},
+      })));
+    },
+  });
+
+  const products = await provider.recommendForQueries([
+    {
+      category: "top",
+      gender: "female",
+      item_name: "法式针织衫",
+      color: "米白色",
+      style: "法式",
+      search_keywords: ["女士 米白色 法式针织衫"],
+      negative_keywords: ["男装"],
+    },
+    {
+      category: "accessory",
+      gender: "female",
+      item_name: "珍珠耳饰",
+      style: "法式",
+      search_keywords: ["女士 珍珠耳饰", "女士 简约金属耳饰"],
+      negative_keywords: ["男士"],
+    },
+  ]);
+
+  assert.equal(products.length, 6);
+  assert.ok(products.every((product) =>
+    product.category === "top" && product.source === "taobao"));
+});
+
 test("builds a twenty-item quality-filtered pool and returns up to six AI selections", async () => {
   const pageSizes = [];
   const capturedGroups = [];
