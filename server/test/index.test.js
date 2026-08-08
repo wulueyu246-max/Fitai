@@ -587,6 +587,47 @@ test("Clean Fit minimalist decisions remove a forced hat before product search",
     look.items.every((item) => item.category !== "hat")));
 });
 
+test("duplicate accessory categories keep the first valid decision", () => {
+  const analysis = parseOutfitAnalysis(JSON.stringify({
+    gender: "male",
+    bodyProfile: "adult male",
+    style: "Clean Fit",
+    style_upgrade_level: "maintain",
+    recommendations: {
+      top: "knit polo",
+      bottom: "straight trousers",
+      shoes: "minimal sneakers",
+      accessories: "no hat required",
+      summary: "clean complete look",
+    },
+    looks: [1, 2, 3].map((index) => ({
+      look_id: `dedupe-${index}`,
+      gender: "male",
+      scene: "date",
+      style: "Clean Fit",
+      style_direction: `direction-${index}`,
+      accessories_decision: index === 3 ? [] : [
+        {category: "hat", include: false, reason: "keep the silhouette clean"},
+        {category: "cap", include: true, reason: "duplicate normalized category"},
+      ],
+      items: [
+        {category: "top", item_name: "knit polo", color: "grey", search_keywords: ["men grey knit polo"], negative_keywords: ["women"]},
+        {category: "bottom", item_name: "straight trousers", color: "navy", search_keywords: ["men navy straight trousers"], negative_keywords: ["women"]},
+        {category: "shoes", item_name: "minimal sneakers", color: "white", search_keywords: ["men white minimal sneakers"], negative_keywords: ["women"]},
+      ],
+    })),
+  }), {gender: "male", scene: "date"});
+
+  assert.equal(analysis.looks[0].accessories_decision.length, 1);
+  assert.deepEqual(analysis.looks[0].accessories_decision[0], {
+    category: "hat",
+    include: false,
+    reason: "keep the silhouette clean",
+  });
+  assert.equal(analysis.looks[1].accessories_decision.length, 1);
+  assert.deepEqual(analysis.looks[2].accessories_decision, []);
+});
+
 test("female French looks remain grouped through product search requirements", () => {
   const result = productRecommendationRequest({
     gender: "female",

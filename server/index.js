@@ -1130,18 +1130,20 @@ function normalizeAccessoriesDecision(value, lookIndex) {
     throw new Error(`AI 返回 looks[${lookIndex}].accessories_decision 必须是数组`);
   }
   const seen = new Set();
-  return value.map((decision, decisionIndex) => {
+  const normalizedDecisions = [];
+  value.forEach((decision, decisionIndex) => {
     if (!decision || typeof decision !== "object" || Array.isArray(decision)) {
       throw new Error(
         `AI 返回 looks[${lookIndex}].accessories_decision[${decisionIndex}] 必须是对象`,
       );
     }
     const category = normalizeAccessoryDecisionCategory(decision.category);
-    if (!category || seen.has(category)) {
+    if (!category) {
       throw new Error(
-        `AI 返回 looks[${lookIndex}].accessories_decision 存在无效或重复 category`,
+        `AI 返回 looks[${lookIndex}].accessories_decision 存在无效 category`,
       );
     }
+    if (seen.has(category)) return;
     if (typeof decision.include !== "boolean") {
       throw new Error(
         `AI 返回 looks[${lookIndex}].accessories_decision[${decisionIndex}].include 必须是布尔值`,
@@ -1154,8 +1156,9 @@ function normalizeAccessoriesDecision(value, lookIndex) {
       );
     }
     seen.add(category);
-    return {category, include: decision.include, reason};
+    normalizedDecisions.push({category, include: decision.include, reason});
   });
+  return normalizedDecisions;
 }
 
 function applyAccessoryDecisions(items, decisions, lookIndex) {
