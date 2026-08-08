@@ -15,6 +15,7 @@ class OutfitAnalysis {
     required this.accessories,
     required this.suggestion,
     this.gender = 'unisex',
+    this.styleExpression = 'auto',
     this.analysisMode = 'ai',
     this.stylingStrategy = const StylingStrategy(),
     this.recommendedProducts = const [],
@@ -46,6 +47,11 @@ class OutfitAnalysis {
         json,
         const ['gender'],
         fallback: 'unisex',
+      ),
+      styleExpression: _readOptionalAliasedString(
+        json,
+        const ['style_expression', 'styleExpression'],
+        fallback: 'auto',
       ),
       analysisMode: json['analysis_mode'] is String
           ? json['analysis_mode'] as String
@@ -164,6 +170,11 @@ class OutfitAnalysis {
         const ['summary', 'suggestion'],
       ),
       gender: gender,
+      styleExpression: _readOptionalAliasedString(
+        json,
+        const ['style_expression', 'styleExpression'],
+        fallback: 'auto',
+      ),
       analysisMode: _readOptionalAliasedString(
         json,
         const ['analysisMode', 'analysis_mode'],
@@ -194,6 +205,7 @@ class OutfitAnalysis {
   final String accessories;
   final String suggestion;
   final String gender;
+  final String styleExpression;
   final String analysisMode;
   final StylingStrategy stylingStrategy;
   final List<Product> recommendedProducts;
@@ -215,6 +227,7 @@ class OutfitAnalysis {
     String? accessories,
     String? suggestion,
     String? gender,
+    String? styleExpression,
     String? analysisMode,
     StylingStrategy? stylingStrategy,
     List<Product>? recommendedProducts,
@@ -234,6 +247,7 @@ class OutfitAnalysis {
       accessories: accessories ?? this.accessories,
       suggestion: suggestion ?? this.suggestion,
       gender: gender ?? this.gender,
+      styleExpression: styleExpression ?? this.styleExpression,
       analysisMode: analysisMode ?? this.analysisMode,
       stylingStrategy: stylingStrategy ?? this.stylingStrategy,
       recommendedProducts: recommendedProducts ?? this.recommendedProducts,
@@ -257,6 +271,7 @@ class OutfitAnalysis {
       'accessories': accessories,
       'suggestion': suggestion,
       'gender': gender,
+      'style_expression': styleExpression,
       'analysis_mode': analysisMode,
       'styling_strategy': stylingStrategy.toJson(),
       'recommended_products':

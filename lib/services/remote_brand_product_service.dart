@@ -20,7 +20,7 @@ class RemoteBrandProductService implements BrandProductService {
       'AFFILIATE_CHANNEL_ID',
       defaultValue: 'fitai-commercial-test',
     ),
-    this.timeout = const Duration(seconds: 75),
+    this.timeout = const Duration(seconds: 120),
     bool? enforceProductionSafety,
   })  : enforceProductionSafety = enforceProductionSafety ??
             (kReleaseMode &&
@@ -204,7 +204,8 @@ class RemoteBrandProductService implements BrandProductService {
   }) async {
     final stopwatch = Stopwatch()..start();
     Object? lastError;
-    for (var attempt = 1; attempt <= 2; attempt += 1) {
+    final maxAttempts = method == 'POST' ? 1 : 2;
+    for (var attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         final response = await send().timeout(timeout);
         AppLogger.instance.info(
@@ -231,7 +232,7 @@ class RemoteBrandProductService implements BrandProductService {
       error: lastError,
       metadata: {
         'durationMs': stopwatch.elapsedMilliseconds,
-        'attempts': 2,
+        'attempts': maxAttempts,
       },
     );
     throw ProductSourceException(

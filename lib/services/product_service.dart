@@ -209,6 +209,7 @@ class CatalogProductService implements ProductService {
               if (analysis.requestId?.trim().isNotEmpty ?? false)
                 'request_id': analysis.requestId!.trim(),
               'gender': analysis.gender,
+              'style_expression': analysis.styleExpression,
               'style': analysis.style,
               'scene': request.scene,
               'budget': _itemBudgetCeiling(
@@ -220,6 +221,7 @@ class CatalogProductService implements ProductService {
               'user_input': request.request,
               'user_profile': {
                 'gender': analysis.gender,
+                'style_expression': analysis.styleExpression,
                 'height': request.height,
                 'weight': request.weight,
                 'body_profile': analysis.bodyAnalysis,

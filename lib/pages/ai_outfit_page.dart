@@ -19,6 +19,7 @@ import '../models/outfit_request.dart';
 import '../models/outfit_generation_state.dart';
 import '../models/shopping_budget.dart';
 import '../models/product.dart';
+import '../models/product_loading_state.dart';
 import '../models/product_analytics.dart';
 import '../models/recommendation_feedback.dart';
 import '../models/try_on_request.dart';
@@ -150,8 +151,9 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
   final Set<String> _submittedFeedbackPlanIds = {};
   OutfitRequest? _lastRequest;
   Set<String> _selectedProductIds = {};
-  bool _isLoadingProducts = false;
-  String? _productLoadError;
+  bool get _isLoadingProducts =>
+      _viewModel.productState == ProductLoadingState.loading;
+  String? get _productLoadError => _viewModel.productErrorMessage;
   bool _isRegeneratingPlan = false;
   OutfitGenerationState _generationState = OutfitGenerationState.idle;
   String _generationDetail = '';
@@ -635,8 +637,6 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       setState(() {
         _lastRequest = null;
         _selectedProductIds = {};
-        _isLoadingProducts = false;
-        _productLoadError = null;
         _isRegeneratingPlan = false;
         _tryingOnProductId = null;
       });
@@ -751,13 +751,12 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
             properties: {'scene': _scene},
           ),
         );
+        _viewModel.beginProductLoading(_viewModel.analysis?.requestId ?? '');
         setState(() {
           _lastRequest = outfitRequest;
           _requestController.clear();
-          _generationState = OutfitGenerationState.loadingProducts;
-          _generationDetail = OutfitGenerationState.loadingProducts.label;
-          _isLoadingProducts = true;
-          _productLoadError = null;
+          _generationState = OutfitGenerationState.success;
+          _generationDetail = OutfitGenerationState.success.label;
         });
         final aiCompletedAtMs = totalStopwatch.elapsedMilliseconds;
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -874,11 +873,10 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       return;
     }
 
+    if (!_viewModel.beginProductLoading(analysis.requestId ?? '')) {
+      return;
+    }
     setState(() {
-      _generationState = OutfitGenerationState.loadingProducts;
-      _generationDetail = OutfitGenerationState.loadingProducts.label;
-      _isLoadingProducts = true;
-      _productLoadError = null;
       _selectedProductIds = {};
     });
 
@@ -935,8 +933,6 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       }
       setState(() {
         _selectedProductIds = selectedProductIds;
-        _isLoadingProducts = false;
-        _productLoadError = null;
         _generationState = OutfitGenerationState.success;
         _generationDetail = OutfitGenerationState.success.label;
       });
@@ -964,11 +960,15 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
           (_viewModel.analysis?.recommendedProducts ?? const <Product>[])
               .where((product) => !product.isMock)
               .toList(growable: false);
+      final isTimeout = error.toString().contains('超时');
+      _viewModel.markProductFailure(
+        analysis.requestId ?? '',
+        timeout: isTimeout,
+        partial: existingProducts.isNotEmpty,
+      );
       setState(() {
-        _isLoadingProducts = false;
-        _productLoadError = existingProducts.isEmpty ? '商品暂时加载失败，请重新生成' : null;
-        _generationState = OutfitGenerationState.partialSuccess;
-        _generationDetail = OutfitGenerationState.partialSuccess.label;
+        _generationState = OutfitGenerationState.success;
+        _generationDetail = OutfitGenerationState.success.label;
       });
       if (existingProducts.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(

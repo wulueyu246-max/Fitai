@@ -4,6 +4,7 @@ import '../models/outfit_analysis.dart';
 import '../models/outfit_plan.dart';
 import '../models/outfit_request.dart';
 import '../models/product.dart';
+import '../models/product_loading_state.dart';
 import '../repositories/outfit_repository.dart';
 import '../services/ai_service.dart';
 
@@ -18,11 +19,15 @@ class OutfitViewModel extends ChangeNotifier {
   bool _isDisposed = false;
   String? _errorMessage;
   String? _requestId;
+  ProductLoadingState _productState = ProductLoadingState.idle;
+  String? _productErrorMessage;
 
   OutfitAnalysis? get analysis => _analysis;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
   String? get requestId => _requestId;
+  ProductLoadingState get productState => _productState;
+  String? get productErrorMessage => _productErrorMessage;
 
   Future<bool> generateOutfit(OutfitRequest request) async {
     if (_isLoading) {
@@ -32,6 +37,8 @@ class OutfitViewModel extends ChangeNotifier {
     _isLoading = true;
     _errorMessage = null;
     _requestId = null;
+    _productState = ProductLoadingState.idle;
+    _productErrorMessage = null;
     _notifyListeners();
 
     try {
@@ -103,6 +110,32 @@ class OutfitViewModel extends ChangeNotifier {
       outfitPlan: effectivePlans.isEmpty ? outfitPlan : effectivePlans.first,
       outfitPlans: effectivePlans,
     );
+    _productState = ProductLoadingState.success;
+    _productErrorMessage = null;
+    _notifyListeners();
+    return true;
+  }
+
+  bool beginProductLoading(String expectedRequestId) {
+    if (_analysis?.requestId?.trim() != expectedRequestId.trim()) return false;
+    _productState = ProductLoadingState.loading;
+    _productErrorMessage = null;
+    _notifyListeners();
+    return true;
+  }
+
+  bool markProductFailure(
+    String expectedRequestId, {
+    required bool timeout,
+    bool partial = false,
+  }) {
+    if (_analysis?.requestId?.trim() != expectedRequestId.trim()) return false;
+    _productState = timeout
+        ? ProductLoadingState.timeout
+        : partial
+            ? ProductLoadingState.partial
+            : ProductLoadingState.failed;
+    _productErrorMessage = timeout ? '商品匹配响应较慢，请重新匹配商品' : '商品匹配暂时失败，请重新匹配商品';
     _notifyListeners();
     return true;
   }
@@ -119,6 +152,8 @@ class OutfitViewModel extends ChangeNotifier {
     _analysis = null;
     _errorMessage = null;
     _requestId = null;
+    _productState = ProductLoadingState.idle;
+    _productErrorMessage = null;
     _notifyListeners();
   }
 

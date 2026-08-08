@@ -46,6 +46,11 @@ const {
 } = require("./product_relevance");
 const {ProductAestheticReranker} = require("./product_aesthetic_reranker");
 const {TaobaoService} = require("./taobao_service");
+const {
+  assertContextGender,
+  createRecommendationContext,
+  logRecommendationStage,
+} = require("./recommendation_context");
 
 require("dotenv").config({
   path: path.join(__dirname, ".env"),
@@ -179,9 +184,9 @@ const config = Object.freeze({
   ),
   aiMaxRetries: readNonNegativeInteger(process.env.AI_MAX_RETRIES, 0),
   productRerankModel: aiConfig.model,
-  productRerankTimeoutMs: readPositiveInteger(
-    process.env.PRODUCT_RERANK_TIMEOUT_MS,
-    45_000,
+  productRerankTimeoutMs: Math.min(
+    readPositiveInteger(process.env.PRODUCT_RERANK_TIMEOUT_MS, 35_000),
+    35_000,
   ),
   productRerankCacheTtlMs: readPositiveInteger(
     process.env.PRODUCT_RERANK_CACHE_TTL_MS,
@@ -1237,9 +1242,13 @@ function parseOutfitAnalysis(content, context = {}) {
       !isSupportedAiGender(parsed.gender)) {
     throw new Error("AI 返回 gender 非法");
   }
-  const analysisGender = Object.prototype.hasOwnProperty.call(parsed, "gender")
+  const contextGender = normalizeGender(context.gender);
+  const returnedGender = Object.prototype.hasOwnProperty.call(parsed, "gender")
     ? normalizeGender(parsed.gender)
-    : normalizeGender(context.gender);
+    : contextGender;
+  const analysisGender = contextGender === "unisex"
+    ? returnedGender
+    : assertContextGender(context, returnedGender, "outfit_analysis");
   const normalizeItem = (product, index, look) => {
     if (!product || typeof product !== "object" || Array.isArray(product)) {
       throw new Error(`AI 返回 products[${index}] 必须是对象`);
@@ -1259,8 +1268,7 @@ function parseOutfitAnalysis(content, context = {}) {
           product.negativeKeywords ||
         [],
       });
-      if (look.gender !== "unisex" && requirement.gender !== look.gender &&
-          requirement.gender !== "unisex") {
+      if (look.gender !== "unisex" && requirement.gender !== look.gender) {
         throw new Error("单品 gender 与所属 Look gender 不一致");
       }
       return {
@@ -1287,14 +1295,12 @@ function parseOutfitAnalysis(content, context = {}) {
       if (explicitLookGender && !isSupportedAiGender(look.gender)) {
         throw new Error(`AI 返回 looks[${lookIndex}].gender 非法`);
       }
-      const lookGender = explicitLookGender
+      const returnedLookGender = explicitLookGender
         ? normalizeGender(look.gender)
         : analysisGender;
-      if (analysisGender !== "unisex" &&
-          lookGender !== analysisGender &&
-          !(explicitLookGender && lookGender === "unisex")) {
-        throw new Error(`AI 返回 looks[${lookIndex}] 性别与顶层 gender 不一致`);
-      }
+      const lookGender = analysisGender === "unisex"
+        ? returnedLookGender
+        : assertContextGender(context, returnedLookGender, `looks[${lookIndex}]`);
       const rawItems = look.items;
       if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > 10) {
         throw new Error(`AI 返回 looks[${lookIndex}].items 必须包含 1 到 10 个单品`);
@@ -1377,10 +1383,15 @@ function parseOutfitAnalysis(content, context = {}) {
     context.userInput || context.request || "",
     styleUpgradeLevel,
   );
+  assertStyleExpressionConsistency(looks, {
+    gender: analysisGender,
+    styleExpression: context.style_expression || context.styleExpression,
+  });
   const products = looks.flatMap((look) => look.items);
 
   return {
     gender: analysisGender,
+    style_expression: context.style_expression || context.styleExpression || "auto",
     bodyProfile: bodyProfile.trim(),
     style: parsed.style.trim(),
     style_upgrade_level: styleUpgradeLevel,
@@ -1606,6 +1617,22 @@ function assertStyleUpgrade(looks, userInput, level) {
   }
 }
 
+function assertStyleExpressionConsistency(looks, {gender, styleExpression} = {}) {
+  if (normalizeGender(gender) !== "female" || styleExpression !== "feminine") return;
+  const masculineOnly = (Array.isArray(looks) ? looks : []).every((look) => {
+    const evidence = (Array.isArray(look?.items) ? look.items : [])
+      .map((item) => `${item.category || ""} ${item.item_name || ""} ${item.fit || ""}`)
+      .join(" ");
+    const hasFeminineStrategy = /dress|skirt|连衣裙|半身裙|短裙|高腰|收腰|浅口|尖头|低跟|中跟|短款/.test(evidence);
+    const masculineBottom = /西裤|工装裤|男款直筒裤/.test(evidence);
+    const masculineShoe = /乐福鞋|德比鞋|牛津鞋|商务皮鞋/.test(evidence);
+    return !hasFeminineStrategy && masculineBottom && masculineShoe;
+  });
+  if (looks.length === 3 && masculineOnly) {
+    throw new Error("female feminine Looks cannot all use masculine trouser-and-loafer strategies");
+  }
+}
+
 function isLikelyOutfitItem(value) {
   return /t|polo|衫|衣|裤|裙|鞋|靴|外套|夹克|西装|针织|卫衣|背心|吊带|包|帽/.test(value);
 }
@@ -1733,9 +1760,9 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
   const usedStyleDirections = new Set();
   return sourceLooks.map((look, lookIndex) => {
     const explicitGender = Object.prototype.hasOwnProperty.call(look, "gender");
-    const lookGender = explicitGender ? normalizeGender(look.gender) : gender;
-    if (gender !== "unisex" && lookGender !== gender &&
-        !(explicitGender && lookGender === "unisex")) {
+    const returnedLookGender = explicitGender ? normalizeGender(look.gender) : gender;
+    const lookGender = gender === "unisex" ? returnedLookGender : gender;
+    if (gender !== "unisex" && returnedLookGender !== gender) {
       throw new Error(`Look ${lookIndex + 1} 性别与 AI 顶层 gender 不一致`);
     }
     const lookId = readOptionalString(look.look_id || look.lookId) ||
@@ -1752,9 +1779,7 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
       const requirement = normalizeProductRequirement({
         ...product,
         look_id: lookId,
-        gender: Object.prototype.hasOwnProperty.call(product, "gender")
-          ? product.gender
-          : lookGender,
+        gender: lookGender,
       }, {
         gender: lookGender,
         scene: look.scene || outfitRequest.scene,
@@ -1817,7 +1842,27 @@ async function buildOutfitApiResponse(
     : /(?:男士|男生|男性)/.test(requestText)
       ? "male"
       : /(?:女士|女生|女性)/.test(requestText) ? "female" : "unisex";
-  const effectiveGender = analysisGender;
+  const effectiveGender = gender;
+  const recommendationContext = createRecommendationContext({
+    requestId: outfitRequest.requestId,
+    gender: effectiveGender,
+    scene: outfitRequest.scene,
+    requestedStyle: analysis.style,
+    styleExpression: analysis.style_expression,
+    bodyProfile: {
+      height: outfitRequest.height,
+      weight: outfitRequest.weight,
+      analysis: analysis.bodyProfile,
+    },
+    weather: {},
+    budget: {
+      item: outfitRequest.itemBudget,
+      outfit: outfitRequest.outfitBudget,
+      preferredItem: preferredItemBudget,
+    },
+    userInput: outfitRequest.request,
+  });
+  logRecommendationStage(console, "product_requirements", recommendationContext);
   const looks = normalizeAnalysisLooks(analysis, outfitRequest, effectiveGender);
   const productRequirements = looks.flatMap((look) => look.items);
   const catalogProducts = productRecommendations ??
@@ -1826,6 +1871,8 @@ async function buildOutfitApiResponse(
       bodyType: analysis.bodyProfile,
       scene: outfitRequest.scene,
       gender: effectiveGender,
+      style_expression: recommendationContext.style_expression,
+      recommendation_context: recommendationContext,
       budget: preferredItemBudget,
       item_budget: outfitRequest.itemBudget,
       outfit_budget: outfitRequest.outfitBudget,
@@ -1859,6 +1906,8 @@ async function buildOutfitApiResponse(
     });
   return {
     ...analysis,
+    gender: effectiveGender,
+    style_expression: recommendationContext.style_expression,
     looks,
     products: productRequirements,
     recommendations: {
@@ -1877,10 +1926,13 @@ async function buildOutfitResponseForRequest(
     return buildOutfitApiResponse(analysis, undefined, outfitRequest);
   }
   const analysisGender = normalizeGender(analysis.gender);
-  const looks = normalizeAnalysisLooks(analysis, outfitRequest, analysisGender);
+  const profileGender = normalizeGender(outfitRequest.gender);
+  const effectiveGender = profileGender !== "unisex" ? profileGender : analysisGender;
+  const looks = normalizeAnalysisLooks(analysis, outfitRequest, effectiveGender);
   const products = looks.flatMap((look) => look.items);
   return {
     ...analysis,
+    gender: effectiveGender,
     looks,
     products,
     recommendations: {
@@ -2375,6 +2427,27 @@ async function handleProductRecommendations(req, res, next) {
       input,
       res.locals.requestId,
     );
+    const recommendationContext = createRecommendationContext({
+      requestId: res.locals.requestId,
+      gender: filters.gender,
+      scene: filters.scene,
+      requestedStyle: filters.style,
+      styleExpression: filters.style_expression,
+      bodyProfile: filters.user_profile,
+      weather: filters.user_requirements?.weather,
+      budget: {
+        item: filters.item_budget,
+        outfit: filters.outfit_budget,
+        preferredItem: filters.budget,
+      },
+      userInput: filters.userInput,
+    });
+    filters.gender = recommendationContext.gender;
+    filters.style_expression = recommendationContext.style_expression;
+    filters.recommendation_context = recommendationContext;
+    logRecommendationStage(console, "product_request", recommendationContext, {
+      requirement_count: items.length,
+    });
     console.info("商品搜索需求", {
       requestId: res.locals.requestId,
       aiGender: filters.gender || undefined,
@@ -2408,6 +2481,8 @@ async function handleProductRecommendations(req, res, next) {
     });
     return res.json({
       request_id: res.locals.requestId,
+      rerank_fallback: responseProducts.some((product) =>
+        product.ai_rerank_fallback === true),
       looks: looks.map((look) => ({
         ...look,
         request_id: res.locals.requestId,
@@ -2438,6 +2513,7 @@ function productRecommendationFilters(input = {}, requestId = "") {
   return {
     category: input?.category,
     style: input?.style,
+    style_expression: input?.style_expression ?? input?.styleExpression,
     color: input?.color,
     bodyType: input?.bodyType,
     scene: input?.scene,
@@ -2483,8 +2559,7 @@ function productRecommendationRequest(input = {}, requestId = "") {
           : filters.gender,
       );
       const requestGender = normalizeGender(filters.gender);
-      if (requestGender !== "unisex" && lookGender !== requestGender &&
-          lookGender !== "unisex") {
+      if (requestGender !== "unisex" && lookGender !== requestGender) {
         throw new TypeError(`looks[${lookIndex}].gender conflicts with request gender`);
       }
       const rawLookItems = look.items;
@@ -2515,8 +2590,7 @@ function productRecommendationRequest(input = {}, requestId = "") {
           scene: look.scene || filters.scene,
           style: look.style || filters.style,
         });
-        if (lookGender !== "unisex" && requirement.gender !== lookGender &&
-            requirement.gender !== "unisex") {
+        if (lookGender !== "unisex" && requirement.gender !== lookGender) {
           throw new TypeError(
             `looks[${lookIndex}].items[${itemIndex}].gender conflicts with Look gender`,
           );
@@ -2563,7 +2637,12 @@ function productRecommendationRequest(input = {}, requestId = "") {
     if (!item || typeof item !== "object" || Array.isArray(item)) {
       throw new TypeError(`items[${index}] must be an object`);
     }
-    return normalizeProductRequirement(item, filters);
+    const requirement = normalizeProductRequirement(item, filters);
+    const requestGender = normalizeGender(filters.gender);
+    if (requestGender !== "unisex" && requirement.gender !== requestGender) {
+      throw new TypeError(`items[${index}].gender conflicts with request gender`);
+    }
+    return requirement;
   });
   return {filters, looks: [], items};
 }
@@ -2609,7 +2688,21 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
   const deferProducts = req.get("x-defer-products") === "true";
 
   try {
-    outfitRequest = validateOutfitRequest(req.body);
+    outfitRequest = {
+      ...validateOutfitRequest(req.body),
+      requestId: res.locals.requestId,
+    };
+    const requestContext = createRecommendationContext({
+      requestId: res.locals.requestId,
+      gender: outfitRequest.gender,
+      scene: outfitRequest.scene,
+      requestedStyle: outfitRequest.request,
+      bodyProfile: {height: outfitRequest.height, weight: outfitRequest.weight},
+      weather: {},
+      budget: {item: outfitRequest.itemBudget, outfit: outfitRequest.outfitBudget},
+      userInput: outfitRequest.request,
+    });
+    logRecommendationStage(console, "outfit_request", requestContext);
 
     if (shouldUseMockAi(config, aiClient)) {
       if (!config.allowMockContent) {
@@ -2665,6 +2758,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
           `身高：${outfitRequest.height} cm`,
           `体重：${outfitRequest.weight} kg`,
           `用户性别：${outfitRequest.gender}`,
+          `固定风格表达：${requestContext.style_expression}`,
           `场景：${outfitRequest.scene}`,
           `穿搭需求：${outfitRequest.request || "无额外要求"}`,
           `实际提供照片：${Object.keys(outfitRequest.images)
@@ -2723,6 +2817,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
 ${partialViewSafetyInstruction}
 Stylist V2 workflow (mandatory): analyze visual proportions first, then output styling_strategy, then design three Looks from that strategy. Never infer proportion from height alone.
 All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.
+The immutable request context gender is ${requestContext.gender} and style_expression is ${requestContext.style_expression}. Every Look and item must preserve that gender; downstream stages must never infer it again. When style_expression=feminine, explicitly evaluate waistline, garment-length ratio, leg-line continuity, shoe shape/heel, skin exposure, and refined accessories without mechanically requiring skirts or heels.
 styling_strategy must contain body_strengths[], proportion_issues[], visual_goals[], waistline_strategy, top_length_strategy, bottom_strategy, shoe_strategy, color_strategy, silhouette_strategy, skin_exposure_strategy, accessory_strategy, and weather_strategy.
 Use height, weight, photographed shoulder/waist/leg proportions, current clothing, scene, weather, comfort, and requested style together. Valid visual_goals include elongate_legs, raise_visual_waistline, shorten_visual_torso, emphasize_waist, balance_shoulders, create_vertical_line, reduce_lower_body_bulk, enhance_body_curve, create_lightness, and create_structure.
 Every Look must add styling_goal, proportion_strategy, and why_this_changes_the_body_proportion. The three Looks must differ materially in silhouette, waistline, garment length, shoe shape, skin exposure, or color continuity—not merely color.
@@ -2843,10 +2938,11 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       contentLength: aiText.length,
     });
     const analysis = parseOutfitAnalysis(aiText, {
-      gender: outfitRequest.gender,
+      gender: requestContext.gender,
       scene: outfitRequest.scene,
       requestId: res.locals.requestId,
       userInput: outfitRequest.request,
+      style_expression: requestContext.style_expression,
     });
     const parseDurationMs = Date.now() - parseStartedAt;
 
@@ -3160,6 +3256,7 @@ module.exports = {
   productClickStore,
   config,
   createMockOutfitAnalysis,
+  assertStyleExpressionConsistency,
   buildOutfitApiResponse,
   extractAiText,
   normalizeAiOutfitPayload,

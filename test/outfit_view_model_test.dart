@@ -4,6 +4,7 @@ import 'package:fit_ai/models/outfit_analysis.dart';
 import 'package:fit_ai/models/outfit_request.dart';
 import 'package:fit_ai/models/outfit_plan.dart';
 import 'package:fit_ai/models/product_search_requirement.dart';
+import 'package:fit_ai/models/product_loading_state.dart';
 import 'package:fit_ai/data/mock_product_database.dart';
 import 'package:fit_ai/repositories/outfit_repository.dart';
 import 'package:fit_ai/services/ai_service.dart';
@@ -130,6 +131,43 @@ void main() {
     gate.complete();
     expect(await firstRequest, isTrue);
     expect(repository.generateCalls, 1);
+    viewModel.dispose();
+  });
+
+  test(
+      'product failure preserves the current outfit and supports product-only retry state',
+      () async {
+    final viewModel = OutfitViewModel(
+      repository: _FakeOutfitRepository(
+        response: const OutfitAnalysis(
+          bodyAnalysis: '身体分析',
+          style: '轻熟',
+          top: '上衣',
+          bottom: '下装',
+          shoes: '鞋履',
+          accessories: '配饰',
+          suggestion: '总结',
+          gender: 'female',
+          requestId: 'request-stable-1',
+        ),
+      ),
+    );
+
+    expect(await viewModel.generateOutfit(request), isTrue);
+    final preserved = viewModel.analysis;
+    expect(viewModel.beginProductLoading('request-stable-1'), isTrue);
+    expect(viewModel.productState, ProductLoadingState.loading);
+    expect(
+      viewModel.markProductFailure('request-stable-1', timeout: true),
+      isTrue,
+    );
+    expect(viewModel.productState, ProductLoadingState.timeout);
+    expect(viewModel.productErrorMessage, contains('重新匹配商品'));
+    expect(viewModel.analysis, same(preserved));
+
+    expect(viewModel.beginProductLoading('request-stable-1'), isTrue);
+    expect(viewModel.productState, ProductLoadingState.loading);
+    expect(viewModel.analysis, same(preserved));
     viewModel.dispose();
   });
 

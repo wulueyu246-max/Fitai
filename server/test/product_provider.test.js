@@ -442,7 +442,7 @@ test("a Taobao 50001 empty result runs at most two category-specific fallbacks",
   assert.equal(calls[0], "女士 法式 米白色 玛丽珍鞋");
   assert.ok(calls.length >= 2 && calls.length <= 3);
   assert.ok(calls.slice(1).every((query) => query.includes("玛丽珍鞋")));
-  assert.equal(products.length, 6);
+  assert.equal(products.length, 4);
   assert.ok(products.every((product) => product.source === "taobao"));
 });
 
@@ -485,7 +485,7 @@ test("an empty accessory result preserves matching core products", async () => {
     },
   ]);
 
-  assert.equal(products.length, 6);
+  assert.equal(products.length, 4);
   assert.ok(products.every((product) =>
     product.category === "top" && product.source === "taobao"));
 });
@@ -621,7 +621,7 @@ test("accessory candidates never fill an outfit when all core groups are empty",
   assert.deepEqual(products, []);
 });
 
-test("builds a twenty-item quality-filtered pool and returns up to six AI selections", async () => {
+test("builds a twenty-item quality-filtered pool and sends only four to AI", async () => {
   const pageSizes = [];
   const capturedGroups = [];
   const provider = new TaobaoProductProvider({
@@ -662,8 +662,8 @@ test("builds a twenty-item quality-filtered pool and returns up to six AI select
   }]);
 
   assert.deepEqual(pageSizes, ["50"]);
-  assert.equal(capturedGroups[0].candidates.length, 20);
-  assert.equal(products.length, 6);
+  assert.equal(capturedGroups[0].candidates.length, 4);
+  assert.equal(products.length, 4);
   assert.ok(products.every((product) => product.source === "taobao"));
 });
 

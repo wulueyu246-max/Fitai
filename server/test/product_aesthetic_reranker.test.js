@@ -389,6 +389,32 @@ test("model failure falls back to relevance ordering without throwing", async ()
   assert.equal(warnings[0][1].errorCode, "ETIMEDOUT");
 });
 
+test("product AI is capped at 35 seconds and timeout returns real fallback products", async () => {
+  let observedTimeout = 0;
+  const reranker = new ProductAestheticReranker({
+    visualEvaluationEnabled: false,
+    timeoutMs: 90_000,
+    client: {
+      chat: {completions: {create: async (_request, options) => {
+        observedTimeout = options.timeout;
+        throw Object.assign(new Error("time budget exceeded"), {code: "ETIMEDOUT"});
+      }}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await reranker.rerank({
+    groups: [group("top", ["top-1", "top-2", "top-3", "top-4", "top-5"])],
+    context: {gender: "female", style_expression: "feminine"},
+  });
+
+  assert.ok(observedTimeout > 0 && observedTimeout <= 35_000);
+  assert.equal(products.length, 4);
+  assert.ok(products.every((item) => item.source === "taobao"));
+  assert.ok(products.every((item) => item.ai_rerank_fallback === true));
+});
+
 test("invalid score or unknown product never enters the selected result", () => {
   const products = validateSelection({
     selected_products: [
@@ -497,7 +523,7 @@ test("model prompt requires four to six selections for every sufficiently large 
   assert.match(messages[0].content, /而不是整套合计选择 4 至 6 件/);
 });
 
-test("under-selected groups receive one focused repair call", async () => {
+test("under-selected groups use local fallback without another AI call", async () => {
   let calls = 0;
   const reranker = new ProductAestheticReranker({
     visualEvaluationEnabled: false,
@@ -505,14 +531,8 @@ test("under-selected groups receive one focused repair call", async () => {
       chat: {completions: {create: async (request) => {
         calls += 1;
         const payload = JSON.parse(request.messages[1].content);
-        if (calls === 1) return response([selection("top-1")]);
         assert.equal(payload.product_groups.length, 1);
-        return response([
-          selection("top-1"),
-          selection("top-2"),
-          selection("top-3"),
-          selection("top-4"),
-        ]);
+        return response([selection("top-1")]);
       }}},
     },
     model: "test-model",
@@ -524,27 +544,22 @@ test("under-selected groups receive one focused repair call", async () => {
     context: {gender: "male"},
   });
 
-  assert.equal(calls, 2);
+  assert.equal(calls, 1);
   assert.equal(products.length, 4);
-  assert.ok(products.every((product) => product.ai_rerank_fallback === false));
-  assert.equal(reranker.getStats().call_count, 2);
-  assert.equal(reranker.getStats().fallback_count, 0);
+  assert.ok(products.every((product) => product.ai_rerank_fallback === true));
+  assert.equal(reranker.getStats().call_count, 1);
+  assert.equal(reranker.getStats().fallback_count, 1);
 });
 
-test("multiple incomplete groups are repaired independently", async () => {
+test("multiple incomplete groups fall back locally within one AI call", async () => {
   const repairedCategories = [];
   const reranker = new ProductAestheticReranker({
     visualEvaluationEnabled: false,
     client: {
       chat: {completions: {create: async (request) => {
         const payload = JSON.parse(request.messages[1].content);
-        if (payload.product_groups.length > 1) {
-          return response([selection("top-1"), selection("shoe-1")]);
-        }
-        const candidates = payload.product_groups[0].candidates;
-        const category = candidates[0].product_id.startsWith("top") ? "top" : "shoes";
-        repairedCategories.push(category);
-        return response(candidates.slice(0, 4).map((item) => selection(item.product_id)));
+        assert.equal(payload.product_groups.length, 2);
+        return response([selection("top-1"), selection("shoe-1")]);
       }}},
     },
     model: "test-model",
@@ -559,8 +574,8 @@ test("multiple incomplete groups are repaired independently", async () => {
     context: {gender: "female"},
   });
 
-  assert.deepEqual(repairedCategories.sort(), ["shoes", "top"]);
+  assert.deepEqual(repairedCategories, []);
   assert.equal(products.length, 8);
-  assert.ok(products.every((product) => product.ai_rerank_fallback === false));
-  assert.equal(reranker.getStats().call_count, 3);
+  assert.ok(products.every((product) => product.ai_rerank_fallback === true));
+  assert.equal(reranker.getStats().call_count, 1);
 });

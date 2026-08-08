@@ -100,20 +100,31 @@ void main() {
     tester,
   ) async {
     final repository = _ImmediateOutfitRepository();
+    final productService = _FailingProductService();
     await _pumpPage(
       tester,
       repository: repository,
-      productService: _FailingProductService(),
+      productService: productService,
     );
     await _selectFrontPhoto(tester);
     await _tapGenerate(tester);
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(find.text('测试身体分析'), findsOne);
-    expect(find.text('商品暂时加载失败，请重新生成'), findsOne);
+    expect(find.text('商品匹配暂时失败，请重新匹配商品'), findsOne);
     expect(find.byKey(const Key('retry-product-recommendations')), findsOne);
     expect(find.byKey(const Key('generate-outfit')), findsOne);
     expect(repository.calls, 1);
+    expect(productService.calls, 1);
+
+    await tester.ensureVisible(
+      find.byKey(const Key('retry-product-recommendations')),
+    );
+    await tester.tap(find.byKey(const Key('retry-product-recommendations')));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(repository.calls, 1);
+    expect(productService.calls, 2);
+    expect(find.text('测试身体分析'), findsOne);
   });
 
   testWidgets('AI timeout stops loading and allows retry', (tester) async {
@@ -288,12 +299,16 @@ class _GatedProductService extends _BaseProductService {
 }
 
 class _FailingProductService extends _BaseProductService {
+  int calls = 0;
+
   @override
   Future<List<Product>> recommendProducts({
     required OutfitAnalysis analysis,
     required OutfitRequest request,
-  }) =>
-      Future.error(StateError('product unavailable'));
+  }) {
+    calls += 1;
+    return Future.error(StateError('product unavailable'));
+  }
 }
 
 abstract class _BaseProductService implements ProductService {

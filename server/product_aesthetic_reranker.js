@@ -8,7 +8,9 @@ const {
 const DEFAULT_SELECTION_LIMIT = 6;
 const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000;
 const DEFAULT_CACHE_ENTRIES = 100;
-const DEFAULT_VISUAL_CANDIDATES_PER_GROUP = 10;
+const DEFAULT_VISUAL_CANDIDATES_PER_GROUP = 4;
+const MAX_CANDIDATES_PER_LOOK = 16;
+const MAX_PRODUCT_AI_MS = 35_000;
 const MAX_VISUAL_IMAGES_PER_REQUEST = 40;
 const HIGH_QUALITY_BRAND_SCORE = 65;
 
@@ -50,7 +52,7 @@ class ProductAestheticReranker {
   constructor({
     client,
     model,
-    timeoutMs = 45_000,
+    timeoutMs = MAX_PRODUCT_AI_MS,
     cacheTtlMs = DEFAULT_CACHE_TTL_MS,
     maxCacheEntries = DEFAULT_CACHE_ENTRIES,
     visualEvaluationEnabled = true,
@@ -58,7 +60,10 @@ class ProductAestheticReranker {
   } = {}) {
     this.client = client || null;
     this.model = String(model || "").trim();
-    this.timeoutMs = positiveInteger(timeoutMs, 45_000);
+    this.timeoutMs = Math.min(
+      positiveInteger(timeoutMs, MAX_PRODUCT_AI_MS),
+      MAX_PRODUCT_AI_MS,
+    );
     this.cacheTtlMs = positiveInteger(cacheTtlMs, DEFAULT_CACHE_TTL_MS);
     this.maxCacheEntries = positiveInteger(maxCacheEntries, DEFAULT_CACHE_ENTRIES);
     this.visualEvaluationEnabled = visualEvaluationEnabled !== false;
@@ -113,7 +118,13 @@ class ProductAestheticReranker {
         blockedCount: qualityBlocks.length,
       });
     }
-    const normalizedGroups = normalizeGroups(groups, selectionLimit);
+    const prefilterCount = (Array.isArray(groups) ? groups : []).reduce(
+      (total, group) => total + (Array.isArray(group?.candidates) ? group.candidates.length : 0),
+      0,
+    );
+    const normalizedGroups = limitCandidatesPerLook(
+      normalizeGroups(groups, selectionLimit),
+    );
     let workingGroups = normalizedGroups;
     const candidateCount = normalizedGroups.reduce(
       (total, group) => total + group.candidates.length,
@@ -165,36 +176,27 @@ class ProductAestheticReranker {
 
     const startedAt = Date.now();
     try {
-      workingGroups = await this.#assessVisuals(normalizedGroups, context, requestId);
+      const deadlineAt = startedAt + this.timeoutMs;
+      workingGroups = await this.#assessVisuals(
+        normalizedGroups,
+        context,
+        requestId,
+        remainingBudgetMs(deadlineAt),
+      );
       let selected = validateSelection(
-        await this.#select(workingGroups, context),
+        await this.#select(workingGroups, context, remainingBudgetMs(deadlineAt)),
         workingGroups,
         selectionLimit,
       );
       const incompleteGroups = groupsBelowMinimum(workingGroups, selected);
       let usedFallback = false;
       if (incompleteGroups.length > 0) {
-        const repaired = (await Promise.all(incompleteGroups.map(async (group) => {
-          try {
-            return validateSelection(
-              await this.#select([group], context),
-              [group],
-              selectionLimit,
-            );
-          } catch (_) {
-            return [];
-          }
-        }))).flat();
-        selected = replaceGroupProducts(selected, repaired, incompleteGroups);
-        const unresolvedGroups = groupsBelowMinimum(incompleteGroups, selected);
-        if (unresolvedGroups.length > 0) {
-          usedFallback = true;
-          selected = replaceGroupProducts(
-            selected,
-            ruleFallback(unresolvedGroups, selectionLimit),
-            unresolvedGroups,
-          );
-        }
+        usedFallback = true;
+        selected = replaceGroupProducts(
+          selected,
+          ruleFallback(incompleteGroups, selectionLimit),
+          incompleteGroups,
+        );
       }
       const durationMs = Date.now() - startedAt;
       if (usedFallback) this.metrics.fallbackCount += 1;
@@ -202,6 +204,7 @@ class ProductAestheticReranker {
       const diversified = finalize(selected);
       this.#logResult({
         requestId,
+        prefilterCount,
         candidateCount,
         selectedCount: diversified.length,
         brandFallback: diversified.some((product) => product.brand_fallback === true),
@@ -217,6 +220,7 @@ class ProductAestheticReranker {
       const products = fallback();
       this.#logResult({
         requestId,
+        prefilterCount,
         candidateCount,
         selectedCount: products.length,
         brandFallback: products.some((product) => product.brand_fallback === true),
@@ -229,7 +233,7 @@ class ProductAestheticReranker {
     }
   }
 
-  async #select(groups, context) {
+  async #select(groups, context, timeoutMs = this.timeoutMs) {
     const startedAt = Date.now();
     this.metrics.callCount += 1;
     try {
@@ -242,7 +246,7 @@ class ProductAestheticReranker {
           messages: buildMessages(groups, context),
         },
         {
-          timeout: this.timeoutMs,
+          timeout: Math.max(1, Math.min(timeoutMs, this.timeoutMs)),
           maxRetries: 0,
         },
       );
@@ -254,7 +258,7 @@ class ProductAestheticReranker {
     }
   }
 
-  async #assessVisuals(groups, context, requestId) {
+  async #assessVisuals(groups, context, requestId, timeoutMs = this.timeoutMs) {
     if (!this.visualEvaluationEnabled) return groups;
     const batch = buildVisualBatch(groups);
     if (batch.length === 0) return groups;
@@ -270,7 +274,7 @@ class ProductAestheticReranker {
           messages: buildVisualQualityMessages(groups, context, batch),
         },
         {
-          timeout: this.timeoutMs,
+          timeout: Math.max(1, Math.min(timeoutMs, this.timeoutMs)),
           maxRetries: 0,
         },
       );
@@ -345,6 +349,8 @@ class ProductAestheticReranker {
     const safeDetails = {
       requestId: details.requestId || undefined,
       candidateCount: details.candidateCount,
+      productPrefilterCount: details.prefilterCount ?? details.candidateCount,
+      aiProductCandidateCount: details.candidateCount,
       selectedCount: details.selectedCount,
       aiDurationMs: details.durationMs,
       cached: details.cached,
@@ -1003,7 +1009,7 @@ function applyLabels(products) {
 }
 
 function normalizeGroups(groups, selectionLimit) {
-  const limit = Math.min(positiveInteger(selectionLimit, DEFAULT_SELECTION_LIMIT), 6);
+  const limit = Math.min(positiveInteger(selectionLimit, DEFAULT_SELECTION_LIMIT), 4);
   return (Array.isArray(groups) ? groups : []).map((group) => {
     const requirement = compactObject(group?.requirement || {});
     const assessedCandidates = Array.isArray(group?.candidates)
@@ -1035,6 +1041,29 @@ function normalizeGroups(groups, selectionLimit) {
       selectionLimit: limit,
     };
   });
+}
+
+function limitCandidatesPerLook(groups) {
+  const counts = new Map();
+  return (Array.isArray(groups) ? groups : []).map((group) => {
+    const lookId = String(group?.requirement?.look_id || "default").trim() || "default";
+    const used = counts.get(lookId) || 0;
+    const remaining = Math.max(0, MAX_CANDIDATES_PER_LOOK - used);
+    const candidates = (Array.isArray(group?.candidates) ? group.candidates : [])
+      .slice(0, Math.min(DEFAULT_VISUAL_CANDIDATES_PER_GROUP, remaining));
+    counts.set(lookId, used + candidates.length);
+    return {...group, candidates};
+  });
+}
+
+function remainingBudgetMs(deadlineAt) {
+  const remaining = Number(deadlineAt) - Date.now();
+  if (remaining <= 0) {
+    const error = new Error("AI product selection time budget exhausted");
+    error.code = "AI_RERANK_TIME_BUDGET";
+    throw error;
+  }
+  return Math.max(1, remaining);
 }
 
 function candidateQualityPrior(product) {

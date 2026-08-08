@@ -7,6 +7,7 @@ process.env.AI_FORCE_MOCK = "true";
 
 const {
   app,
+  assertStyleExpressionConsistency,
   analyticsStore,
   buildAiRequestUrl,
   createAiClient,
@@ -1173,6 +1174,32 @@ test("female French looks remain grouped through product search requirements", (
     item.look_id === "female-french-1" && item.gender === "female"));
   assert.equal(result.items[0].fit, "短款合体");
   assert.equal(result.items[0].material, "针织");
+});
+
+test("female feminine expression rejects three masculine trouser and loafer Looks", () => {
+  const looks = [1, 2, 3].map((index) => ({
+    look_id: `look-${index}`,
+    items: [
+      {category: "top", item_name: "宽松衬衫"},
+      {category: "bottom", item_name: "男款直筒西裤"},
+      {category: "shoes", item_name: "乐福鞋"},
+    ],
+  }));
+  assert.throws(
+    () => assertStyleExpressionConsistency(looks, {
+      gender: "female",
+      styleExpression: "feminine",
+    }),
+    /cannot all use masculine/,
+  );
+  looks[0].items = [
+    {category: "dress", item_name: "收腰连衣裙"},
+    {category: "shoes", item_name: "低跟尖头鞋"},
+  ];
+  assert.doesNotThrow(() => assertStyleExpressionConsistency(looks, {
+    gender: "female",
+    styleExpression: "feminine",
+  }));
 });
 
 test("product search rejects an opposite-gender Look before Taobao is called", () => {

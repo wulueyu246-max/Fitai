@@ -183,6 +183,7 @@ class TaobaoProductProvider extends ProductProvider {
         code: "INVALID_PRODUCT_REQUIREMENTS",
       });
     }
+    const pipelineStartedAt = Date.now();
     try {
       const groups = await Promise.all(values.map(async (query) => {
         const requirement = normalizeProductRequirement({...context, ...query}, context);
@@ -192,8 +193,17 @@ class TaobaoProductProvider extends ProductProvider {
           ...requirement,
           limit: 20,
         });
-        return {requirement, candidates};
+        return {
+          requirement,
+          prefilterCount: candidates.length,
+          candidates: candidates.slice(0, 4),
+        };
       }));
+      const taobaoMs = Date.now() - pipelineStartedAt;
+      const productPrefilterCount = groups.reduce(
+        (total, group) => total + (group.prefilterCount ?? group.candidates.length),
+        0,
+      );
       const coreGroups = groups.filter((group) =>
         CORE_OUTFIT_CATEGORIES.includes(group.requirement.category));
       if (coreGroups.length > 0 && coreGroups.every((group) => group.candidates.length === 0)) {
@@ -212,9 +222,12 @@ class TaobaoProductProvider extends ProductProvider {
           groups,
           context,
           requestId: context.requestId || "",
-          selectionLimit: 6,
+          selectionLimit: 4,
         })
-        : groups.flatMap((group) => group.candidates.slice(0, 6));
+        : groups.flatMap((group) => group.candidates.slice(0, 4));
+      const productAiMs = Math.max(0, Date.now() - pipelineStartedAt - taobaoMs);
+      const rerankFallback = products.some((product) =>
+        product.ai_rerank_fallback === true);
       this.logger.info?.("AI最终选择", {
         requestId: context.requestId || undefined,
         provider: "taobao",
@@ -222,8 +235,26 @@ class TaobaoProductProvider extends ProductProvider {
         looks: summarizeProductsByLook(products),
       });
       this.status = "taobao";
+      this.logger.info?.("product_pipeline_summary", {
+        request_id: context.requestId || undefined,
+        gender: context.gender || "unisex",
+        style_expression: context.style_expression || "auto",
+        outfit_ai_ms: context.outfit_ai_ms ?? null,
+        taobao_ms: taobaoMs,
+        product_prefilter_count: productPrefilterCount,
+        ai_product_candidate_count: Math.min(
+          productPrefilterCount,
+          values.length * 4,
+        ),
+        product_ai_ms: productAiMs,
+        rerank_fallback: rerankFallback,
+        total_ms: Date.now() - pipelineStartedAt,
+        result_status: products.length > 0
+          ? (rerankFallback ? "fallback_success" : "success")
+          : "empty",
+      });
       return uniqueProducts(sortProductsByCategoryPriority(products))
-        .slice(0, values.length * 6);
+        .slice(0, values.length * 4);
     } catch (error) {
       this.status = "error";
       throw asProductProviderError(error);
