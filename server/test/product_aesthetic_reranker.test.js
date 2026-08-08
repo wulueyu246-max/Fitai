@@ -68,8 +68,8 @@ test("validates candidate IDs and applies the weighted final score", () => {
   }, groups, 6);
 
   assert.deepEqual(products.map((item) => item.product_id), ["top-1", "shoe-1"]);
-  assert.equal(products[0].final_score, 77.6);
-  assert.equal(products[0].aesthetic_score, 84.7);
+  assert.equal(products[0].final_score, 80);
+  assert.equal(products[0].aesthetic_score, 90.7);
   assert.equal(products[0].brand_quality_score, 45);
   assert.equal(products[0].diversity_score, 100);
   assert.equal(products[0].ai_label, "AI首选");
@@ -77,7 +77,7 @@ test("validates candidate IDs and applies the weighted final score", () => {
   assert.equal(products.some((item) => item.product_id === "invented"), false);
 });
 
-test("three identical male Clean Fit generations use different primary combinations", async () => {
+test("ten identical male Clean Fit generations never repeat the same primary combination consecutively", async () => {
   let calls = 0;
   const reranker = new ProductAestheticReranker({
     client: {
@@ -105,21 +105,23 @@ test("three identical male Clean Fit generations use different primary combinati
     requestId: "request-1",
   };
 
-  const first = await reranker.rerank(input);
-  const second = await reranker.rerank({...input, requestId: "request-2"});
-  const third = await reranker.rerank({...input, requestId: "request-3"});
-
-  assert.equal(calls, 1);
   const primaryCombination = (products) => ["top", "shoes"]
     .map((category) => products.find((item) => item.category === category).product_id)
     .join(":");
-  assert.equal(new Set([
-    primaryCombination(first),
-    primaryCombination(second),
-    primaryCombination(third),
-  ]).size, 3);
+  const combinations = [];
+  for (let index = 0; index < 10; index += 1) {
+    const products = await reranker.rerank({
+      ...input,
+      requestId: `request-${index + 1}`,
+    });
+    combinations.push(primaryCombination(products));
+  }
+  assert.ok(combinations.every((combination, index) =>
+    index === 0 || combination !== combinations[index - 1]));
+  assert.ok(new Set(combinations).size >= 3);
+  assert.equal(calls, 1);
   assert.equal(reranker.getStats().call_count, 1);
-  assert.equal(reranker.getStats().cache_hits, 2);
+  assert.equal(reranker.getStats().cache_hits, 9);
 });
 
 test("penalizes duplicate IDs, images, brands, and highly similar titles across Looks", () => {
@@ -168,9 +170,55 @@ test("catalog aesthetic prior lowers cheap keyword-stuffed products", () => {
   }, requirement);
 
   assert.ok(refined.catalog_aesthetic_score >= 85);
+  assert.equal(refined.aesthetic_score, refined.catalog_aesthetic_score);
   assert.ok(cheap.catalog_aesthetic_score <= 20);
   assert.ok(cheap.aesthetic_quality_flags.includes("low_end_marketing"));
   assert.ok(cheap.aesthetic_quality_flags.includes("suspiciously_low_price"));
+});
+
+test("brand, image presentation and title quality directly affect aesthetic score", () => {
+  const requirement = {category: "bag", style: "minimal"};
+  const official = catalogAestheticAssessment({
+    title: "品牌官方设计师系列通勤包",
+    brand: "Studio Brand",
+    shop_name: "品牌官方旗舰店",
+    image_url: "https://img.alicdn.com/official-white.jpg",
+    image_quality_hint: "white_background",
+    material: "头层牛皮",
+    price: 699,
+  }, requirement);
+  const unbranded = catalogAestheticAssessment({
+    title: "普通通勤包",
+    image_url: "https://img.alicdn.com/standard.jpg",
+    price: 199,
+  }, requirement);
+  const promotional = catalogAestheticAssessment({
+    title: "促销爆款学生同款通勤包9.9秒杀",
+    brand: "Unknown Factory",
+    image_url: "https://img.alicdn.com/promo-poster.jpg",
+    image_quality_hint: "promotion_poster",
+    price: 9.9,
+  }, requirement);
+
+  assert.ok(official.aesthetic_score >= unbranded.aesthetic_score + 40);
+  assert.ok(promotional.aesthetic_score < unbranded.aesthetic_score);
+  assert.ok(promotional.aesthetic_quality_flags.includes("promotion_poster"));
+  assert.ok(promotional.aesthetic_quality_flags.includes("low_end_marketing"));
+});
+
+test("aesthetic quality scoring applies to every supported product category", () => {
+  for (const category of ["top", "bottom", "shoes", "bag", "hat", "accessory"]) {
+    const assessment = catalogAestheticAssessment({
+      title: `品牌官方设计师系列${category}`,
+      brand: "Studio Brand",
+      shop_name: "品牌官方旗舰店",
+      image_url: `https://img.alicdn.com/${category}.jpg`,
+      image_quality_hint: "model_display",
+      price: 399,
+    }, {category});
+
+    assert.ok(assessment.aesthetic_score >= 80, `${category} should receive quality scoring`);
+  }
 });
 
 test("brand quality tiers score premium and established brands above unbranded goods", () => {
@@ -322,6 +370,9 @@ test("AI reranker excludes low-value products and records safe block diagnostics
   safe.title = "男士短袖Polo";
   const blocked = product("top-underwear", "top", 99);
   blocked.title = "Tom Ford 男士内裤";
+  const promotional = product("top-promo", "top", 98);
+  promotional.title = "男士短袖Polo促销9.9秒杀";
+  promotional.image_quality_hint = "promotion_poster";
   const reranker = new ProductAestheticReranker({
     client: {
       chat: {completions: {create: async (request) => {
@@ -345,7 +396,7 @@ test("AI reranker excludes low-value products and records safe block diagnostics
         item_name: "男士Polo",
         search_keywords: ["男士 Polo"],
       },
-      candidates: [blocked, safe],
+      candidates: [blocked, promotional, safe],
     }],
     context: {gender: "male"},
   });

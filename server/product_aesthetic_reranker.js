@@ -33,6 +33,15 @@ const BRAND_TIERS = Object.freeze({
 });
 
 const BRAND_SCORE = Object.freeze({S: 100, A: 85, B: 68, C: 25});
+const POSITIVE_TITLE_QUALITY_TERMS = Object.freeze([
+  "旗舰店", "官方", "品牌", "设计师", "系列",
+]);
+const NEGATIVE_TITLE_QUALITY_TERMS = Object.freeze([
+  "清仓", "爆款", "地摊", "同款", "学生", "9.9", "秒杀", "促销",
+]);
+const STRONG_IMAGE_QUALITY_HINTS = new Set([
+  "white_background", "model_display", "official",
+]);
 
 class ProductAestheticReranker {
   constructor({
@@ -322,6 +331,8 @@ function buildMessages(groups, context) {
         sales: product.sales,
         relevance_score: product.relevance_score,
         catalog_aesthetic_score: product.catalog_aesthetic_score,
+        aesthetic_score: product.aesthetic_score,
+        image_quality_hint: product.image_quality_hint,
         brand_quality_score: product.brand_quality_score,
         brand_tier: product.brand_tier,
         brand_fallback: product.brand_fallback,
@@ -684,6 +695,7 @@ function normalizeGroups(groups, selectionLimit) {
           ...catalogAestheticAssessment(product, requirement),
           ...brandQualityAssessment(product),
         }))
+        .filter((product) => !isAestheticJunk(product))
       : [];
     const requiredMinimum = Math.min(4, assessedCandidates.length);
     const highQualityCount = assessedCandidates.filter((product) =>
@@ -704,7 +716,7 @@ function normalizeGroups(groups, selectionLimit) {
 
 function candidateQualityPrior(product) {
   return boundedScore(product.relevance_score) * 0.25 +
-    boundedScore(product.catalog_aesthetic_score) * 0.3 +
+    boundedScore(product.aesthetic_score ?? product.catalog_aesthetic_score) * 0.3 +
     boundedScore(product.brand_quality_score) * 0.3 +
     boundedScore(product.budget_preference_score ?? 70) * 0.15;
 }
@@ -800,18 +812,39 @@ function catalogAestheticAssessment(product, requirement = {}) {
   );
   const materialEvidence = `${materialDescription}${normalizedTitle}`;
   const imageUrl = String(product?.image_url || "").trim().toLowerCase();
+  const imageQualityHint = String(product?.image_quality_hint || "").trim().toLowerCase();
   const price = Number(product?.price);
   const flags = [];
   let scoreValue = 50;
 
-  if (brand) scoreValue += 8;
-  if (shop.includes("旗舰店") || shop.includes("天猫")) scoreValue += 10;
-  else if (shop) scoreValue += 4;
+  if (hasExplicitBrand(product)) {
+    scoreValue += 30;
+  } else {
+    scoreValue -= 20;
+    flags.push("missing_brand");
+  }
 
-  if (/^https:\/\//.test(imageUrl) && /(?:alicdn|taobaocdn)\.com/.test(imageUrl)) {
-    scoreValue += 10;
+  const positiveTitleTerms = POSITIVE_TITLE_QUALITY_TERMS.filter((term) =>
+    title.includes(term));
+  if (positiveTitleTerms.length > 0) {
+    scoreValue += Math.min(positiveTitleTerms.length * 5, 15);
+  }
+  if (shop.includes("旗舰店") || shop.includes("天猫") || shop.includes("官方")) {
+    scoreValue += 8;
+  } else if (shop) {
+    scoreValue += 3;
+  }
+
+  if (STRONG_IMAGE_QUALITY_HINTS.has(imageQualityHint)) {
+    scoreValue += 15;
+  } else if (imageQualityHint === "promotion_poster" ||
+      /(?:promo|poster|banner|activity|marketing|campaign|sale)[-_/.]/.test(imageUrl)) {
+    scoreValue -= 30;
+    flags.push("promotion_poster");
+  } else if (/^https:\/\//.test(imageUrl) && /(?:alicdn|taobaocdn)\.com/.test(imageUrl)) {
+    scoreValue += 8;
   } else if (/^https:\/\//.test(imageUrl)) {
-    scoreValue += 5;
+    scoreValue += 3;
   } else {
     scoreValue -= 20;
     flags.push("weak_image_url");
@@ -826,8 +859,11 @@ function catalogAestheticAssessment(product, requirement = {}) {
     scoreValue -= 18;
     flags.push("keyword_stuffing");
   }
-  if (/爆款|网红|清仓|特价|秒杀|买一送一|9\.9|全网最低|厂家直销|同款/.test(title)) {
-    scoreValue -= 20;
+  const negativeTitleTerms = NEGATIVE_TITLE_QUALITY_TERMS.filter((term) =>
+    title.includes(term));
+  if (negativeTitleTerms.length > 0 ||
+      /网红|特价|买一送一|全网最低|厂家直销/.test(title)) {
+    scoreValue -= 30;
     flags.push("low_end_marketing");
   }
   if (/羊毛|羊绒|真丝|桑蚕丝|亚麻|纯棉|牛皮|头层皮|精纺|醋酸/.test(materialEvidence)) {
@@ -856,10 +892,36 @@ function catalogAestheticAssessment(product, requirement = {}) {
     flags.push("low_price");
   }
 
+  const aestheticScore = roundScore(boundedScore(scoreValue));
   return {
-    catalog_aesthetic_score: roundScore(boundedScore(scoreValue)),
+    catalog_aesthetic_score: aestheticScore,
+    aesthetic_score: aestheticScore,
     aesthetic_quality_flags: flags,
   };
+}
+
+function hasExplicitBrand(product) {
+  const brand = normalizeComparisonText(product?.brand);
+  if (!brand || /^(?:其他|其它|无品牌|other|none|unknown|精选商品|精选商家)$/.test(brand)) {
+    return false;
+  }
+  return true;
+}
+
+function isAestheticJunk(product) {
+  const scoreValue = boundedScore(
+    product?.aesthetic_score ?? product?.catalog_aesthetic_score,
+  );
+  const flags = new Set(Array.isArray(product?.aesthetic_quality_flags)
+    ? product.aesthetic_quality_flags
+    : []);
+  if (scoreValue <= 10) return true;
+  return scoreValue < 40 && [
+    "promotion_poster",
+    "low_end_marketing",
+    "keyword_stuffing",
+    "placeholder_image",
+  ].some((flag) => flags.has(flag));
 }
 
 function repeatedBigramRatio(value) {

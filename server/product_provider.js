@@ -721,23 +721,40 @@ function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}, origi
   ) ?? 0;
   const originalPrice = firstNumber(priceInfo.reserve_price, basic.reserve_price, item.reserve_price);
   const commissionRate = normalizeCommissionRate(firstNumber(income.commission_rate, item.commission_rate));
+  const brandName = firstText(basic.brand_name, item.brand_name);
+  const shopName = firstText(
+    basic.shop_title,
+    basic.seller_nick,
+    item.shop_title,
+    item.seller_nick,
+  );
+  const whiteImageUrl = firstPublicImageUrl(
+    basic.white_image,
+    item.white_image,
+  );
+  const primaryImageUrl = firstPublicImageUrl(
+    basic.pict_url,
+    item.pict_url,
+  );
+  const imageUrl = whiteImageUrl || primaryImageUrl;
   return compact({
     product_id: productId,
     source: "taobao",
     title,
     _category_text: `${rawCategory} ${title}`.trim(),
-    brand: firstText(basic.brand_name, item.brand_name),
+    brand: brandName,
     category,
     price,
-    image_url: firstPublicImageUrl(
-      basic.pict_url,
-      basic.white_image,
-      item.pict_url,
-      item.white_image,
-    ),
+    image_url: imageUrl,
+    image_quality_hint: inferImageQualityHint({
+      whiteImageUrl,
+      imageUrl,
+      title,
+      shopName,
+    }),
     original_price: originalPrice != null && originalPrice > price ? originalPrice : null,
     coupon_amount: firstNumber(priceInfo.coupon_amount, item.coupon_amount) ?? null,
-    shop_name: firstText(basic.shop_title, basic.seller_nick, item.shop_title, item.seller_nick),
+    shop_name: shopName,
     sales: firstText(
       basic.annual_vol,
       basic.volume,
@@ -811,6 +828,20 @@ function firstPublicImageUrl(...values) {
     if (normalized) return normalized;
   }
   return "";
+}
+
+function inferImageQualityHint({whiteImageUrl, imageUrl, title, shopName}) {
+  if (whiteImageUrl) return "white_background";
+  const evidence = `${title || ""} ${shopName || ""}`;
+  if (/官方|旗舰店|品牌直营/.test(evidence)) return "official";
+  const normalizedUrl = String(imageUrl || "").toLowerCase();
+  if (/(?:promo|poster|banner|activity|marketing|campaign|sale)[-_/.]/.test(normalizedUrl)) {
+    return "promotion_poster";
+  }
+  if (/(?:model|wear|lookbook|detail)[-_/.]/.test(normalizedUrl)) {
+    return "model_display";
+  }
+  return "standard";
 }
 
 function normalizePublicImageUrl(value) {

@@ -597,6 +597,41 @@ test("protocol-relative Taobao images become public HTTPS URLs", () => {
   assert.equal(normalizePublicImageUrl("http://127.0.0.1/item.jpg"), "");
 });
 
+test("Taobao mapping prefers a white-background image and records its quality", () => {
+  const product = mapTaobaoProduct({
+    item_basic_info: {
+      item_id: "white-image-1",
+      title: "品牌官方通勤包",
+      pict_url: "//img.alicdn.com/regular.jpg",
+      white_image: "//img.alicdn.com/white.jpg",
+    },
+  }, {fallbackCategory: "bag"});
+
+  assert.equal(product.image_url, "https://img.alicdn.com/white.jpg");
+  assert.equal(product.image_quality_hint, "white_background");
+});
+
+test("Taobao mapping recognizes official and promotional image presentation", () => {
+  const official = mapTaobaoProduct({
+    item_basic_info: {
+      item_id: "official-image-1",
+      title: "品牌系列男士衬衫",
+      shop_title: "品牌官方旗舰店",
+      pict_url: "//img.alicdn.com/item.jpg",
+    },
+  }, {fallbackCategory: "top"});
+  const promotional = mapTaobaoProduct({
+    item_basic_info: {
+      item_id: "promo-image-1",
+      title: "男士衬衫",
+      pict_url: "//img.alicdn.com/promo-poster/sale.jpg",
+    },
+  }, {fallbackCategory: "top"});
+
+  assert.equal(official.image_quality_hint, "official");
+  assert.equal(promotional.image_quality_hint, "promotion_poster");
+});
+
 test("matching TAOBAO_ADZONE_ID may explicitly override the PID value", () => {
   assert.deepEqual(parseTaobaoPlacement("mm_1_2_300", "300"), {
     siteId: "2",
