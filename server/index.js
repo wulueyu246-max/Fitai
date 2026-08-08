@@ -53,8 +53,12 @@ const {
   resolveStyleExpression,
 } = require("./recommendation_context");
 const {
+  StyleInterpretationCache,
+  StyleProfileInvalidError,
+  assertValidStyleInterpretation,
   buildStyleInterpreterPrompt,
   normalizeStyleProfile,
+  normalizeStyleSemantics,
 } = require("./style_interpreter");
 
 require("dotenv").config({
@@ -89,6 +93,7 @@ const DEFAULT_AI_TIMEOUT_MS = 90_000;
 // Manual rollback only: set AI_MODEL=qwen-vl-plus in the environment.
 // The server never switches to this legacy model automatically.
 const LEGACY_AI_MODEL = "qwen-vl-plus";
+const styleInterpretationCache = new StyleInterpretationCache();
 
 function resolveAiTimeoutMs(value) {
   return Math.max(
@@ -1198,8 +1203,13 @@ function parseOutfitAnalysis(content, context = {}) {
     throw new Error("AI 返回缺少字符串字段：style");
   }
 
+  const styleSemantics = normalizeStyleSemantics(
+    context.styleSemantics || context.style_semantics ||
+      parsed.style_semantics || parsed.styleSemantics,
+  );
   const styleProfile = normalizeStyleProfile(
-    parsed.style_profile || parsed.styleProfile,
+    context.styleProfile || context.style_profile ||
+      parsed.style_profile || parsed.styleProfile,
     {sourceText: context.userInput || parsed.style},
   );
   const styleExpression = resolveStyleExpression({
@@ -1409,6 +1419,7 @@ function parseOutfitAnalysis(content, context = {}) {
   return {
     gender: analysisGender,
     style_expression: styleExpression,
+    style_semantics: styleSemantics,
     style_profile: styleProfile,
     bodyProfile: bodyProfile.trim(),
     style: parsed.style.trim(),
@@ -1867,6 +1878,7 @@ async function buildOutfitApiResponse(
     scene: outfitRequest.scene,
     requestedStyle: analysis.style,
     styleExpression: analysis.style_expression,
+    styleSemantics: analysis.style_semantics,
     styleProfile: analysis.style_profile,
     bodyProfile: {
       height: outfitRequest.height,
@@ -1891,6 +1903,7 @@ async function buildOutfitApiResponse(
       scene: outfitRequest.scene,
       gender: effectiveGender,
       style_expression: recommendationContext.style_expression,
+      style_semantics: recommendationContext.style_semantics,
       style_profile: recommendationContext.style_profile,
       recommendation_context: recommendationContext,
       budget: preferredItemBudget,
@@ -1908,13 +1921,14 @@ async function buildOutfitApiResponse(
       user_requirements: {
         scene: outfitRequest.scene,
         style: analysis.style,
+        style_semantics: recommendationContext.style_semantics,
         style_profile: recommendationContext.style_profile,
         budget: preferredItemBudget,
         item_budget: outfitRequest.itemBudget,
         outfit_budget: outfitRequest.outfitBudget,
-        user_input: outfitRequest.request,
       },
       outfit_plan: {
+        style_semantics: recommendationContext.style_semantics,
         style_profile: recommendationContext.style_profile,
         styling_strategy: analysis.styling_strategy,
         looks,
@@ -1924,7 +1938,6 @@ async function buildOutfitApiResponse(
         accessories: analysis.recommendations.accessories,
         summary: analysis.recommendations.summary,
       },
-      userInput: outfitRequest.request,
     });
   return {
     ...analysis,
@@ -2455,6 +2468,7 @@ async function handleProductRecommendations(req, res, next) {
       scene: filters.scene,
       requestedStyle: filters.style,
       styleExpression: filters.style_expression,
+      styleSemantics: filters.style_semantics,
       styleProfile: filters.style_profile,
       bodyProfile: filters.user_profile,
       weather: filters.user_requirements?.weather,
@@ -2467,6 +2481,7 @@ async function handleProductRecommendations(req, res, next) {
     });
     filters.gender = recommendationContext.gender;
     filters.style_expression = recommendationContext.style_expression;
+    filters.style_semantics = recommendationContext.style_semantics;
     filters.style_profile = recommendationContext.style_profile;
     filters.recommendation_context = recommendationContext;
     logRecommendationStage(console, "product_request", recommendationContext, {
@@ -2538,6 +2553,7 @@ function productRecommendationFilters(input = {}, requestId = "") {
     category: input?.category,
     style: input?.style,
     style_expression: input?.style_expression ?? input?.styleExpression,
+    style_semantics: input?.style_semantics ?? input?.styleSemantics,
     style_profile: input?.style_profile ?? input?.styleProfile,
     color: input?.color,
     bodyType: input?.bodyType,
@@ -2706,6 +2722,108 @@ app.get("/products/:id/stats", async (req, res, next) => {
   }
 });
 
+function parseStyleRepairPatch(content) {
+  const withoutFence = String(content || "")
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(withoutFence);
+  } catch {
+    const completed = completeTruncatedJson(withoutFence);
+    if (!completed) throw new Error("Style Semantic Repair returned invalid JSON");
+    parsed = JSON.parse(completed);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Style Semantic Repair returned an invalid object");
+  }
+  return parsed;
+}
+
+async function repairStyleInterpretationAndLooks({
+  analysis,
+  outfitRequest,
+  requestContext,
+  sourceText,
+  issues,
+  client = aiClient,
+  timeoutMs = Math.min(config.aiTimeoutMs, 20_000),
+}) {
+  const styleRepairTimeoutMs = Math.min(timeoutMs, 20_000);
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => abortController.abort(), styleRepairTimeoutMs);
+  timeout.unref();
+  const startedAt = Date.now();
+  try {
+    const response = await client.chat.completions.create(
+      {
+        model: config.model,
+        ...structuredJsonRequestOptions(),
+        messages: [
+          {
+            role: "system",
+            content: `${buildStyleInterpreterPrompt()}
+This is the single text-only Style Semantic Repair and Look replanning pass. Never request or analyze images. Repair style_semantics and style_profile, then replan styling_strategy, recommendations, and exactly three Looks from the repaired canonical style data and the completed body analysis.
+All user-facing natural-language values MUST be Simplified Chinese. Preserve gender, core item structure, unique look_id values, and existing schemas. Return one JSON object containing style_semantics, style_profile, style, style_expression, styling_strategy, recommendations, and looks.`,
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              requested_style: sourceText,
+              scene: outfitRequest.scene,
+              gender: requestContext.gender,
+              body_information: {
+                height: outfitRequest.height,
+                weight: outfitRequest.weight,
+                completed_visual_analysis: analysis.bodyProfile,
+              },
+              budget: {
+                item: outfitRequest.itemBudget,
+                outfit: outfitRequest.outfitBudget,
+              },
+              invalid_reasons: issues,
+              previous_style_semantics: analysis.style_semantics,
+              previous_style_profile: analysis.style_profile,
+              previous_styling_strategy: analysis.styling_strategy,
+              previous_looks: analysis.looks,
+            }),
+          },
+        ],
+      },
+      {
+        signal: abortController.signal,
+        timeout: styleRepairTimeoutMs,
+        maxRetries: 0,
+      },
+    );
+    const patch = parseStyleRepairPatch(extractAiText(response));
+    const repaired = parseOutfitAnalysis(JSON.stringify({
+      ...analysis,
+      ...patch,
+      bodyProfile: analysis.bodyProfile,
+      gender: analysis.gender,
+    }), {
+      gender: requestContext.gender,
+      scene: outfitRequest.scene,
+      requestId: outfitRequest.requestId,
+      userInput: sourceText,
+      style_expression: requestContext.style_expression,
+    });
+    assertValidStyleInterpretation(repaired, {sourceText});
+    console.info("Style Semantic Repair completed", {
+      requestId: outfitRequest.requestId,
+      durationMs: Date.now() - startedAt,
+      repairedIssues: issues,
+      imageResubmitted: false,
+    });
+    return repaired;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 app.post("/outfit", outfitRateLimiter, async (req, res) => {
   let outfitRequest;
   let aiRequestStartedAt;
@@ -2717,17 +2835,40 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
       ...validateOutfitRequest(req.body),
       requestId: res.locals.requestId,
     };
+    const styleCacheContext = {
+      requested_style: outfitRequest.request,
+      scene: outfitRequest.scene,
+      gender: outfitRequest.gender,
+      body_information: {
+        height: outfitRequest.height,
+        weight: outfitRequest.weight,
+      },
+      weather: {},
+      budget: {
+        item: outfitRequest.itemBudget,
+        outfit: outfitRequest.outfitBudget,
+      },
+    };
+    const cachedStyleInterpretation = styleInterpretationCache.get(
+      styleCacheContext,
+    );
     const requestContext = createRecommendationContext({
       requestId: res.locals.requestId,
       gender: outfitRequest.gender,
       scene: outfitRequest.scene,
       requestedStyle: outfitRequest.request,
+      styleSemantics: cachedStyleInterpretation?.style_semantics,
+      styleProfile: cachedStyleInterpretation?.style_profile,
       bodyProfile: {height: outfitRequest.height, weight: outfitRequest.weight},
       weather: {},
       budget: {item: outfitRequest.itemBudget, outfit: outfitRequest.outfitBudget},
       userInput: outfitRequest.request,
     });
     logRecommendationStage(console, "outfit_request", requestContext);
+    console.info("Style Semantic Reasoner cache", {
+      requestId: res.locals.requestId,
+      cacheHit: Boolean(cachedStyleInterpretation),
+    });
 
     if (shouldUseMockAi(config, aiClient)) {
       if (!config.allowMockContent) {
@@ -2773,6 +2914,10 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
       });
     }
 
+    if (cachedStyleInterpretation) {
+      outfitRequest.request =
+        `Canonical style_semantics and style_profile; do not reinterpret: ${JSON.stringify(cachedStyleInterpretation)}`;
+    }
     const userContent = [
       {
         type: "text",
@@ -2843,6 +2988,10 @@ ${partialViewSafetyInstruction}
 Stylist V2 workflow (mandatory): analyze visual proportions first, then output styling_strategy, then design three Looks from that strategy. Never infer proportion from height alone.
 All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.
 ${buildStyleInterpreterPrompt()}
+Before emitting the one final JSON response, self-audit style_semantics and style_profile in the same model call: confidence must be at least 0.6, must_express and must_avoid must both be non-empty, all 11 dimensions must be present and meaningfully differentiated, and constraints must not contradict each other. Correct only the style interpretation and Look plan internally before returning; never trigger another image analysis.
+${cachedStyleInterpretation
+    ? "A validated cached style_semantics and style_profile are present in the user message. Treat them as immutable canonical style facts and do not reinterpret the original wording."
+    : "Interpret the raw requested style exactly once through Style Semantic Reasoner, then use only the resulting canonical data downstream."}
 The immutable request context gender is ${requestContext.gender} and style_expression is ${requestContext.style_expression}. Every Look and item must preserve that gender; downstream stages must never infer it again. When style_expression=feminine, explicitly evaluate waistline, garment-length ratio, leg-line continuity, shoe shape/heel, skin exposure, and refined accessories without mechanically requiring skirts or heels.
 styling_strategy must contain body_strengths[], proportion_issues[], visual_goals[], waistline_strategy, top_length_strategy, bottom_strategy, shoe_strategy, color_strategy, silhouette_strategy, skin_exposure_strategy, accessory_strategy, and weather_strategy.
 Use height, weight, photographed shoulder/waist/leg proportions, current clothing, scene, weather, comfort, and requested style together. Valid visual_goals include elongate_legs, raise_visual_waistline, shorten_visual_torso, emphasize_waist, balance_shoulders, create_vertical_line, reduce_lower_body_bulk, enhance_body_curve, create_lightness, and create_structure.
@@ -2877,6 +3026,17 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
   "bodyProfile": "",
   "style": "",
   "style_expression": "auto",
+  "style_semantics": {
+    "identity_impression": [],
+    "emotional_tone": [],
+    "visual_personality": [],
+    "social_signal": [],
+    "must_express": [],
+    "must_avoid": [],
+    "style_atoms": [],
+    "confidence": null,
+    "interpretation_summary": ""
+  },
   "style_profile": {
     "source_text": "",
     "interpretation": "",
@@ -2884,17 +3044,17 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
     "secondary_styles": [],
     "blend_rationale": "",
     "dimensions": {
-      "maturity": 50,
-      "femininity": 50,
-      "masculinity": 50,
-      "structure": 50,
-      "minimalism": 50,
-      "romantic": 50,
-      "sportiness": 50,
-      "sexiness": 50,
-      "youthfulness": 50,
-      "luxury": 50,
-      "casualness": 50
+      "maturity": null,
+      "femininity": null,
+      "masculinity": null,
+      "structure": null,
+      "minimalism": null,
+      "romantic": null,
+      "sportiness": null,
+      "sexiness": null,
+      "youthfulness": null,
+      "luxury": null,
+      "casualness": null
     },
     "silhouette": "",
     "preferred_items": [],
@@ -2990,13 +3150,41 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       finishReason: response?.choices?.[0]?.finish_reason ?? null,
       contentLength: aiText.length,
     });
-    const analysis = parseOutfitAnalysis(aiText, {
+    let analysis = parseOutfitAnalysis(aiText, {
       gender: requestContext.gender,
       scene: outfitRequest.scene,
       requestId: res.locals.requestId,
-      userInput: outfitRequest.request,
+      userInput: styleCacheContext.requested_style,
       style_expression: requestContext.style_expression,
+      styleSemantics: cachedStyleInterpretation?.style_semantics,
+      styleProfile: cachedStyleInterpretation?.style_profile,
     });
+    let validatedStyleInterpretation;
+    try {
+      validatedStyleInterpretation = assertValidStyleInterpretation(
+        analysis,
+        {sourceText: styleCacheContext.requested_style},
+      );
+    } catch (error) {
+      if (!(error instanceof StyleProfileInvalidError)) throw error;
+      console.warn("Style Semantic Repair required", {
+        requestId: res.locals.requestId,
+        issues: error.issues,
+        imageResubmitted: false,
+      });
+      analysis = await repairStyleInterpretationAndLooks({
+        analysis,
+        outfitRequest,
+        requestContext,
+        sourceText: styleCacheContext.requested_style,
+        issues: error.issues,
+      });
+      validatedStyleInterpretation = assertValidStyleInterpretation(
+        analysis,
+        {sourceText: styleCacheContext.requested_style},
+      );
+    }
+    styleInterpretationCache.set(styleCacheContext, validatedStyleInterpretation);
     const parseDurationMs = Date.now() - parseStartedAt;
 
     console.info("AI 穿搭响应字段校验通过", {
@@ -3072,6 +3260,20 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
 
     if (error instanceof ProductProviderError) {
       return sendError(res, error.status, error.code, error.message);
+    }
+
+    if (error instanceof StyleProfileInvalidError) {
+      console.error("Style Semantic Reasoner rejected invalid profile", {
+        requestId: res.locals.requestId,
+        errorCode: error.code,
+        issues: error.issues,
+      });
+      return sendError(
+        res,
+        502,
+        error.code,
+        "风格语义解析未达到质量要求，请重试",
+      );
     }
 
     const fallbackReason = resolveAiFallbackReason(error);
@@ -3314,6 +3516,8 @@ module.exports = {
   extractAiText,
   normalizeAiOutfitPayload,
   parseOutfitAnalysis,
+  parseStyleRepairPatch,
+  repairStyleInterpretationAndLooks,
   buildAiRequestUrl,
   createAiClient,
   createAiDispatcher,

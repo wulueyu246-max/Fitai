@@ -1,6 +1,7 @@
 const {normalizeGender} = require("./product_relevance");
 const {
   normalizeStyleProfile,
+  normalizeStyleSemantics,
   resolveExpressionFromStyleProfile,
 } = require("./style_interpreter");
 
@@ -20,6 +21,7 @@ function createRecommendationContext({
   scene,
   requestedStyle,
   styleExpression,
+  styleSemantics,
   styleProfile,
   bodyProfile,
   weather,
@@ -34,11 +36,11 @@ function createRecommendationContext({
     request_id: String(requestId || "").trim(),
     gender: normalizedGender,
     scene: String(scene || "").trim(),
-    requested_style: String(requestedStyle || userInput || "").trim(),
     style_expression: resolveStyleExpression({
       explicit: styleExpression,
       styleProfile: normalizedStyleProfile,
     }),
+    style_semantics: normalizeStyleSemantics(styleSemantics),
     style_profile: normalizedStyleProfile,
     body_profile: Object.freeze({...bodyProfile}),
     weather: Object.freeze({...weather}),
@@ -65,6 +67,9 @@ function logRecommendationStage(logger, stage, context, details = {}) {
     gender: context?.gender || "unisex",
     style_expression: context?.style_expression || "auto",
     style_profile_configured: Boolean(context?.style_profile?.source_text),
+    style_semantics_configured: Boolean(
+      context?.style_semantics?.interpretation_summary,
+    ),
     ...details,
   });
 }

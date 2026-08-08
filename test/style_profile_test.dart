@@ -11,6 +11,17 @@ void main() {
       'shoes': '尖头低跟鞋',
       'accessories': '极简耳饰',
       'suggestion': '保持利落线条',
+      'style_semantics': {
+        'identity_impression': ['冷静'],
+        'emotional_tone': ['克制'],
+        'visual_personality': ['干净', '利落'],
+        'social_signal': ['专业'],
+        'must_express': ['成熟气场'],
+        'must_avoid': ['夸张印花'],
+        'style_atoms': ['极简', '结构'],
+        'confidence': 0.86,
+        'interpretation_summary': '干净克制并保留成熟气场。',
+      },
       'style_profile': {
         'source_text': 'Clean Fit 御姐',
         'interpretation': '极简干净与成熟利落女性感的融合',
@@ -30,9 +41,15 @@ void main() {
     expect(analysis.styleProfile.sourceText, 'Clean Fit 御姐');
     expect(analysis.styleProfile.secondaryStyles, ['御姐']);
     expect(analysis.styleProfile.dimensions['minimalism'], 88);
+    expect(analysis.styleSemantics.mustAvoid, ['夸张印花']);
+    expect(analysis.styleSemantics.confidence, 0.86);
     expect(
       analysis.toJson()['style_profile']['primary_style'],
       'Clean Fit',
+    );
+    expect(
+      analysis.toJson()['style_semantics']['interpretation_summary'],
+      '干净克制并保留成熟气场。',
     );
   });
 }

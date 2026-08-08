@@ -19,6 +19,7 @@ const {
   configureProxyEnvironment,
   extractAiText,
   parseOutfitAnalysis,
+  repairStyleInterpretationAndLooks,
   readBoolean,
   listenForRequests,
   logOptionalServiceWarnings,
@@ -753,6 +754,17 @@ test("duplicate accessory categories keep the first valid decision", () => {
     bodyProfile: "adult male",
     style: "Clean Fit",
     style_upgrade_level: "maintain",
+    style_semantics: {
+      identity_impression: ["clean modern professional"],
+      emotional_tone: ["calm", "confident"],
+      visual_personality: ["minimal", "structured"],
+      social_signal: ["reliable"],
+      must_express: ["clean structure"],
+      must_avoid: ["messy decoration"],
+      style_atoms: ["minimalism", "structure"],
+      confidence: 0.9,
+      interpretation_summary: "A clean and structured modern direction.",
+    },
     recommendations: {
       top: "knit polo",
       bottom: "straight trousers",
@@ -924,6 +936,99 @@ test("AI Style Interpreter preserves an unknown blended style through Look parsi
   assert.deepEqual(analysis.style_profile.secondary_styles, ["韩系", "学长感"]);
   assert.equal(analysis.style_expression, "masculine");
   assert.doesNotMatch(analysis.style_profile.interpretation, /普通休闲/);
+});
+
+test("Style Semantic Repair runs once without resubmitting images", async () => {
+  const payload = validAiOutfitPayloadForNormalization();
+  payload.style_semantics = {
+    identity_impression: ["generic"],
+    emotional_tone: [],
+    visual_personality: [],
+    social_signal: [],
+    must_express: [],
+    must_avoid: [],
+    style_atoms: [],
+    confidence: 0.2,
+    interpretation_summary: "",
+  };
+  payload.style_profile = {
+    source_text: "invented style",
+    interpretation: "generic",
+    dimensions: Object.fromEntries([
+      "maturity", "femininity", "masculinity", "structure", "minimalism",
+      "romantic", "sportiness", "sexiness", "youthfulness", "luxury",
+      "casualness",
+    ].map((field) => [field, 50])),
+  };
+  const analysis = parseOutfitAnalysis(JSON.stringify(payload), {
+    gender: "male",
+    scene: "date",
+    requestId: "style-repair-request",
+    userInput: "invented style",
+  });
+  const repairPatch = {
+    ...payload,
+    style_semantics: {
+      identity_impression: ["calm curator"],
+      emotional_tone: ["restrained"],
+      visual_personality: ["light structure"],
+      social_signal: ["independent"],
+      must_express: ["clear structure"],
+      must_avoid: ["ordinary casual"],
+      style_atoms: ["future", "curation"],
+      confidence: 0.91,
+      interpretation_summary: "A restrained, lightly structured curatorial direction.",
+    },
+    style_profile: {
+      source_text: "invented style",
+      interpretation: "A restrained, lightly structured curatorial direction.",
+      primary_style: "curatorial structure",
+      secondary_styles: ["future lightness"],
+      blend_rationale: "Structure leads while lightness softens the result.",
+      dimensions: {
+        maturity: 74, femininity: 32, masculinity: 66, structure: 84,
+        minimalism: 78, romantic: 18, sportiness: 22, sexiness: 16,
+        youthfulness: 54, luxury: 62, casualness: 28,
+      },
+      silhouette: "clean vertical light structure",
+      preferred_items: ["cropped jacket", "straight trousers"],
+      preferred_colors: ["rain gray", "cool blue"],
+      preferred_materials: ["fine wool", "subtle technical fabric"],
+      positive_keywords: ["light structure", "clean line"],
+      negative_keywords: ["messy print", "ordinary casual"],
+    },
+  };
+  const calls = [];
+  const client = {
+    chat: {completions: {create: async (...args) => {
+      calls.push(args);
+      return {choices: [{message: {content: JSON.stringify(repairPatch)}}]};
+    }}},
+  };
+
+  const repaired = await repairStyleInterpretationAndLooks({
+    analysis,
+    outfitRequest: {
+      requestId: "style-repair-request",
+      request: "invented style",
+      scene: "date",
+      height: 178,
+      weight: 68,
+      itemBudget: "200-500",
+      outfitBudget: "800-1500",
+    },
+    requestContext: {gender: "male", style_expression: "masculine"},
+    sourceText: "invented style",
+    issues: ["LOW_CONFIDENCE", "GENERIC_DIMENSIONS"],
+    client,
+    timeoutMs: 1000,
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(repaired.style_semantics.confidence, 0.91);
+  assert.equal(repaired.style_profile.dimensions.structure, 84);
+  assert.doesNotMatch(JSON.stringify(calls[0][0].messages), /image_url|data:image/);
+  assert.equal(calls[0][1].maxRetries, 0);
 });
 
 test("normalizes blank explanatory AI fields before strict outfit validation", () => {

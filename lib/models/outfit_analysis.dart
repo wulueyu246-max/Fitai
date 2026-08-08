@@ -5,6 +5,7 @@ import 'product_recommendation.dart';
 import 'product_search_requirement.dart';
 import 'styling_strategy.dart';
 import 'style_profile.dart';
+import 'style_semantics.dart';
 
 class OutfitAnalysis {
   const OutfitAnalysis({
@@ -17,6 +18,7 @@ class OutfitAnalysis {
     required this.suggestion,
     this.gender = 'unisex',
     this.styleExpression = 'auto',
+    this.styleSemantics = const StyleSemantics(),
     this.styleProfile = const StyleProfile(),
     this.analysisMode = 'ai',
     this.stylingStrategy = const StylingStrategy(),
@@ -54,6 +56,9 @@ class OutfitAnalysis {
         json,
         const ['style_expression', 'styleExpression'],
         fallback: 'auto',
+      ),
+      styleSemantics: StyleSemantics.fromJson(
+        json['style_semantics'] ?? json['styleSemantics'],
       ),
       styleProfile: StyleProfile.fromJson(
         json['style_profile'] ?? json['styleProfile'],
@@ -180,6 +185,9 @@ class OutfitAnalysis {
         const ['style_expression', 'styleExpression'],
         fallback: 'auto',
       ),
+      styleSemantics: StyleSemantics.fromJson(
+        json['style_semantics'] ?? json['styleSemantics'],
+      ),
       styleProfile: StyleProfile.fromJson(
         json['style_profile'] ?? json['styleProfile'],
       ),
@@ -214,6 +222,7 @@ class OutfitAnalysis {
   final String suggestion;
   final String gender;
   final String styleExpression;
+  final StyleSemantics styleSemantics;
   final StyleProfile styleProfile;
   final String analysisMode;
   final StylingStrategy stylingStrategy;
@@ -237,6 +246,7 @@ class OutfitAnalysis {
     String? suggestion,
     String? gender,
     String? styleExpression,
+    StyleSemantics? styleSemantics,
     StyleProfile? styleProfile,
     String? analysisMode,
     StylingStrategy? stylingStrategy,
@@ -258,6 +268,7 @@ class OutfitAnalysis {
       suggestion: suggestion ?? this.suggestion,
       gender: gender ?? this.gender,
       styleExpression: styleExpression ?? this.styleExpression,
+      styleSemantics: styleSemantics ?? this.styleSemantics,
       styleProfile: styleProfile ?? this.styleProfile,
       analysisMode: analysisMode ?? this.analysisMode,
       stylingStrategy: stylingStrategy ?? this.stylingStrategy,
@@ -283,6 +294,7 @@ class OutfitAnalysis {
       'suggestion': suggestion,
       'gender': gender,
       'style_expression': styleExpression,
+      'style_semantics': styleSemantics.toJson(),
       'style_profile': styleProfile.toJson(),
       'analysis_mode': analysisMode,
       'styling_strategy': stylingStrategy.toJson(),

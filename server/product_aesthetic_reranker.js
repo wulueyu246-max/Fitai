@@ -372,19 +372,21 @@ function buildMessages(groups, context) {
     user_requirements: pickFields(context.user_requirements || context.userRequirements || {
       scene: context.scene,
       style: context.style,
+      style_semantics: context.style_semantics || context.styleSemantics,
+      style_profile: context.style_profile || context.styleProfile,
       season: context.season,
       budget: context.budget,
       item_budget: context.item_budget ?? context.itemBudget,
       outfit_budget: context.outfit_budget ?? context.outfitBudget,
-      user_input: context.userInput,
     }, [
       "scene", "style", "season", "weather", "budget",
+      "style_semantics", "styleSemantics",
       "style_profile", "styleProfile",
       "item_budget", "itemBudget", "outfit_budget", "outfitBudget",
-      "color_preferences", "colorPreferences", "user_input", "userInput",
+      "color_preferences", "colorPreferences",
     ]),
     outfit_plan: pickFields(context.outfit_plan || context.outfitPlan || {}, [
-      "style_profile", "styleProfile", "styling_strategy", "stylingStrategy", "looks", "top", "bottom", "dress",
+      "style_semantics", "styleSemantics", "style_profile", "styleProfile", "styling_strategy", "stylingStrategy", "looks", "top", "bottom", "dress",
       "shoes", "outerwear", "bag", "accessories", "summary",
     ]),
     product_groups: groups.map((group, index) => ({
@@ -434,6 +436,8 @@ function buildMessages(groups, context) {
         "Treat item_budget and outfit_budget as soft preferences for brand choice, price ranking, value assessment, and recommendation reasons; never use them as hard filters.",
         "A slightly over-budget product may be selected when its quality or outfit fit justifies it, but the reason must clearly explain that tradeoff.",
         "Use styling_strategy plus every Look's styling_goal and proportion_strategy as the source of truth for body-proportion fit.",
+        "Use style_semantics and style_profile as the sole source of truth for style_match. Do not reinterpret raw user wording.",
+        "A strong conflict with must_express, must_avoid, silhouette, preferred materials, or continuous style dimensions is disqualifying; brand or image quality cannot override it.",
         "Do not equate brand with taste. Brand/shop trust is only supporting evidence; image quality, silhouette, material, Look coherence, and body strategy matter more.",
         "Never select a candidate with commercial_ad_penalty >= 60.",
         "Each selected product must also include body_strategy_match_score from 0 to 100.",
