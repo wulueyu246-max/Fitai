@@ -882,10 +882,32 @@ function completeTruncatedJson(content) {
 }
 
 const AI_OUTFIT_TEXT_DEFAULTS = Object.freeze({
+  body_profile: "已结合照片与身体数据完成比例分析",
+  style: "个性化穿搭",
   styling_goal: "提升整体造型与比例协调性",
   proportion_strategy: "通过轮廓、腰线与长度关系优化整体比例",
   why_this_changes_the_body_proportion:
     "通过协调轮廓、腰线、衣长与鞋型改善视觉比例",
+});
+
+const AI_RECOMMENDATION_TEXT_DEFAULTS = Object.freeze({
+  top: "选择与整体比例和风格协调的上衣",
+  bottom: "选择能优化下半身线条的下装",
+  shoes: "选择兼顾场景、舒适度与比例的鞋履",
+  accessories: "根据造型完整度按需加入配饰",
+  summary: "本方案围绕身体比例、场景和风格进行整体搭配",
+});
+
+const STYLING_STRATEGY_TEXT_DEFAULTS = Object.freeze({
+  waistline_strategy: "根据身体比例调整视觉腰线",
+  top_length_strategy: "通过合适衣长平衡上下身比例",
+  bottom_strategy: "通过下装版型和长度优化腿部线条",
+  shoe_strategy: "选择兼顾比例、舒适度和场景的鞋型",
+  color_strategy: "使用协调配色保持整体连贯",
+  silhouette_strategy: "通过轮廓变化优化整体比例",
+  skin_exposure_strategy: "根据场景控制适度露肤和视觉留白",
+  accessory_strategy: "根据造型完整度选择必要配饰",
+  weather_strategy: "根据天气选择舒适且实用的材质与单品",
 });
 
 const STYLING_STRATEGY_TEXT_FIELDS = Object.freeze([
@@ -900,38 +922,194 @@ const STYLING_STRATEGY_TEXT_FIELDS = Object.freeze([
   ["weather_strategy", "weatherStrategy"],
 ]);
 
+function userFacingChineseText(value, fallback) {
+  const text = readOptionalString(value);
+  return /[\u3400-\u9fff]/u.test(text) ? text : fallback;
+}
+
+function localizedStyleText(value, fallback = AI_OUTFIT_TEXT_DEFAULTS.style) {
+  const text = readOptionalString(value);
+  if (/[\u3400-\u9fff]/u.test(text)) return text;
+  const normalized = text.toLowerCase();
+  if (normalized.includes("clean fit")) return "简约利落";
+  if (normalized.includes("french")) return "法式优雅";
+  if (normalized.includes("korean")) return "韩系简约";
+  if (normalized.includes("smart casual")) return "轻商务休闲";
+  if (normalized.includes("formal")) return "正式典雅";
+  if (normalized.includes("vintage")) return "复古质感";
+  return fallback;
+}
+
+function localizedStrategyText(field, value, fallback) {
+  const text = readOptionalString(value);
+  if (/[㐀-鿿]/u.test(text)) return text;
+  const normalized = text.toLowerCase();
+  if (field === "shoe_strategy") {
+    const choices = [];
+    if (normalized.includes("water-resistant") || normalized.includes("weatherproof")) {
+      choices.push("防水材质");
+    }
+    if (normalized.includes("rubber-soled") || normalized.includes("rubber sole")) {
+      choices.push("防滑橡胶底");
+    }
+    if (normalized.includes("almond")) choices.push("杏仁头");
+    if (normalized.includes("pointed")) choices.push("尖头");
+    if (normalized.includes("loafer")) choices.push("乐福鞋");
+    if (normalized.includes("sneaker")) choices.push("轻量运动鞋");
+    if (normalized.includes("low heel") || normalized.includes("3cm")) {
+      choices.push("舒适的3厘米低跟");
+    } else if (normalized.includes("flat")) {
+      choices.push("平底鞋型");
+    }
+    if (choices.length > 0) {
+      return `优先选择${[...new Set(choices)].join("、")}，兼顾比例、舒适度和场景`;
+    }
+  }
+  if (field === "weather_strategy" && normalized.includes("rain")) {
+    return "雨天避免麂皮、露趾和易滑鞋底，优先选择防水防滑材质";
+  }
+  return fallback;
+}
+
+function localizedLookText(field, value, fallback) {
+  const text = readOptionalString(value);
+  if (/[㐀-鿿]/u.test(text)) return text;
+  const normalized = text.toLowerCase();
+  if (field === "styling_goal") {
+    if (normalized.includes("waist")) return "提高视觉腰线";
+    if (normalized.includes("vertical")) return "营造纵向延伸线条";
+    if (normalized.includes("color") || normalized.includes("continuity")) {
+      return "利用同色延伸塑造连贯比例";
+    }
+    if (normalized.includes("balance") || normalized.includes("preserve")) {
+      return "保持身体比例平衡";
+    }
+  }
+  if (field === "proportion_strategy") {
+    if (normalized.includes("cropped") && normalized.includes("a-line")) {
+      return "短款上衣搭配高腰A字下装和杏仁头低跟鞋";
+    }
+    if (normalized.includes("full-length") || normalized.includes("wide-leg")) {
+      return "上衣塞入高腰全长裤并搭配尖头鞋，延伸下半身线条";
+    }
+    if (normalized.includes("dress") || normalized.includes("midi")) {
+      return "收腰中长连衣裙搭配浅口鞋，保持纵向连贯";
+    }
+    if (normalized.includes("raised waist") || normalized.includes("high waist")) {
+      return "通过提高腰线优化上下身比例";
+    }
+    if (normalized.includes("vertical")) return "通过纵向轮廓延伸视觉线条";
+    if (normalized.includes("natural waist") || normalized.includes("straight")) {
+      return "保持自然腰线并用直线型下装塑造利落轮廓";
+    }
+  }
+  if (field === "why_this_changes_the_body_proportion") {
+    if (normalized.includes("shorter top") || normalized.includes("higher waist")) {
+      return "缩短上衣并提高腰线，能够增加腿部在整体造型中的视觉占比";
+    }
+    if (normalized.includes("trouser") || normalized.includes("pointed toe")) {
+      return "连续裤线与尖头鞋共同延伸下半身视觉线条";
+    }
+    if (normalized.includes("color") || normalized.includes("uninterrupted")) {
+      return "连贯色彩形成轻盈的纵向轮廓";
+    }
+    if (normalized.includes("leg line") || normalized.includes("lengthen")) {
+      return "通过腰线和长度关系延伸腿部视觉线条";
+    }
+    if (normalized.includes("structure")) return "增加轮廓结构，同时保持自然比例";
+  }
+  return fallback;
+}
+
 function normalizeAiOutfitPayload(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return payload;
   }
 
   const normalized = {...payload};
+  const rawBodyProfile = payload.bodyProfile ?? payload.body_profile ??
+    payload.bodyAnalysis ?? payload.body_analysis;
+  if (rawBodyProfile != null) {
+    normalized.bodyProfile = userFacingChineseText(
+      rawBodyProfile,
+      AI_OUTFIT_TEXT_DEFAULTS.body_profile,
+    );
+  }
+  if (payload.style != null) {
+    normalized.style = localizedStyleText(payload.style);
+  }
+  if (payload.recommendations &&
+      typeof payload.recommendations === "object" &&
+      !Array.isArray(payload.recommendations)) {
+    const rawRecommendations = payload.recommendations;
+    const recommendationAliases = {
+      top: ["top", "topRecommendation", "top_recommendation"],
+      bottom: ["bottom", "bottomRecommendation", "bottom_recommendation"],
+      shoes: ["shoes", "shoeRecommendation", "shoe_recommendation"],
+      accessories: [
+        "accessories", "accessoryRecommendation", "accessory_recommendation",
+      ],
+      summary: ["summary", "suggestion"],
+    };
+    normalized.recommendations = {...rawRecommendations};
+    for (const [field, aliases] of Object.entries(recommendationAliases)) {
+      const value = aliases.map((alias) => rawRecommendations[alias])
+        .find((candidate) => typeof candidate === "string");
+      normalized.recommendations[field] = userFacingChineseText(
+        value,
+        AI_RECOMMENDATION_TEXT_DEFAULTS[field],
+      );
+    }
+  }
   const rawStrategy = payload.styling_strategy || payload.stylingStrategy;
   if (rawStrategy && typeof rawStrategy === "object" && !Array.isArray(rawStrategy)) {
     const strategy = {...rawStrategy};
+    for (const [field, fallback] of [
+      ["body_strengths", "身体比例具有可塑性"],
+      ["proportion_issues", "需要通过版型优化视觉比例"],
+    ]) {
+      if (Array.isArray(rawStrategy[field])) {
+        strategy[field] = rawStrategy[field]
+          .map((value) => userFacingChineseText(value, fallback))
+          .filter(Boolean);
+      }
+    }
     for (const [snakeCase, camelCase] of STYLING_STRATEGY_TEXT_FIELDS) {
-      strategy[snakeCase] = readOptionalString(
+      strategy[snakeCase] = localizedStrategyText(
+        snakeCase,
         rawStrategy[snakeCase] ?? rawStrategy[camelCase],
+        STYLING_STRATEGY_TEXT_DEFAULTS[snakeCase],
       );
     }
     normalized.styling_strategy = strategy;
   }
 
   if (Array.isArray(payload.looks)) {
-    normalized.looks = payload.looks.map((look) => {
+    normalized.looks = payload.looks.map((look, lookIndex) => {
       if (!look || typeof look !== "object" || Array.isArray(look)) return look;
       const normalizedLook = {
         ...look,
-        styling_goal: readOptionalString(
+        style: localizedStyleText(look.style, normalized.style),
+        style_direction: userFacingChineseText(
+          look.style_direction ?? look.styleDirection,
+          `第${lookIndex + 1}套差异化造型`,
+        ),
+        styling_goal: localizedLookText(
+          "styling_goal",
           look.styling_goal ?? look.stylingGoal,
-        ) || AI_OUTFIT_TEXT_DEFAULTS.styling_goal,
-        proportion_strategy: readOptionalString(
+          AI_OUTFIT_TEXT_DEFAULTS.styling_goal,
+        ),
+        proportion_strategy: localizedLookText(
+          "proportion_strategy",
           look.proportion_strategy ?? look.proportionStrategy,
-        ) || AI_OUTFIT_TEXT_DEFAULTS.proportion_strategy,
-        why_this_changes_the_body_proportion: readOptionalString(
+          AI_OUTFIT_TEXT_DEFAULTS.proportion_strategy,
+        ),
+        why_this_changes_the_body_proportion: localizedLookText(
+          "why_this_changes_the_body_proportion",
           look.why_this_changes_the_body_proportion ??
           look.whyThisChangesTheBodyProportion,
-        ) || AI_OUTFIT_TEXT_DEFAULTS.why_this_changes_the_body_proportion,
+          AI_OUTFIT_TEXT_DEFAULTS.why_this_changes_the_body_proportion,
+        ),
       };
       const rawDecisions = look.accessories_decision ?? look.accessoriesDecision;
       if (Array.isArray(rawDecisions)) {
@@ -939,7 +1117,7 @@ function normalizeAiOutfitPayload(payload) {
           if (!decision || typeof decision !== "object" || Array.isArray(decision)) {
             return decision;
           }
-          const reason = readOptionalString(decision.reason);
+          const reason = userFacingChineseText(decision.reason, "");
           return {
             ...decision,
             reason: reason || (decision.include === true
@@ -1135,14 +1313,14 @@ function parseOutfitAnalysis(content, context = {}) {
         ),
         styling_goal: readOptionalString(
           look.styling_goal || look.stylingGoal,
-        ) || stylingStrategy.visual_goals.join(", ") || "improve visual proportion",
+        ) || stylingStrategy.visual_goals.join(", ") || "优化整体视觉比例",
         proportion_strategy: readOptionalString(
           look.proportion_strategy || look.proportionStrategy,
         ) || stylingStrategy.silhouette_strategy || stylingStrategy.waistline_strategy,
         why_this_changes_the_body_proportion: readOptionalString(
           look.why_this_changes_the_body_proportion ||
           look.whyThisChangesTheBodyProportion,
-        ) || "Coordinates silhouette, waistline, length, and footwear for a more balanced visual proportion.",
+        ) || "通过协调轮廓、腰线、衣长与鞋型改善整体视觉比例",
       };
       const hasAccessoryDecision = Object.prototype.hasOwnProperty.call(
         look,
@@ -1178,10 +1356,10 @@ function parseOutfitAnalysis(content, context = {}) {
       scene: readOptionalString(context.scene),
       style: parsed.style.trim(),
       style_direction: uniqueStyleDirection("", 0, usedStyleDirections),
-      styling_goal: stylingStrategy.visual_goals.join(", ") || "improve visual proportion",
+      styling_goal: stylingStrategy.visual_goals.join(", ") || "优化整体视觉比例",
       proportion_strategy: stylingStrategy.silhouette_strategy || stylingStrategy.waistline_strategy,
       why_this_changes_the_body_proportion:
-        "Coordinates silhouette, waistline, length, and footwear for a more balanced visual proportion.",
+        "通过协调轮廓、腰线、衣长与鞋型改善整体视觉比例",
       items: parsed.products.map((product, index) => normalizeItem(product, index, {
         look_id: "look-1",
         gender: analysisGender,
@@ -1242,7 +1420,7 @@ function normalizeStylingStrategy(value, context = {}) {
     silhouette_strategy: text(
       "silhouette_strategy",
       "silhouetteStrategy",
-      bodyProfile ? `Use the visual body analysis: ${bodyProfile}` : "",
+      bodyProfile ? `根据身体视觉分析调整轮廓：${bodyProfile}` : "",
     ),
     skin_exposure_strategy: text(
       "skin_exposure_strategy",
@@ -1379,12 +1557,14 @@ function buildAccessoryRequirement(accessoryType, items, lookIndex) {
   const requirement = normalizeProductRequirement({
     look_id: context.look_id,
     category: defaults.category,
+    search_subcategory: accessoryType,
     gender,
     item_name: names[0],
     style: context.style,
     season: context.season,
     scene: context.scene,
-    search_keywords: names.map((name) => [audience, name].filter(Boolean).join(" ")),
+    search_keywords: names.map((name) =>
+      [audience, context.style, name].filter(Boolean).join(" ")),
     negative_keywords: context.negative_keywords || [],
   });
   return {
@@ -2539,6 +2719,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
 请根据用户的身高、体重、使用场景、穿搭需求，以及按正面、侧面、背面标注的全身照片，分析身体比例并提供可执行的穿搭建议。
 ${partialViewSafetyInstruction}
 Stylist V2 workflow (mandatory): analyze visual proportions first, then output styling_strategy, then design three Looks from that strategy. Never infer proportion from height alone.
+All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.
 styling_strategy must contain body_strengths[], proportion_issues[], visual_goals[], waistline_strategy, top_length_strategy, bottom_strategy, shoe_strategy, color_strategy, silhouette_strategy, skin_exposure_strategy, accessory_strategy, and weather_strategy.
 Use height, weight, photographed shoulder/waist/leg proportions, current clothing, scene, weather, comfort, and requested style together. Valid visual_goals include elongate_legs, raise_visual_waistline, shorten_visual_torso, emphasize_waist, balance_shoulders, create_vertical_line, reduce_lower_body_bulk, enhance_body_curve, create_lightness, and create_structure.
 Every Look must add styling_goal, proportion_strategy, and why_this_changes_the_body_proportion. The three Looks must differ materially in silhouette, waistline, garment length, shoe shape, skin exposure, or color continuity—not merely color.

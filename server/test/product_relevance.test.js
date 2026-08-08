@@ -7,8 +7,10 @@ const {
   normalizeGender,
   normalizeProductCategory,
   normalizeProductRequirement,
+  normalizeSearchSubcategory,
   productQualityBlock,
   rankProducts,
+  semanticCategoryMatch,
   sortProductsByCategoryPriority,
 } = require("../product_relevance");
 
@@ -128,6 +130,61 @@ test("category filters reject obvious cross-category products", () => {
   assert.equal(matchesTargetCategory("女士玛丽珍鞋", "dress"), false);
   assert.equal(matchesTargetCategory("女士托特包", "bag"), true);
   assert.equal(matchesTargetCategory("女士针织衫", "bag"), false);
+});
+
+test("bag semantic hard gate rejects bread and tissues", () => {
+  const requirement = normalizeProductRequirement({
+    category: "bag",
+    gender: "female",
+    item_name: "法式手提包",
+    search_keywords: ["女士 法式 简约 手提包"],
+  });
+  const candidates = [
+    product("bag", "女士法式简约手提包", "服饰箱包"),
+    product("bread", "奶狮面包早餐零食", "食品"),
+    product("tissue", "家庭装抽纸纸巾", "日用品"),
+  ];
+
+  const ranked = rankProducts(candidates, requirement, "女士 法式 简约 手提包", {
+    minimumScore: 0,
+  });
+  assert.deepEqual(ranked.map((item) => item.product_id), ["bag"]);
+  assert.equal(ranked[0].semantic_match, true);
+  assert.equal(semanticCategoryMatch(candidates[1], requirement), false);
+});
+
+test("jewelry semantic hard gate keeps only real jewelry", () => {
+  const requirement = normalizeProductRequirement({
+    category: "accessory",
+    search_subcategory: "jewelry",
+    gender: "female",
+    item_name: "珍珠耳环",
+    search_keywords: ["女士 法式 珍珠耳环"],
+  });
+  const ranked = rankProducts([
+    product("earring", "女士淡水珍珠耳环", "珠宝首饰"),
+    product("tissue", "柔软抽纸纸巾", "日用品"),
+    product("snack", "坚果零食大礼包", "食品"),
+  ], requirement, "女士 法式 珍珠耳环", {minimumScore: 0});
+
+  assert.equal(requirement.search_subcategory, "jewelry");
+  assert.equal(normalizeSearchSubcategory("jewelry"), "jewelry");
+  assert.deepEqual(ranked.map((item) => item.product_id), ["earring"]);
+});
+
+test("specific accessory requirements never build generic accessory searches", () => {
+  const keywords = buildSearchKeywords({
+    category: "accessory",
+    search_subcategory: "belt",
+    gender: "female",
+    style: "法式",
+    item_name: "细腰带",
+    search_keywords: ["accessory", "配饰", "女士 细腰带 皮带"],
+  });
+
+  assert.ok(keywords.length >= 2);
+  assert.ok(keywords.every((keyword) => /腰带|皮带/.test(keyword)));
+  assert.ok(keywords.every((keyword) => !/^(?:accessory|配饰)$/i.test(keyword)));
 });
 
 test("relevance score sorts the closest product first and strips internal fields", () => {

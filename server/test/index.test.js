@@ -532,9 +532,9 @@ test("Styling Strategy raises a short visual leg line before designing French Lo
     "raise_visual_waistline",
     "elongate_legs",
   ]);
-  assert.match(analysis.styling_strategy.shoe_strategy, /almond|pointed|3cm/);
+  assert.match(analysis.styling_strategy.shoe_strategy, /杏仁头|尖头|3厘米/);
   assert.ok(analysis.looks.some((look) =>
-    /high-rise|high waist|raised waist/i.test(look.proportion_strategy) &&
+    /高腰|腰线/.test(look.proportion_strategy) &&
     look.items.some((product) =>
       product.category === "shoes" && /pointed|almond|low_heel/i.test(product.fit))));
   assert.equal(new Set(analysis.looks.map((look) => look.proportion_strategy)).size, 3);
@@ -597,8 +597,8 @@ test("balanced Clean Fit and rain strategies do not force impractical height sho
     shoeFit: "flat weatherproof loafer",
   })), {gender: "male", scene: "rainy commute"});
 
-  assert.doesNotMatch(clean.styling_strategy.shoe_strategy, /heel|platform/i);
-  assert.match(rainy.styling_strategy.weather_strategy, /rain|suede|slippery/i);
+  assert.doesNotMatch(clean.styling_strategy.shoe_strategy, /高跟|厚底/);
+  assert.match(rainy.styling_strategy.weather_strategy, /雨天|麂皮|易滑/);
   assert.ok(rainy.products
     .filter((item) => item.category === "shoes")
     .every((item) => !/open.toe|suede|heel/i.test(`${item.item_name} ${item.fit}`)));
@@ -781,7 +781,7 @@ test("duplicate accessory categories keep the first valid decision", () => {
   assert.deepEqual(analysis.looks[0].accessories_decision[0], {
     category: "hat",
     include: false,
-    reason: "keep the silhouette clean",
+    reason: "当前造型无需额外加入该配饰",
   });
   assert.equal(analysis.looks[1].accessories_decision.length, 1);
   assert.deepEqual(analysis.looks[2].accessories_decision, []);
@@ -881,8 +881,50 @@ test("normalizes blank explanatory AI fields before strict outfit validation", (
     analysis.looks[2].accessories_decision[0].reason,
     "该配饰有助于提升整体造型完成度",
   );
-  assert.equal(analysis.styling_strategy.waistline_strategy, "");
+  assert.equal(
+    analysis.styling_strategy.waistline_strategy,
+    "根据身体比例调整视觉腰线",
+  );
   assert.equal(analysis.looks.length, 3);
+});
+
+test("English internal enums remain valid while user-facing AI text becomes Chinese", () => {
+  const payload = validAiOutfitPayloadForNormalization();
+  payload.bodyProfile = "Balanced shoulders with a slightly long torso.";
+  payload.style = "Clean Fit";
+  payload.recommendations = {
+    top: "Choose a structured shirt.",
+    bottom: "Use straight trousers.",
+    shoes: "Wear leather loafers.",
+    accessories: "Add a watch.",
+    summary: "A clean balanced outfit.",
+  };
+  payload.looks.forEach((look) => {
+    look.style = "Clean Fit";
+    look.style_direction = "smart casual";
+    look.styling_goal = "Create a stronger vertical line.";
+    look.proportion_strategy = "Use a raised waistline.";
+    look.why_this_changes_the_body_proportion = "It lengthens the leg line.";
+    look.accessories_decision[0].reason = "Adds polish.";
+  });
+
+  const analysis = parseOutfitAnalysis(JSON.stringify(payload), {
+    gender: "male",
+    requestId: "language-request",
+  });
+  const containsChinese = (value) => /[\u3400-\u9fff]/u.test(String(value));
+
+  assert.equal(analysis.styling_strategy.visual_goals[0], "create_structure");
+  assert.ok(containsChinese(analysis.bodyProfile));
+  assert.ok(containsChinese(analysis.style));
+  assert.ok(Object.values(analysis.recommendations).every(containsChinese));
+  assert.ok(analysis.looks.every((look) =>
+    containsChinese(look.style) &&
+    containsChinese(look.style_direction) &&
+    containsChinese(look.styling_goal) &&
+    containsChinese(look.proportion_strategy) &&
+    containsChinese(look.why_this_changes_the_body_proportion) &&
+    look.accessories_decision.every((decision) => containsChinese(decision.reason))));
 });
 
 test("AI outfit normalization keeps core Look fields strict", () => {
@@ -1183,8 +1225,8 @@ ${JSON.stringify({
   })}
 \`\`\``);
 
-  assert.equal(result.bodyProfile, "balanced");
-  assert.equal(result.recommendations.summary, "keep proportions clean");
+  assert.equal(result.bodyProfile, "已结合照片与身体数据完成比例分析");
+  assert.equal(result.recommendations.summary, "本方案围绕身体比例、场景和风格进行整体搭配");
 });
 
 test("repairs a model response missing only trailing JSON braces", () => {
@@ -1210,7 +1252,7 @@ test("repairs a model response missing only trailing JSON braces", () => {
 
   const result = parseOutfitAnalysis(missingRootBrace);
 
-  assert.equal(result.bodyProfile, "balanced");
+  assert.equal(result.bodyProfile, "已结合照片与身体数据完成比例分析");
   assert.equal(result.products.length, 1);
 });
 

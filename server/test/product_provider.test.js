@@ -489,6 +489,84 @@ test("an empty accessory result preserves matching core products", async () => {
     product.category === "top" && product.source === "taobao"));
 });
 
+test("an empty core category performs one category-specific relaxed search", async () => {
+  const searchQueries = [];
+  const provider = providerWithClient({
+    call: async (method, params) => {
+      const query = String(params.q || "");
+      searchQueries.push(query);
+      if (query === "女士 法式 上衣") {
+        return response(method, [taobaoItem({
+          item_basic_info: {
+            item_id: "relaxed-french-shirt",
+            title: "女士法式简约衬衫",
+            category_name: "女装上衣",
+            pict_url: "//img.example.com/relaxed-shirt.jpg",
+          },
+          publish_info: {click_url: "//s.click.taobao.com/relaxed-shirt"},
+        })]);
+      }
+      return response(method, []);
+    },
+  });
+
+  const products = await provider.recommendForQueries([{
+    look_id: "look-relaxed-1",
+    category: "top",
+    gender: "female",
+    style: "法式",
+    item_name: "修身泡泡袖真丝衬衫",
+    search_keywords: ["女士 法式 修身 泡泡袖 真丝衬衫"],
+  }]);
+
+  assert.equal(searchQueries.filter((query) => query === "女士 法式 上衣").length, 1);
+  assert.equal(products.length, 1);
+  assert.equal(products[0].category, "top");
+  assert.equal(products[0].semantic_match, true);
+});
+
+test("accessory candidates never fill an outfit when all core groups are empty", async () => {
+  const provider = providerWithClient({
+    call: async (method, params) => {
+      const query = String(params.q || "");
+      if (/耳饰|耳环/.test(query)) {
+        return response(method, [taobaoItem({
+          item_basic_info: {
+            item_id: "pearl-earring",
+            title: "女士法式珍珠耳环",
+            category_name: "珠宝首饰",
+            pict_url: "//img.example.com/earring.jpg",
+          },
+          publish_info: {click_url: "//s.click.taobao.com/earring"},
+        })]);
+      }
+      return response(method, []);
+    },
+  });
+
+  const products = await provider.recommendForQueries([
+    {
+      look_id: "look-empty-core",
+      category: "top",
+      gender: "female",
+      item_name: "法式衬衫",
+      style: "法式",
+      search_keywords: ["女士 法式 衬衫"],
+    },
+    {
+      look_id: "look-empty-core",
+      category: "accessory",
+      search_subcategory: "jewelry",
+      gender: "female",
+      item_name: "珍珠耳饰",
+      style: "法式",
+      search_keywords: ["女士 法式 珍珠耳饰"],
+    },
+  ]);
+
+  assert.deepEqual(products, []);
+});
+
 test("builds a twenty-item quality-filtered pool and returns up to six AI selections", async () => {
   const pageSizes = [];
   const capturedGroups = [];

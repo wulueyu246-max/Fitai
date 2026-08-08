@@ -46,14 +46,59 @@ const LOW_QUALITY_TITLE_TERMS = Object.freeze([
 ]);
 
 const CATEGORY_TERMS = Object.freeze({
-  top: ["polo", "t恤", "衬衫", "针织衫", "毛衣", "卫衣", "上衣", "背心", "短袖", "长袖"],
-  bottom: ["休闲裤", "西裤", "阔腿裤", "牛仔裤", "长裤", "短裤", "九分裤", "半身裙", "裙裤", "裤"],
-  dress: ["连衣裙", "礼服裙", "长裙", "短裙", "裙装"],
-  shoes: ["德训鞋", "玛丽珍", "乐福鞋", "皮鞋", "运动鞋", "跑鞋", "板鞋", "鞋", "靴"],
-  outerwear: ["外套", "西装", "夹克", "大衣", "风衣", "防晒衣"],
-  bag: ["手提包", "斜挎包", "托特包", "双肩包", "腋下包", "女包", "男包", "包"],
-  hat: ["棒球帽", "渔夫帽", "贝雷帽", "遮阳帽", "帽"],
-  accessory: ["项链", "耳环", "耳饰", "手链", "腰带", "领带", "围巾", "手表", "配饰"],
+  top: ["polo", "top", "shirt", "t恤", "衬衫", "针织衫", "毛衣", "卫衣", "上衣", "背心", "短袖", "长袖"],
+  bottom: ["bottom", "pants", "trousers", "skirt", "休闲裤", "西裤", "阔腿裤", "牛仔裤", "长裤", "短裤", "九分裤", "半身裙", "裙裤", "裤"],
+  dress: ["dress", "连衣裙", "礼服裙", "长裙", "短裙", "裙装"],
+  shoes: ["shoe", "shoes", "sneaker", "loafer", "boot", "德训鞋", "玛丽珍", "乐福鞋", "皮鞋", "运动鞋", "跑鞋", "板鞋", "鞋", "靴"],
+  outerwear: ["outerwear", "coat", "jacket", "blazer", "外套", "西装", "夹克", "大衣", "风衣", "防晒衣"],
+  bag: [
+    "手提包", "斜挎包", "托特包", "单肩包", "双肩包", "腋下包", "水桶包",
+    "邮差包", "公文包", "女包", "男包", "包包", "箱包", "handbag", "tote",
+    "shoulder bag", "crossbody bag", "backpack",
+  ],
+  hat: ["hat", "cap", "棒球帽", "渔夫帽", "贝雷帽", "遮阳帽", "帽"],
+  accessory: ["accessory", "jewelry", "项链", "耳环", "耳饰", "手链", "腰带", "领带", "围巾", "手表", "配饰"],
+});
+
+const ACCESSORY_SUBCATEGORY_TERMS = Object.freeze({
+  bag: Object.freeze([
+    "手提包", "斜挎包", "腋下包", "托特包", "单肩包", "双肩包", "水桶包",
+    "邮差包", "公文包", "女包", "男包", "包包", "箱包", "handbag", "tote",
+    "shoulder bag", "crossbody bag", "backpack",
+  ]),
+  hat: Object.freeze([
+    "帽子", "棒球帽", "渔夫帽", "贝雷帽", "遮阳帽", "针织帽", "礼帽", "hat", "cap",
+  ]),
+  jewelry: Object.freeze([
+    "耳环", "耳饰", "耳钉", "项链", "手链", "戒指", "胸针", "珠宝", "首饰",
+    "jewelry", "earring", "necklace", "bracelet", "ring", "brooch",
+  ]),
+  belt: Object.freeze(["腰带", "皮带", "belt"]),
+  scarf: Object.freeze(["丝巾", "围巾", "披肩", "scarf"]),
+  glasses: Object.freeze(["眼镜", "墨镜", "太阳镜", "glasses", "sunglasses"]),
+  watch: Object.freeze(["手表", "腕表", "watch"]),
+});
+
+const NON_FASHION_PRODUCT_TERMS = Object.freeze([
+  "面包", "蛋糕", "饼干", "零食", "食品", "饮料", "牛奶", "咖啡", "茶叶",
+  "抽纸", "纸巾", "卷纸", "湿巾", "卫生纸", "厨房纸", "洗衣液", "洗洁精",
+  "清洁剂", "垃圾袋", "母婴", "奶粉", "尿不湿", "宠物", "猫粮", "狗粮",
+  "手机", "耳机", "充电器", "数据线", "数码", "家居", "家具", "收纳箱",
+  "口红", "粉底", "面膜", "护肤", "美妆", "日用品", "生活用品",
+]);
+
+const CORE_OUTFIT_CATEGORIES = Object.freeze([
+  "top", "bottom", "dress", "shoes", "outerwear",
+]);
+
+const SEARCH_SUBCATEGORY_LABELS = Object.freeze({
+  bag: "手提包",
+  hat: "帽子",
+  jewelry: "耳饰",
+  belt: "腰带",
+  scarf: "丝巾",
+  glasses: "眼镜",
+  watch: "腕表",
 });
 
 const CATEGORY_LABELS = Object.freeze({
@@ -120,8 +165,10 @@ function normalizeGender(value) {
 function normalizeProductCategory(value) {
   const normalized = normalizeText(value);
   if (!normalized) return "";
+  if (containsAny(normalized, NON_FASHION_PRODUCT_TERMS)) return "";
   if (/连衣裙|礼服裙|裙装|(^|[^a-z])dress([^a-z]|$)/.test(normalized)) return "dress";
-  if (/包|(^|[^a-z])(bag|handbag|tote)([^a-z]|$)/.test(normalized)) return "bag";
+  if (containsAny(normalized, ACCESSORY_SUBCATEGORY_TERMS.bag) ||
+      /(^|[^a-z])(bag|handbag|tote|backpack)([^a-z]|$)/.test(normalized)) return "bag";
   if (/帽|(^|[^a-z])(hat|cap)([^a-z]|$)/.test(normalized)) return "hat";
   if (/眼镜|墨镜|太阳镜|珠宝|首饰|项链|耳环|耳饰|手链|戒指|腰带|皮带|领带|丝巾|围巾|手表|腕表|配饰/.test(normalized) ||
       /(^|[^a-z])(accessory|accessories|glasses|sunglasses|jewelry|necklace|earrings?|scarf|watch|belt|tie)([^a-z]|$)/.test(normalized)) {
@@ -146,6 +193,22 @@ function normalizeProductCategory(value) {
   return SUPPORTED_PRODUCT_CATEGORIES.includes(normalized) ? normalized : "";
 }
 
+function normalizeSearchSubcategory(value, itemName = "", category = "") {
+  const normalizedCategory = normalizeProductCategory(category);
+  if (normalizedCategory === "bag" || normalizedCategory === "hat") {
+    return normalizedCategory;
+  }
+  const evidence = normalizeText(`${value || ""} ${itemName || ""}`);
+  for (const subcategory of [
+    "bag", "hat", "jewelry", "belt", "scarf", "glasses", "watch",
+  ]) {
+    if (containsAny(evidence, ACCESSORY_SUBCATEGORY_TERMS[subcategory])) {
+      return subcategory;
+    }
+  }
+  return "";
+}
+
 function normalizeProductRequirement(input = {}, context = {}) {
   const category = normalizeProductCategory(input.category || context.category);
   if (!category) throw new TypeError("category is not supported");
@@ -153,6 +216,12 @@ function normalizeProductRequirement(input = {}, context = {}) {
   const itemName = safeText(
     input.item_name || input.itemName || input.keyword || CATEGORY_LABELS[category],
     "item_name",
+  );
+  const searchSubcategory = normalizeSearchSubcategory(
+    input.search_subcategory || input.searchSubcategory ||
+      input.accessory_type || input.accessoryType || input.category,
+    itemName,
+    category,
   );
   const searchKeywords = normalizeStringList(
     input.search_keywords || input.searchKeywords || (input.keyword ? [input.keyword] : []),
@@ -167,6 +236,7 @@ function normalizeProductRequirement(input = {}, context = {}) {
   return {
     look_id: optionalText(input.look_id || input.lookId || context.look_id || context.lookId, "look_id"),
     category,
+    search_subcategory: searchSubcategory,
     gender,
     item_name: itemName,
     color: optionalText(input.color || context.color, "color"),
@@ -192,9 +262,13 @@ function normalizeProductRequirement(input = {}, context = {}) {
 function buildSearchKeywords(input = {}, context = {}) {
   const requirement = normalizeProductRequirement(input, context);
   const gender = GENDER_SEARCH_TERM[requirement.gender];
-  const category = CATEGORY_LABELS[requirement.category];
-  const supplied = requirement.search_keywords.map((keyword) =>
-    makeKeywordPrecise(keyword, requirement));
+  const category = categorySearchLabel(requirement);
+  if (requirement.category === "accessory" && !requirement.search_subcategory) {
+    return [];
+  }
+  const supplied = requirement.search_keywords
+    .filter((keyword) => !isGenericAccessorySearch(keyword, requirement))
+    .map((keyword) => makeKeywordPrecise(keyword, requirement));
   const generated = [
     [gender, requirement.color, requirement.item_name],
     [gender, requirement.style, requirement.item_name, seasonLabel(requirement.season)],
@@ -205,6 +279,32 @@ function buildSearchKeywords(input = {}, context = {}) {
     keywords.push(normalizeWhitespace([gender, requirement.item_name, category, "百搭"].filter(Boolean).join(" ")));
   }
   return uniqueStrings(keywords).slice(0, 3);
+}
+
+function categorySearchLabel(requirement) {
+  return SEARCH_SUBCATEGORY_LABELS[requirement.search_subcategory] ||
+    CATEGORY_LABELS[requirement.category];
+}
+
+function isGenericAccessorySearch(keyword, requirement) {
+  if (requirement.category !== "accessory") return false;
+  const normalized = normalizeText(keyword);
+  if (!normalized) return true;
+  const withoutAudience = normalized
+    .replace(/男士|女士|男装|女装|男款|女款/g, "")
+    .replace(/\s+/g, "")
+    .replace(/fashion/g, "");
+  return /^(?:accessory|accessories|配饰|饰品)$/.test(withoutAudience);
+}
+
+function buildRelaxedCategoryKeyword(input = {}, context = {}) {
+  const requirement = normalizeProductRequirement(input, context);
+  if (!CORE_OUTFIT_CATEGORIES.includes(requirement.category)) return "";
+  return normalizeWhitespace([
+    GENDER_SEARCH_TERM[requirement.gender],
+    requirement.style,
+    categorySearchLabel(requirement),
+  ].filter(Boolean).join(" "));
 }
 
 function rankProducts(products, input = {}, searchKeyword = "", options = {}) {
@@ -221,10 +321,9 @@ function rankProducts(products, input = {}, searchKeyword = "", options = {}) {
 
 function scoreProduct(product, requirement, searchKeyword = "") {
   const title = normalizeText(product?.title);
-  const evidence = normalizeText(`${product?._category_text || ""} ${title}`);
-  if (!title || productQualityBlock(product, requirement) ||
+  if (!title || !semanticCategoryMatch(product, requirement) ||
       containsNegativeKeyword(title, requirement)) return null;
-  if (!matchesTargetCategory(evidence, requirement.category)) return null;
+  if (productQualityBlock(product, requirement)) return null;
 
   let score = 35;
   if (matchesGender(title, requirement.gender)) score += 20;
@@ -240,6 +339,8 @@ function scoreProduct(product, requirement, searchKeyword = "") {
     ...publicProduct,
     look_id: requirement.look_id,
     category: requirement.category,
+    search_subcategory: requirement.search_subcategory,
+    semantic_match: true,
     gender: requirement.gender,
     search_keyword: normalizeWhitespace(searchKeyword),
     relevance_score: Math.min(score, 100),
@@ -316,6 +417,22 @@ function containsNegativeKeyword(title, requirement) {
 function matchesTargetCategory(evidence, category) {
   if (containsAny(evidence, CATEGORY_CONFLICTS[category] || [])) return false;
   return containsAny(evidence, CATEGORY_TERMS[category] || []);
+}
+
+function semanticCategoryMatch(product, input = {}) {
+  const requirement = normalizeProductRequirement(input);
+  const evidence = normalizeText([
+    product?.title,
+    product?._category_text,
+  ].filter(Boolean).join(" "));
+  if (!evidence || containsAny(evidence, NON_FASHION_PRODUCT_TERMS)) return false;
+  if (requirement.search_subcategory) {
+    return containsAny(
+      evidence,
+      ACCESSORY_SUBCATEGORY_TERMS[requirement.search_subcategory] || [],
+    );
+  }
+  return matchesTargetCategory(evidence, requirement.category);
 }
 
 function matchesGender(title, gender) {
@@ -440,14 +557,20 @@ module.exports = {
   LOW_VALUE_PRODUCT_GROUPS,
   PRODUCT_CATEGORY_PRIORITY,
   SUPPORTED_PRODUCT_CATEGORIES,
+  ACCESSORY_SUBCATEGORY_TERMS,
+  CORE_OUTFIT_CATEGORIES,
+  NON_FASHION_PRODUCT_TERMS,
+  buildRelaxedCategoryKeyword,
   buildSearchKeywords,
   categoryPriority,
   matchesTargetCategory,
   normalizeGender,
   normalizeProductCategory,
   normalizeProductRequirement,
+  normalizeSearchSubcategory,
   productQualityBlock,
   rankProducts,
   scoreProduct,
+  semanticCategoryMatch,
   sortProductsByCategoryPriority,
 };

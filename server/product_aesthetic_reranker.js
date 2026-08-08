@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const {
   categoryPriority,
   productQualityBlock,
+  semanticCategoryMatch,
 } = require("./product_relevance");
 
 const DEFAULT_SELECTION_LIMIT = 6;
@@ -418,6 +419,7 @@ function buildMessages(groups, context) {
       role: "system",
       content: [
         "Each selected_products entry must include the source requirement_index and product_id.",
+        "All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.",
         "Never select underwear, bras, socks, hosiery, sleepwear, homewear, adult products, shapewear, or swimwear unless explicit_user_search is true.",
         "Prioritize top, bottom, shoes, outerwear, dress, and bag over accessory, underwear, and homewear.",
         "Prioritize brand tiers S, A, and credible original/designer B over ordinary or unbranded C products. Use brand_quality_score as an independent ranking signal.",
@@ -697,7 +699,7 @@ function validateSelection(payload, groups, selectionLimit) {
     seen.add(selectionKey);
     const matchScore = budgetAdjustedMatchScore(match.product);
     const recommendationReason = appendBudgetNote(
-      safeText(item.reason, 240),
+      userFacingChineseText(item.reason, "该商品与当前穿搭方案和身体比例策略相匹配", 240),
       match.product.budget_note,
     );
     const finalScore = compositeProductScore({
@@ -719,7 +721,7 @@ function validateSelection(payload, groups, selectionLimit) {
       final_score: finalScore,
       ai_match_score: finalScore,
       ai_recommendation_reason: recommendationReason,
-      ai_concern: safeText(item.concern, 180),
+      ai_concern: userFacingChineseText(item.concern, "", 180),
       recommendation_reason: recommendationReason,
       ai_rerank_fallback: false,
     });
@@ -967,7 +969,11 @@ function ruleFallback(groups, selectionLimit) {
       final_score: finalScore,
       ai_match_score: finalScore,
       recommendation_reason: appendBudgetNote(
-        safeText(product.recommendation_reason, 240),
+        userFacingChineseText(
+          product.recommendation_reason,
+          "该商品与当前穿搭需求相匹配",
+          240,
+        ),
         product.budget_note,
       ),
       ai_rerank_fallback: true,
@@ -1002,6 +1008,7 @@ function normalizeGroups(groups, selectionLimit) {
     const requirement = compactObject(group?.requirement || {});
     const assessedCandidates = Array.isArray(group?.candidates)
       ? group.candidates
+        .filter((product) => semanticCategoryMatch(product, requirement))
         .filter((product) => !productQualityBlock(product, requirement))
         .map((product) => {
           const assessed = {
@@ -1334,6 +1341,11 @@ function roundScore(value) {
 
 function safeText(value, maxLength) {
   return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
+}
+
+function userFacingChineseText(value, fallback, maxLength) {
+  const text = safeText(value, maxLength);
+  return /[\u3400-\u9fff]/u.test(text) ? text : fallback;
 }
 
 function safeErrorCode(error) {

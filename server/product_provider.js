@@ -8,6 +8,8 @@ const {
 } = require("./taobao_client");
 const {
   SUPPORTED_PRODUCT_CATEGORIES,
+  CORE_OUTFIT_CATEGORIES,
+  buildRelaxedCategoryKeyword,
   buildSearchKeywords,
   normalizeGender,
   normalizeProductCategory,
@@ -193,6 +195,19 @@ class TaobaoProductProvider extends ProductProvider {
         });
         return {requirement, candidates};
       }));
+      const coreGroups = groups.filter((group) =>
+        CORE_OUTFIT_CATEGORIES.includes(group.requirement.category));
+      if (coreGroups.length > 0 && coreGroups.every((group) => group.candidates.length === 0)) {
+        this.logger.info?.("核心穿搭品类均无语义匹配商品", {
+          requestId: context.requestId || undefined,
+          coreCategories: [...new Set(coreGroups.map((group) => group.requirement.category))],
+          accessoryCandidatesIgnored: groups
+            .filter((group) => !CORE_OUTFIT_CATEGORIES.includes(group.requirement.category))
+            .reduce((count, group) => count + group.candidates.length, 0),
+        });
+        this.status = "taobao";
+        return [];
+      }
       const products = this.reranker
         ? await this.reranker.rerank({
           groups,
@@ -231,6 +246,7 @@ class TaobaoProductProvider extends ProductProvider {
       search_requirement_gender: requirement.gender,
       search_keywords: keywords,
       category: requirement.category,
+      search_subcategory: requirement.search_subcategory || undefined,
       item_name: requirement.item_name,
     });
     const candidateLimit = Math.min(positiveInteger(filters.limit, 20), 20);
@@ -251,7 +267,29 @@ class TaobaoProductProvider extends ProductProvider {
       }
       if (products.length >= candidateLimit) break;
     }
-    if (products.length < Math.min(candidateLimit, 4)) {
+    if (products.length === 0 && CORE_OUTFIT_CATEGORIES.includes(requirement.category)) {
+      const relaxedKeyword = buildRelaxedCategoryKeyword(requirement);
+      if (relaxedKeyword && !keywords.includes(relaxedKeyword)) {
+        this.logger.info?.("淘宝核心品类执行一次关键词放宽", {
+          requestId: filters.requestId || undefined,
+          look_id: requirement.look_id || undefined,
+          category: requirement.category,
+          search_keyword: relaxedKeyword,
+        });
+        const relaxedMatches = await this.#search({
+          ...filters,
+          ...requirement,
+          searchKeyword: relaxedKeyword,
+          pageNo: 1,
+          minimumRelevanceScore: 35,
+          limit: 50,
+        });
+        products = uniqueProducts(relaxedMatches)
+          .sort((left, right) => right.relevance_score - left.relevance_score);
+      }
+    }
+    if (!requirement.look_id && keywords.length > 0 &&
+        products.length < Math.min(candidateLimit, 4)) {
       const sampled = await this.#sample({
         ...filters,
         ...requirement,
@@ -707,7 +745,7 @@ function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}, origi
   const purchaseUrl = couponUrl || affiliateUrl;
   const rawCategory = firstText(
     basic.category_name, basic.level_one_category_name, item.category_name,
-    item.level_one_category_name, fallbackCategory,
+    item.level_one_category_name,
   );
   const category = normalizeProductCategory(`${rawCategory} ${title}`) ||
     normalizeProductCategory(fallbackCategory) ||
