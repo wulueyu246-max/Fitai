@@ -155,21 +155,18 @@ test("budget preference lowers ranking without filtering over-budget products", 
   assert.equal(premiumOnHighBudget.budget_preference_score, 100);
 });
 
-test("empty 27939 search uses the authorized material recommendation API", async () => {
+test("an empty search stays empty without an unrelated sampling fallback", async () => {
   const calls = [];
   const provider = providerWithClient({
     call: async (method) => {
       calls.push(method);
-      if (method === TAOBAO_MATERIAL_SEARCH_METHOD) return response(method, []);
-      return response(method, [taobaoItem()]);
+      return response(method, []);
     },
   });
   const products = await provider.recommend({category: "outerwear", limit: 1});
-  assert.equal(calls.at(-1), TAOBAO_MATERIAL_SAMPLE_METHOD);
-  assert.ok(calls.slice(0, -1).every((method) => method === TAOBAO_MATERIAL_SEARCH_METHOD));
-  assert.ok(calls.length >= 3);
-  assert.equal(products[0].source, "taobao");
-  assert.ok(products[0].tags.includes("sample"));
+  assert.ok(calls.every((method) => method === TAOBAO_MATERIAL_SEARCH_METHOD));
+  assert.ok(calls.length >= 1 && calls.length <= 3);
+  assert.deepEqual(products, []);
 });
 
 test("successful empty Taobao responses do not silently become Mock products", async () => {
@@ -364,7 +361,7 @@ test("structured queries try precise keywords in order and expose relevance fiel
   const provider = providerWithClient({
     call: async (method, params) => {
       calls.push(params.q);
-      if (params.q === searchKeywords[0]) {
+      if (params.q === "男士 clean fit 浅灰色 polo") {
         return response(method, [taobaoItem({
           item_basic_info: {
             title: "女士浅灰色吊带上衣",
@@ -393,22 +390,24 @@ test("structured queries try precise keywords in order and expose relevance fiel
     limit: 1,
   }]);
 
-  assert.deepEqual(calls.slice(0, 2), searchKeywords);
+  assert.equal(calls[0], "男士 clean fit 浅灰色 polo");
+  assert.ok(calls.length <= 3);
+  assert.ok(calls.slice(1).every((query) => query.includes("polo")));
   assert.equal(products.length, 1);
   assert.equal(products[0].gender, "male");
   assert.equal(products[0].category, "top");
-  assert.equal(products[0].search_keyword, searchKeywords[1]);
+  assert.ok(products[0].search_keyword.includes("polo"));
   assert.ok(products[0].relevance_score >= 80);
   assert.equal(products[0].is_mock, false);
 });
 
-test("a Taobao no-result error continues with the next precise keyword", async () => {
+test("a Taobao 50001 empty result runs at most two category-specific fallbacks", async () => {
   const searchKeywords = ["女士 米白色 玛丽珍鞋", "女士 法式 玛丽珍鞋 夏季"];
   const calls = [];
   const provider = providerWithClient({
     call: async (method, params) => {
       calls.push(params.q);
-      if (params.q === searchKeywords[0]) {
+      if (params.q === "女士 法式 米白色 玛丽珍鞋") {
         throw new TaobaoApiError("no result", {
           code: "TAOBAO_API_15",
           details: {
@@ -440,7 +439,9 @@ test("a Taobao no-result error continues with the next precise keyword", async (
     search_keywords: searchKeywords,
   }]);
 
-  assert.deepEqual(calls.slice(0, 2), searchKeywords);
+  assert.equal(calls[0], "女士 法式 米白色 玛丽珍鞋");
+  assert.ok(calls.length >= 2 && calls.length <= 3);
+  assert.ok(calls.slice(1).every((query) => query.includes("玛丽珍鞋")));
   assert.equal(products.length, 6);
   assert.ok(products.every((product) => product.source === "taobao"));
 });
@@ -495,7 +496,7 @@ test("an empty core category performs one category-specific relaxed search", asy
     call: async (method, params) => {
       const query = String(params.q || "");
       searchQueries.push(query);
-      if (query === "女士 法式 上衣") {
+      if (query === "女士 衬衫") {
         return response(method, [taobaoItem({
           item_basic_info: {
             item_id: "relaxed-french-shirt",
@@ -519,10 +520,63 @@ test("an empty core category performs one category-specific relaxed search", asy
     search_keywords: ["女士 法式 修身 泡泡袖 真丝衬衫"],
   }]);
 
-  assert.equal(searchQueries.filter((query) => query === "女士 法式 上衣").length, 1);
+  assert.equal(searchQueries.filter((query) => query === "女士 衬衫").length, 1);
+  assert.ok(searchQueries.length <= 3);
   assert.equal(products.length, 1);
   assert.equal(products[0].category, "top");
   assert.equal(products[0].semantic_match, true);
+});
+
+test("fallback products still pass the semantic hard gate and empty results are logged", async () => {
+  const logs = [];
+  const calls = [];
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    logger: {info: (...args) => logs.push(args), warn() {}},
+    client: {
+      call: async (method, params) => {
+        calls.push(params.q);
+        if (calls.length === 1) {
+          throw new TaobaoApiError("no result", {
+            code: "TAOBAO_API_15",
+            details: {
+              taobao_error_code: "15",
+              taobao_sub_code: "50001",
+              taobao_sub_msg: "无结果",
+            },
+          });
+        }
+        return response(method, [taobaoItem({
+          item_basic_info: {
+            item_id: `wrong-${calls.length}`,
+            title: "家庭装抽纸纸巾",
+            category_name: "日用品",
+            pict_url: `//img.example.com/wrong-${calls.length}.jpg`,
+          },
+          publish_info: {click_url: `//s.click.taobao.com/wrong-${calls.length}`},
+        })]);
+      },
+    },
+  });
+
+  const products = await provider.recommendForQueries([{
+    category: "top",
+    gender: "female",
+    item_name: "天蓝色或白色法式衬衫",
+    style: "法式",
+    search_keywords: ["女士 天蓝色/白色 女 天蓝色 法式衬衫"],
+  }]);
+
+  assert.deepEqual(products, []);
+  assert.equal(calls[0], "女士 法式 天蓝色 衬衫");
+  assert.ok(calls.length <= 3);
+  assert.ok(calls.every((query) => query.includes("衬衫")));
+  const emptyLog = logs.find(([, details]) => details?.result_status === "empty" &&
+    details?.errorCode === "TAOBAO_API_15");
+  assert.ok(emptyLog);
+  assert.equal(emptyLog[1].fallback_level, 0);
+  assert.equal(emptyLog[1].final_count, 0);
 });
 
 test("accessory candidates never fill an outfit when all core groups are empty", async () => {

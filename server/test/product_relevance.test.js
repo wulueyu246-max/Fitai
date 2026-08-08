@@ -2,17 +2,74 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  buildTaobaoSearchPlan,
   buildSearchKeywords,
   matchesTargetCategory,
   normalizeGender,
   normalizeProductCategory,
   normalizeProductRequirement,
   normalizeSearchSubcategory,
+  normalizeTaobaoSearchKeyword,
   productQualityBlock,
   rankProducts,
   semanticCategoryMatch,
   sortProductsByCategoryPriority,
 } = require("../product_relevance");
+
+test("Taobao keyword normalization removes duplicate gender and splits color alternatives", () => {
+  const requirement = {
+    category: "top",
+    gender: "female",
+    item_name: "天蓝色或白色法式衬衫",
+    style: "法式",
+    search_keywords: ["女士 天蓝色/白色 女 天蓝色 法式衬衫"],
+  };
+  const normalized = normalizeTaobaoSearchKeyword(
+    requirement.search_keywords[0],
+    requirement,
+  );
+  const plan = buildTaobaoSearchPlan(requirement);
+
+  assert.deepEqual(normalized, [
+    "女士 法式 天蓝色 衬衫",
+    "女士 法式 白色 衬衫",
+  ]);
+  assert.equal(plan.original_keyword, "女士 天蓝色/白色 女 天蓝色 法式衬衫");
+  assert.equal(plan.exact, "女士 法式 天蓝色 衬衫");
+  assert.deepEqual(plan.fallbacks, [
+    "女士 法式 白色 衬衫",
+    "女士 天蓝色 衬衫",
+  ]);
+  assert.ok(![plan.exact, ...plan.fallbacks].some((query) =>
+    query.includes("/") || /女士.*\s女(?:\s|$)/.test(query)));
+});
+
+test("Taobao fallback plans always retain a concrete category", () => {
+  for (const requirement of [
+    {
+      category: "bag",
+      gender: "female",
+      item_name: "黑色手提包",
+      style: "法式",
+      search_keywords: ["女士 法式 黑色 手提包"],
+    },
+    {
+      category: "accessory",
+      search_subcategory: "jewelry",
+      gender: "female",
+      item_name: "珍珠耳饰",
+      style: "法式",
+      search_keywords: ["女士 法式 珍珠耳饰"],
+    },
+  ]) {
+    const plan = buildTaobaoSearchPlan(requirement);
+    assert.ok([plan.exact, ...plan.fallbacks].every((query) =>
+      /手提包|珍珠耳饰|耳饰/.test(query)));
+    assert.ok([plan.exact, ...plan.fallbacks].every((query) =>
+      !/^(?:accessory|配饰|服饰|fashion)$/i.test(query)));
+    assert.ok(plan.fallbacks.length <= 2);
+  }
+});
 
 function product(id, title, categoryText = title) {
   return {

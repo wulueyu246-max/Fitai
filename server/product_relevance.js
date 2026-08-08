@@ -112,6 +112,40 @@ const CATEGORY_LABELS = Object.freeze({
   accessory: "配饰",
 });
 
+const TAOBAO_SEARCH_CATEGORY_TERMS = Object.freeze({
+  top: Object.freeze([
+    "针织衫", "polo", "衬衫", "t恤", "毛衣", "卫衣", "背心", "上衣",
+  ]),
+  bottom: Object.freeze([
+    "高腰阔腿裤", "阔腿裤", "休闲裤", "牛仔裤", "九分裤", "西裤", "短裤",
+    "半身裙", "裤子", "下装",
+  ]),
+  dress: Object.freeze(["连衣裙", "礼服裙", "裙装"]),
+  shoes: Object.freeze([
+    "玛丽珍鞋", "德训鞋", "乐福鞋", "运动鞋", "高跟鞋", "皮鞋", "短靴",
+    "长靴", "鞋子",
+  ]),
+  outerwear: Object.freeze(["西装外套", "风衣", "大衣", "夹克", "西装", "外套"]),
+  bag: Object.freeze(["手提包", "斜挎包", "腋下包", "托特包", "单肩包", "双肩包", "包包"]),
+  hat: Object.freeze(["棒球帽", "渔夫帽", "贝雷帽", "遮阳帽", "帽子"]),
+  accessory: Object.freeze([
+    "珍珠耳饰", "耳饰", "耳环", "项链", "手链", "戒指", "胸针", "腰带",
+    "皮带", "丝巾", "围巾", "眼镜", "墨镜", "腕表", "手表",
+  ]),
+});
+
+const TAOBAO_SEARCH_COLORS = Object.freeze([
+  "天蓝色", "米白色", "象牙白", "藏青色", "深蓝色", "浅蓝色", "墨绿色",
+  "军绿色", "咖啡色", "卡其色", "浅灰色", "深灰色", "酒红色", "砖红色",
+  "雾霾蓝", "奶油色", "杏色", "米色", "白色", "黑色", "棕色", "蓝色",
+  "灰色", "绿色", "红色", "粉色", "紫色", "黄色", "橙色",
+]);
+
+const TAOBAO_SEARCH_STYLES = Object.freeze([
+  "clean fit", "smart casual", "法式", "韩系", "日系", "美式", "复古",
+  "通勤", "轻商务", "简约", "优雅", "休闲", "街头",
+]);
+
 const CATEGORY_CONFLICTS = Object.freeze({
   top: ["裤", "鞋", "靴", "包", "连衣裙", "半身裙", "裙裤"],
   bottom: ["polo", "t恤", "衬衫", "针织衫", "毛衣", "卫衣", "上衣", "鞋", "靴", "包", "连衣裙"],
@@ -279,6 +313,122 @@ function buildSearchKeywords(input = {}, context = {}) {
     keywords.push(normalizeWhitespace([gender, requirement.item_name, category, "百搭"].filter(Boolean).join(" ")));
   }
   return uniqueStrings(keywords).slice(0, 3);
+}
+
+function normalizeTaobaoSearchKeyword(keyword, input = {}, context = {}) {
+  const requirement = normalizeProductRequirement(input, context);
+  if (requirement.category === "accessory" && !requirement.search_subcategory) {
+    return [];
+  }
+  const original = normalizeWhitespace(keyword || requirement.search_keywords[0] || requirement.item_name);
+  const evidence = normalizeText([
+    original,
+    requirement.item_name,
+    requirement.color,
+    requirement.style,
+  ].filter(Boolean).join(" "));
+  const audience = GENDER_SEARCH_TERM[requirement.gender];
+  const category = specificTaobaoCategoryLabel(requirement, evidence);
+  const colors = extractTaobaoSearchColors(evidence);
+  const style = firstTaobaoSearchStyle(requirement.style, evidence);
+  const colorVariants = colors.length > 0 ? colors.slice(0, 2) : [""];
+  return uniqueStrings(colorVariants.map((color) => normalizeWhitespace([
+    audience,
+    style,
+    color,
+    category,
+  ].filter(Boolean).join(" ")))).filter((query) =>
+    query && hasSpecificTaobaoCategory(query, requirement));
+}
+
+function buildTaobaoSearchPlan(input = {}, context = {}) {
+  const requirement = normalizeProductRequirement(input, context);
+  if (requirement.category === "accessory" && !requirement.search_subcategory) {
+    return {original_keyword: "", exact: "", fallbacks: []};
+  }
+  const originals = requirement.search_keywords.length > 0
+    ? requirement.search_keywords
+    : buildSearchKeywords(requirement);
+  const originalKeyword = originals[0] || requirement.item_name;
+  const normalizedVariants = uniqueStrings(originals.flatMap((keyword) =>
+    normalizeTaobaoSearchKeyword(keyword, requirement)));
+  const exact = normalizedVariants[0] ||
+    normalizeTaobaoSearchKeyword(requirement.item_name, requirement)[0] || "";
+  const evidence = normalizeText([
+    originalKeyword,
+    requirement.item_name,
+    requirement.color,
+    requirement.style,
+  ].filter(Boolean).join(" "));
+  const audience = GENDER_SEARCH_TERM[requirement.gender];
+  const category = specificTaobaoCategoryLabel(requirement, evidence);
+  const colors = extractTaobaoSearchColors(evidence);
+  const style = firstTaobaoSearchStyle(requirement.style, evidence);
+  const categorySpecificFallbacks = [
+    normalizeWhitespace([audience, colors[0], category].filter(Boolean).join(" ")),
+    normalizeWhitespace([audience, style, category].filter(Boolean).join(" ")),
+    normalizeWhitespace([audience, category].filter(Boolean).join(" ")),
+  ];
+  const fallbacks = uniqueStrings([
+    ...normalizedVariants.slice(1),
+    ...categorySpecificFallbacks,
+  ]).filter((query) => query !== exact && hasSpecificTaobaoCategory(query, requirement))
+    .slice(0, 2);
+  return {
+    original_keyword: originalKeyword,
+    exact,
+    fallbacks,
+  };
+}
+
+function specificTaobaoCategoryLabel(requirement, evidence = "") {
+  const terms = TAOBAO_SEARCH_CATEGORY_TERMS[requirement.category] || [];
+  const normalizedEvidence = normalizeText(evidence);
+  const matchedTerm = terms.find((term) => normalizedEvidence.includes(normalizeText(term)));
+  if (matchedTerm) return matchedTerm;
+  const subcategoryLabel = SEARCH_SUBCATEGORY_LABELS[requirement.search_subcategory];
+  return subcategoryLabel ||
+    CATEGORY_LABELS[requirement.category];
+}
+
+function extractTaobaoSearchColors(evidence) {
+  const normalized = normalizeText(evidence).replace(/[／/]/g, " ");
+  const occupied = [];
+  const matches = [];
+  for (const color of TAOBAO_SEARCH_COLORS) {
+    const normalizedColor = normalizeText(color);
+    let index = normalized.indexOf(normalizedColor);
+    while (index >= 0) {
+      const end = index + normalizedColor.length;
+      const nestedInLongerColor = occupied.some(([start, occupiedEnd]) =>
+        index >= start && end <= occupiedEnd);
+      if (!nestedInLongerColor) {
+        matches.push({color, index});
+        occupied.push([index, end]);
+      }
+      index = normalized.indexOf(normalizedColor, index + 1);
+    }
+  }
+  return uniqueStrings(matches.sort((left, right) => left.index - right.index)
+    .map((match) => match.color));
+}
+
+function firstTaobaoSearchStyle(style, evidence) {
+  const normalizedStyle = normalizeText(style);
+  const normalizedEvidence = normalizeText(evidence);
+  return TAOBAO_SEARCH_STYLES.find((term) =>
+    normalizedStyle.includes(normalizeText(term))) ||
+    TAOBAO_SEARCH_STYLES.find((term) => normalizedEvidence.includes(normalizeText(term))) || "";
+}
+
+function hasSpecificTaobaoCategory(query, requirement) {
+  const normalized = normalizeText(query);
+  const label = specificTaobaoCategoryLabel(requirement, normalized);
+  if (!label || !normalized.includes(normalizeText(label))) return false;
+  const withoutAudience = normalized
+    .replace(/男士|女士|男装|女装|男款|女款/g, "")
+    .replace(/\s+/g, "");
+  return !/^(?:accessory|accessories|配饰|服饰|fashion)$/.test(withoutAudience);
 }
 
 function categorySearchLabel(requirement) {
@@ -562,12 +712,14 @@ module.exports = {
   NON_FASHION_PRODUCT_TERMS,
   buildRelaxedCategoryKeyword,
   buildSearchKeywords,
+  buildTaobaoSearchPlan,
   categoryPriority,
   matchesTargetCategory,
   normalizeGender,
   normalizeProductCategory,
   normalizeProductRequirement,
   normalizeSearchSubcategory,
+  normalizeTaobaoSearchKeyword,
   productQualityBlock,
   rankProducts,
   scoreProduct,

@@ -9,8 +9,7 @@ const {
 const {
   SUPPORTED_PRODUCT_CATEGORIES,
   CORE_OUTFIT_CATEGORIES,
-  buildRelaxedCategoryKeyword,
-  buildSearchKeywords,
+  buildTaobaoSearchPlan,
   normalizeGender,
   normalizeProductCategory,
   normalizeProductRequirement,
@@ -239,64 +238,46 @@ class TaobaoProductProvider extends ProductProvider {
 
   async #candidatePool(filters) {
     const requirement = normalizeProductRequirement(filters, filters);
-    const keywords = buildSearchKeywords(requirement);
+    const searchPlan = buildTaobaoSearchPlan(requirement);
     this.logger.info?.("淘宝商品搜索需求", {
       requestId: filters.requestId || undefined,
       look_id: requirement.look_id || undefined,
       search_requirement_gender: requirement.gender,
-      search_keywords: keywords,
+      original_keyword: searchPlan.original_keyword,
+      normalized_keyword: searchPlan.exact,
+      fallback_keywords: searchPlan.fallbacks,
       category: requirement.category,
       search_subcategory: requirement.search_subcategory || undefined,
       item_name: requirement.item_name,
     });
     const candidateLimit = Math.min(positiveInteger(filters.limit, 20), 20);
     let products = [];
-    for (const searchKeyword of keywords) {
-      for (let pageNo = 1; pageNo <= 2; pageNo += 1) {
-        const matches = await this.#search({
-          ...filters,
-          ...requirement,
-          searchKeyword,
-          pageNo,
-          minimumRelevanceScore: 35,
-          limit: 50,
-        });
-        products = uniqueProducts([...products, ...matches])
-          .sort((left, right) => right.relevance_score - left.relevance_score);
-        if (products.length >= candidateLimit || matches.length === 0) break;
-      }
-      if (products.length >= candidateLimit) break;
+    if (searchPlan.exact) {
+      products = await this.#search({
+        ...filters,
+        ...requirement,
+        originalKeyword: searchPlan.original_keyword,
+        searchKeyword: searchPlan.exact,
+        fallbackLevel: 0,
+        pageNo: 1,
+        minimumRelevanceScore: 35,
+        limit: 50,
+      });
     }
-    if (products.length === 0 && CORE_OUTFIT_CATEGORIES.includes(requirement.category)) {
-      const relaxedKeyword = buildRelaxedCategoryKeyword(requirement);
-      if (relaxedKeyword && !keywords.includes(relaxedKeyword)) {
-        this.logger.info?.("淘宝核心品类执行一次关键词放宽", {
-          requestId: filters.requestId || undefined,
-          look_id: requirement.look_id || undefined,
-          category: requirement.category,
-          search_keyword: relaxedKeyword,
-        });
-        const relaxedMatches = await this.#search({
+    if (products.length === 0 && searchPlan.fallbacks.length > 0) {
+      const fallbackBatches = await Promise.all(searchPlan.fallbacks.map(
+        (searchKeyword, index) => this.#search({
           ...filters,
           ...requirement,
-          searchKeyword: relaxedKeyword,
+          originalKeyword: searchPlan.original_keyword,
+          searchKeyword,
+          fallbackLevel: index + 1,
           pageNo: 1,
           minimumRelevanceScore: 35,
           limit: 50,
-        });
-        products = uniqueProducts(relaxedMatches)
-          .sort((left, right) => right.relevance_score - left.relevance_score);
-      }
-    }
-    if (!requirement.look_id && keywords.length > 0 &&
-        products.length < Math.min(candidateLimit, 4)) {
-      const sampled = await this.#sample({
-        ...filters,
-        ...requirement,
-        searchKeyword: keywords[0],
-        limit: 20,
-      });
-      products = uniqueProducts([...products, ...sampled])
+        }),
+      ));
+      products = uniqueProducts(fallbackBatches.flat())
         .sort((left, right) => right.relevance_score - left.relevance_score);
     }
     const budgetAssessed = products
@@ -310,7 +291,8 @@ class TaobaoProductProvider extends ProductProvider {
     this.logger.info?.("淘宝返回候选", {
       requestId: filters.requestId || undefined,
       look_id: requirement.look_id || undefined,
-      search_keyword: keywords[0],
+      original_keyword: searchPlan.original_keyword,
+      normalized_keyword: searchPlan.exact,
       gender: requirement.gender,
       category: requirement.category,
       candidateCount: products.length,
@@ -339,10 +321,16 @@ class TaobaoProductProvider extends ProductProvider {
         this.logger.info?.("淘宝商品搜索无结果", {
           requestId: filters.requestId || undefined,
           provider: "taobao",
-          search_keyword: filters.searchKeyword || buildSearchKeyword(filters),
+          result_status: "empty",
+          original_keyword: filters.originalKeyword || filters.searchKeyword || buildSearchKeyword(filters),
+          normalized_keyword: filters.searchKeyword || buildSearchKeyword(filters),
+          fallback_level: Number(filters.fallbackLevel || 0),
           gender: normalizeGender(filters.gender),
           category: filters.category || undefined,
           errorCode: safeProviderCode(error),
+          candidate_count: 0,
+          semantic_filtered_count: 0,
+          final_count: 0,
         });
         return [];
       }
@@ -356,7 +344,9 @@ class TaobaoProductProvider extends ProductProvider {
       });
       throw error;
     }
-    return mapPayload(payload, filters, this.pid, "search", (details) => {
+    let mappingDetails = {};
+    const products = mapPayload(payload, filters, this.pid, "search", (details) => {
+      mappingDetails = details;
       logMappingDiagnostics(this.logger, {
         requestId: filters.requestId || undefined,
         provider: "taobao",
@@ -364,6 +354,19 @@ class TaobaoProductProvider extends ProductProvider {
         ...details,
       });
     });
+    this.logger.info?.("淘宝商品搜索结果", {
+      requestId: filters.requestId || undefined,
+      provider: "taobao",
+      result_status: products.length > 0 ? "success" : "empty",
+      category: filters.category || undefined,
+      original_keyword: filters.originalKeyword || filters.searchKeyword || buildSearchKeyword(filters),
+      normalized_keyword: filters.searchKeyword || buildSearchKeyword(filters),
+      fallback_level: Number(filters.fallbackLevel || 0),
+      candidate_count: Number(mappingDetails.rawCount || 0),
+      semantic_filtered_count: Number(mappingDetails.categoryMismatchCount || 0),
+      final_count: products.length,
+    });
+    return products;
   }
 
   async #sample(filters) {
