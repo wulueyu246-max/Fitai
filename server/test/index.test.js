@@ -787,6 +787,148 @@ test("duplicate accessory categories keep the first valid decision", () => {
   assert.deepEqual(analysis.looks[2].accessories_decision, []);
 });
 
+function validAiOutfitPayloadForNormalization() {
+  const coreItems = [
+    {
+      category: "top",
+      item_name: "structured shirt",
+      search_keywords: ["men structured shirt"],
+      negative_keywords: ["women"],
+    },
+    {
+      category: "bottom",
+      item_name: "straight trousers",
+      search_keywords: ["men straight trousers"],
+      negative_keywords: ["women"],
+    },
+    {
+      category: "shoes",
+      item_name: "leather loafers",
+      search_keywords: ["men leather loafers"],
+      negative_keywords: ["women"],
+    },
+  ];
+  const reasons = ["", "   ", undefined];
+  return {
+    gender: "male",
+    bodyProfile: "balanced adult male",
+    style: "Clean Fit",
+    style_upgrade_level: "maintain",
+    styling_strategy: {
+      body_strengths: ["balanced shoulders"],
+      proportion_issues: [],
+      visual_goals: ["create_structure"],
+      waistline_strategy: "",
+      top_length_strategy: null,
+      bottom_strategy: "   ",
+      shoe_strategy: "comfortable loafers",
+      color_strategy: "",
+      silhouette_strategy: "clean vertical line",
+      skin_exposure_strategy: "",
+      accessory_strategy: "",
+      weather_strategy: "",
+    },
+    recommendations: {
+      top: "structured shirt",
+      bottom: "straight trousers",
+      shoes: "leather loafers",
+      accessories: "optional watch",
+      summary: "complete Clean Fit outfit",
+    },
+    looks: [0, 1, 2].map((index) => ({
+      look_id: `normalized-look-${index + 1}`,
+      gender: "male",
+      scene: "date",
+      style: "Clean Fit",
+      style_direction: `direction-${index + 1}`,
+      styling_goal: index === 0 ? "" : "balanced styling",
+      proportion_strategy: index === 1 ? "   " : "clean vertical line",
+      why_this_changes_the_body_proportion: index === 2 ? null : "adds structure",
+      accessories_decision: [{
+        category: "watch",
+        include: index !== 1,
+        ...(reasons[index] === undefined ? {} : {reason: reasons[index]}),
+      }],
+      items: coreItems,
+    })),
+  };
+}
+
+test("normalizes blank explanatory AI fields before strict outfit validation", () => {
+  const analysis = parseOutfitAnalysis(
+    JSON.stringify(validAiOutfitPayloadForNormalization()),
+    {gender: "male", scene: "date", requestId: "normalize-request"},
+  );
+
+  assert.equal(analysis.looks[0].styling_goal, "提升整体造型与比例协调性");
+  assert.equal(
+    analysis.looks[1].proportion_strategy,
+    "通过轮廓、腰线与长度关系优化整体比例",
+  );
+  assert.equal(
+    analysis.looks[2].why_this_changes_the_body_proportion,
+    "通过协调轮廓、腰线、衣长与鞋型改善视觉比例",
+  );
+  assert.equal(
+    analysis.looks[0].accessories_decision[0].reason,
+    "该配饰有助于提升整体造型完成度",
+  );
+  assert.equal(
+    analysis.looks[1].accessories_decision[0].reason,
+    "当前造型无需额外加入该配饰",
+  );
+  assert.equal(
+    analysis.looks[2].accessories_decision[0].reason,
+    "该配饰有助于提升整体造型完成度",
+  );
+  assert.equal(analysis.styling_strategy.waistline_strategy, "");
+  assert.equal(analysis.looks.length, 3);
+});
+
+test("AI outfit normalization keeps core Look fields strict", () => {
+  const cases = [
+    {
+      mutate(payload) {
+        delete payload.looks[0].items;
+      },
+      error: /items/,
+    },
+    {
+      mutate(payload) {
+        delete payload.looks[0].look_id;
+      },
+      error: /look_id/,
+    },
+    {
+      mutate(payload) {
+        payload.looks[0].gender = "unknown-gender";
+      },
+      error: /gender/,
+    },
+    {
+      mutate(payload) {
+        payload.looks[0].items = [payload.looks[0].items[0]];
+      },
+      error: /完整穿搭/,
+    },
+    {
+      mutate(payload) {
+        payload.styling_strategy.visual_goals = [];
+      },
+      error: /visual_goals/,
+    },
+  ];
+
+  for (const entry of cases) {
+    const payload = validAiOutfitPayloadForNormalization();
+    entry.mutate(payload);
+    assert.throws(
+      () => parseOutfitAnalysis(JSON.stringify(payload), {gender: "male"}),
+      entry.error,
+    );
+  }
+});
+
 test("included jewelry, hat and bag decisions create product requirements without failing", () => {
   const coreItems = [
     {category: "top", item_name: "法式针织衫", color: "米白色", search_keywords: ["女士 米白色 法式针织衫"], negative_keywords: ["男装"]},

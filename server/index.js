@@ -881,6 +881,87 @@ function completeTruncatedJson(content) {
   return content + stack.reverse().join("");
 }
 
+const AI_OUTFIT_TEXT_DEFAULTS = Object.freeze({
+  styling_goal: "提升整体造型与比例协调性",
+  proportion_strategy: "通过轮廓、腰线与长度关系优化整体比例",
+  why_this_changes_the_body_proportion:
+    "通过协调轮廓、腰线、衣长与鞋型改善视觉比例",
+});
+
+const STYLING_STRATEGY_TEXT_FIELDS = Object.freeze([
+  ["waistline_strategy", "waistlineStrategy"],
+  ["top_length_strategy", "topLengthStrategy"],
+  ["bottom_strategy", "bottomStrategy"],
+  ["shoe_strategy", "shoeStrategy"],
+  ["color_strategy", "colorStrategy"],
+  ["silhouette_strategy", "silhouetteStrategy"],
+  ["skin_exposure_strategy", "skinExposureStrategy"],
+  ["accessory_strategy", "accessoryStrategy"],
+  ["weather_strategy", "weatherStrategy"],
+]);
+
+function normalizeAiOutfitPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload;
+  }
+
+  const normalized = {...payload};
+  const rawStrategy = payload.styling_strategy || payload.stylingStrategy;
+  if (rawStrategy && typeof rawStrategy === "object" && !Array.isArray(rawStrategy)) {
+    const strategy = {...rawStrategy};
+    for (const [snakeCase, camelCase] of STYLING_STRATEGY_TEXT_FIELDS) {
+      strategy[snakeCase] = readOptionalString(
+        rawStrategy[snakeCase] ?? rawStrategy[camelCase],
+      );
+    }
+    normalized.styling_strategy = strategy;
+  }
+
+  if (Array.isArray(payload.looks)) {
+    normalized.looks = payload.looks.map((look) => {
+      if (!look || typeof look !== "object" || Array.isArray(look)) return look;
+      const normalizedLook = {
+        ...look,
+        styling_goal: readOptionalString(
+          look.styling_goal ?? look.stylingGoal,
+        ) || AI_OUTFIT_TEXT_DEFAULTS.styling_goal,
+        proportion_strategy: readOptionalString(
+          look.proportion_strategy ?? look.proportionStrategy,
+        ) || AI_OUTFIT_TEXT_DEFAULTS.proportion_strategy,
+        why_this_changes_the_body_proportion: readOptionalString(
+          look.why_this_changes_the_body_proportion ??
+          look.whyThisChangesTheBodyProportion,
+        ) || AI_OUTFIT_TEXT_DEFAULTS.why_this_changes_the_body_proportion,
+      };
+      const rawDecisions = look.accessories_decision ?? look.accessoriesDecision;
+      if (Array.isArray(rawDecisions)) {
+        normalizedLook.accessories_decision = rawDecisions.map((decision) => {
+          if (!decision || typeof decision !== "object" || Array.isArray(decision)) {
+            return decision;
+          }
+          const reason = readOptionalString(decision.reason);
+          return {
+            ...decision,
+            reason: reason || (decision.include === true
+              ? "该配饰有助于提升整体造型完成度"
+              : "当前造型无需额外加入该配饰"),
+          };
+        });
+      }
+      return normalizedLook;
+    });
+  }
+
+  return normalized;
+}
+
+function isSupportedAiGender(value) {
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  return /^(?:male|man|men|female|woman|women|unisex|neutral|gender-neutral)$/.test(normalized) ||
+    /^(?:男性|男士|男生|男|女性|女士|女生|女|中性|男女同款)$/.test(normalized);
+}
+
 function parseOutfitAnalysis(content, context = {}) {
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("AI 返回内容为空");
@@ -910,6 +991,8 @@ function parseOutfitAnalysis(content, context = {}) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("AI 返回的数据结构无效");
   }
+
+  parsed = normalizeAiOutfitPayload(parsed);
 
   const bodyProfile =
     parsed.bodyProfile ??
@@ -969,6 +1052,10 @@ function parseOutfitAnalysis(content, context = {}) {
     throw new Error("AI 返回 products 不能超过 8 项");
   }
 
+  if (Object.prototype.hasOwnProperty.call(parsed, "gender") &&
+      !isSupportedAiGender(parsed.gender)) {
+    throw new Error("AI 返回 gender 非法");
+  }
   const analysisGender = Object.prototype.hasOwnProperty.call(parsed, "gender")
     ? normalizeGender(parsed.gender)
     : normalizeGender(context.gender);
@@ -1016,6 +1103,9 @@ function parseOutfitAnalysis(content, context = {}) {
         throw new Error(`AI 返回 looks[${lookIndex}] 必须是对象`);
       }
       const explicitLookGender = Object.prototype.hasOwnProperty.call(look, "gender");
+      if (explicitLookGender && !isSupportedAiGender(look.gender)) {
+        throw new Error(`AI 返回 looks[${lookIndex}].gender 非法`);
+      }
       const lookGender = explicitLookGender
         ? normalizeGender(look.gender)
         : analysisGender;
@@ -1028,8 +1118,10 @@ function parseOutfitAnalysis(content, context = {}) {
       if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > 10) {
         throw new Error(`AI 返回 looks[${lookIndex}].items 必须包含 1 到 10 个单品`);
       }
-      const lookId = readOptionalString(look.look_id || look.lookId) ||
-        `look-${lookIndex + 1}`;
+      const lookId = readOptionalString(look.look_id || look.lookId);
+      if (!lookId) {
+        throw new Error(`AI 返回 looks[${lookIndex}].look_id 不能为空`);
+      }
       const normalizedLook = {
         request_id: readOptionalString(context.requestId),
         look_id: lookId,
@@ -1123,6 +1215,12 @@ function normalizeStylingStrategy(value, context = {}) {
   const source = value && typeof value === "object" && !Array.isArray(value)
     ? value
     : {};
+  if (Object.prototype.hasOwnProperty.call(source, "visual_goals") &&
+      (!Array.isArray(source.visual_goals) ||
+       source.visual_goals.length === 0 ||
+       source.visual_goals.some((goal) => !readOptionalString(goal)))) {
+    throw new Error("AI 返回 styling_strategy.visual_goals 结构无效");
+  }
   const list = (field) => Array.isArray(source[field])
     ? source[field]
       .map(readOptionalString)
@@ -2880,6 +2978,7 @@ module.exports = {
   createMockOutfitAnalysis,
   buildOutfitApiResponse,
   extractAiText,
+  normalizeAiOutfitPayload,
   parseOutfitAnalysis,
   buildAiRequestUrl,
   createAiClient,
