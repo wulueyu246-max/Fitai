@@ -68,8 +68,8 @@ test("validates candidate IDs and applies the weighted final score", () => {
   }, groups, 6);
 
   assert.deepEqual(products.map((item) => item.product_id), ["top-1", "shoe-1"]);
-  assert.equal(products[0].final_score, 80);
-  assert.equal(products[0].aesthetic_score, 90.7);
+  assert.equal(products[0].final_score, 79.9);
+  assert.equal(products[0].aesthetic_score, 94);
   assert.equal(products[0].brand_quality_score, 45);
   assert.equal(products[0].diversity_score, 100);
   assert.equal(products[0].ai_label, "AI首选");
@@ -80,6 +80,7 @@ test("validates candidate IDs and applies the weighted final score", () => {
 test("ten identical male Clean Fit generations never repeat the same primary combination consecutively", async () => {
   let calls = 0;
   const reranker = new ProductAestheticReranker({
+    visualEvaluationEnabled: false,
     client: {
       chat: {completions: {create: async (request) => {
         calls += 1;
@@ -206,6 +207,80 @@ test("brand, image presentation and title quality directly affect aesthetic scor
   assert.ok(promotional.aesthetic_quality_flags.includes("low_end_marketing"));
 });
 
+test("batch visual review filters an image dominated by store advertising", async () => {
+  let calls = 0;
+  const advertised = product("ad-poster", "top", 96);
+  advertised.title = "男士质感短袖衬衫";
+  const clean = product("clean-model", "top", 88);
+  clean.title = "男士垂感短袖衬衫";
+  const reranker = new ProductAestheticReranker({
+    client: {
+      chat: {completions: {create: async (request) => {
+        calls += 1;
+        if (Array.isArray(request.messages[1].content)) {
+          const images = request.messages[1].content.filter((part) =>
+            part.type === "image_url");
+          assert.equal(images.length, 2);
+          assert.ok(images.every((part) => part.image_url.detail === "auto"));
+          return {
+            choices: [{message: {content: JSON.stringify({
+              image_assessments: [
+                {
+                  requirement_index: 0,
+                  product_id: "ad-poster",
+                  visual_quality_score: 18,
+                  fashion_taste_score: 20,
+                  commercial_ad_penalty: 92,
+                  subject_coverage_score: 25,
+                  reason: "50年老店和北京商城广告字占据主图",
+                },
+                {
+                  requirement_index: 0,
+                  product_id: "clean-model",
+                  visual_quality_score: 90,
+                  fashion_taste_score: 86,
+                  commercial_ad_penalty: 5,
+                  subject_coverage_score: 88,
+                  reason: "干净模特展示，服装主体清晰",
+                },
+              ],
+            })}}],
+          };
+        }
+        const payload = JSON.parse(request.messages[1].content);
+        assert.deepEqual(
+          payload.product_groups[0].candidates.map((item) => item.product_id),
+          ["clean-model"],
+        );
+        return response([selection("clean-model", {
+          body_strategy_match_score: 89,
+        })]);
+      }}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await reranker.rerank({
+    groups: [{
+      requirement: {category: "top", gender: "male", item_name: "垂感短袖衬衫"},
+      candidates: [advertised, clean],
+    }],
+    context: {
+      gender: "male",
+      outfit_plan: {
+        styling_strategy: {visual_goals: ["create_vertical_line"]},
+      },
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(products.map((item) => item.product_id), ["clean-model"]);
+  assert.equal(products[0].commercial_ad_penalty, 5);
+  assert.equal(products[0].body_strategy_match_score, 89);
+  assert.equal(reranker.getStats().visual_call_count, 1);
+});
+
 test("aesthetic quality scoring applies to every supported product category", () => {
   for (const category of ["top", "bottom", "shoes", "bag", "hat", "accessory"]) {
     const assessment = catalogAestheticAssessment({
@@ -293,6 +368,7 @@ test("ordinary brands are allowed with an explicit brand fallback marker", async
 test("model failure falls back to relevance ordering without throwing", async () => {
   const warnings = [];
   const reranker = new ProductAestheticReranker({
+    visualEvaluationEnabled: false,
     client: {
       chat: {completions: {create: async () => {
         throw Object.assign(new Error("upstream unavailable"), {code: "ETIMEDOUT"});
@@ -374,6 +450,7 @@ test("AI reranker excludes low-value products and records safe block diagnostics
   promotional.title = "男士短袖Polo促销9.9秒杀";
   promotional.image_quality_hint = "promotion_poster";
   const reranker = new ProductAestheticReranker({
+    visualEvaluationEnabled: false,
     client: {
       chat: {completions: {create: async (request) => {
         const payload = JSON.parse(request.messages[1].content);
@@ -423,6 +500,7 @@ test("model prompt requires four to six selections for every sufficiently large 
 test("under-selected groups receive one focused repair call", async () => {
   let calls = 0;
   const reranker = new ProductAestheticReranker({
+    visualEvaluationEnabled: false,
     client: {
       chat: {completions: {create: async (request) => {
         calls += 1;
@@ -456,6 +534,7 @@ test("under-selected groups receive one focused repair call", async () => {
 test("multiple incomplete groups are repaired independently", async () => {
   const repairedCategories = [];
   const reranker = new ProductAestheticReranker({
+    visualEvaluationEnabled: false,
     client: {
       chat: {completions: {create: async (request) => {
         const payload = JSON.parse(request.messages[1].content);

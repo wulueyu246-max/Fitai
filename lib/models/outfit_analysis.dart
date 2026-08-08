@@ -3,6 +3,7 @@ import 'outfit_look.dart';
 import 'product.dart';
 import 'product_recommendation.dart';
 import 'product_search_requirement.dart';
+import 'styling_strategy.dart';
 
 class OutfitAnalysis {
   const OutfitAnalysis({
@@ -15,6 +16,7 @@ class OutfitAnalysis {
     required this.suggestion,
     this.gender = 'unisex',
     this.analysisMode = 'ai',
+    this.stylingStrategy = const StylingStrategy(),
     this.recommendedProducts = const [],
     this.productRecommendations = const [],
     this.productRequirements = const [],
@@ -48,6 +50,9 @@ class OutfitAnalysis {
       analysisMode: json['analysis_mode'] is String
           ? json['analysis_mode'] as String
           : 'ai',
+      stylingStrategy: _readStylingStrategy(
+        json['styling_strategy'] ?? json['stylingStrategy'],
+      ),
       recommendedProducts: _readProducts(json['recommended_products']),
       productRecommendations: _readProductRecommendations(
         json['product_recommendations'],
@@ -164,6 +169,9 @@ class OutfitAnalysis {
         const ['analysisMode', 'analysis_mode'],
         fallback: 'ai',
       ),
+      stylingStrategy: _readStylingStrategy(
+        json['styling_strategy'] ?? json['stylingStrategy'],
+      ),
       recommendedProducts: productRecommendations.isEmpty
           ? _readVisionProducts(json['products'])
           : List<Product>.unmodifiable(
@@ -187,6 +195,7 @@ class OutfitAnalysis {
   final String suggestion;
   final String gender;
   final String analysisMode;
+  final StylingStrategy stylingStrategy;
   final List<Product> recommendedProducts;
   final List<ProductRecommendation> productRecommendations;
   final List<ProductSearchRequirement> productRequirements;
@@ -207,6 +216,7 @@ class OutfitAnalysis {
     String? suggestion,
     String? gender,
     String? analysisMode,
+    StylingStrategy? stylingStrategy,
     List<Product>? recommendedProducts,
     List<ProductRecommendation>? productRecommendations,
     List<ProductSearchRequirement>? productRequirements,
@@ -225,6 +235,7 @@ class OutfitAnalysis {
       suggestion: suggestion ?? this.suggestion,
       gender: gender ?? this.gender,
       analysisMode: analysisMode ?? this.analysisMode,
+      stylingStrategy: stylingStrategy ?? this.stylingStrategy,
       recommendedProducts: recommendedProducts ?? this.recommendedProducts,
       productRecommendations:
           productRecommendations ?? this.productRecommendations,
@@ -247,6 +258,7 @@ class OutfitAnalysis {
       'suggestion': suggestion,
       'gender': gender,
       'analysis_mode': analysisMode,
+      'styling_strategy': stylingStrategy.toJson(),
       'recommended_products':
           recommendedProducts.map((product) => product.toJson()).toList(),
       'product_recommendations': productRecommendations
@@ -298,6 +310,14 @@ class OutfitAnalysis {
       }
     }
     return fallback;
+  }
+
+  static StylingStrategy _readStylingStrategy(dynamic value) {
+    if (value == null) return const StylingStrategy();
+    if (value is! Map<String, dynamic>) {
+      throw const FormatException('styling_strategy 必须是对象');
+    }
+    return StylingStrategy.fromJson(value);
   }
 
   static List<Product> _readProducts(dynamic value) {

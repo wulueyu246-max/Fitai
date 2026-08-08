@@ -66,6 +66,9 @@ class OutfitLook {
     required this.scene,
     required this.style,
     this.styleDirection = '',
+    this.stylingGoal = '',
+    this.proportionStrategy = '',
+    this.proportionExplanation = '',
     this.accessoryDecisions = const [],
     required this.items,
   });
@@ -123,6 +126,14 @@ class OutfitLook {
       styleDirection: _string(
         json['style_direction'] ?? json['styleDirection'],
       ),
+      stylingGoal: _string(json['styling_goal'] ?? json['stylingGoal']),
+      proportionStrategy: _string(
+        json['proportion_strategy'] ?? json['proportionStrategy'],
+      ),
+      proportionExplanation: _string(
+        json['why_this_changes_the_body_proportion'] ??
+            json['whyThisChangesTheBodyProportion'],
+      ),
       accessoryDecisions: accessoryDecisions,
       items: List<ProductSearchRequirement>.unmodifiable(
         hasAccessoryDecisions
@@ -142,6 +153,9 @@ class OutfitLook {
   final String scene;
   final String style;
   final String styleDirection;
+  final String stylingGoal;
+  final String proportionStrategy;
+  final String proportionExplanation;
   final List<AccessoryDecision> accessoryDecisions;
   final List<ProductSearchRequirement> items;
 
@@ -157,6 +171,9 @@ class OutfitLook {
         scene: scene,
         style: style,
         styleDirection: styleDirection,
+        stylingGoal: stylingGoal,
+        proportionStrategy: proportionStrategy,
+        proportionExplanation: proportionExplanation,
         accessoryDecisions: accessoryDecisions,
         items: items,
       );
@@ -168,6 +185,9 @@ class OutfitLook {
         'scene': scene,
         'style': style,
         'style_direction': styleDirection,
+        'styling_goal': stylingGoal,
+        'proportion_strategy': proportionStrategy,
+        'why_this_changes_the_body_proportion': proportionExplanation,
         if (accessoryDecisions.isNotEmpty)
           'accessories_decision': accessoryDecisions
               .map((decision) => decision.toJson())

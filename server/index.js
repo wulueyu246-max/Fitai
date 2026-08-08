@@ -924,6 +924,11 @@ function parseOutfitAnalysis(content, context = {}) {
     throw new Error("AI 返回缺少字符串字段：style");
   }
 
+  const stylingStrategy = normalizeStylingStrategy(
+    parsed.styling_strategy || parsed.stylingStrategy,
+    {bodyProfile: bodyProfile.trim(), scene: context.scene},
+  );
+
   if (
     !parsed.recommendations ||
     typeof parsed.recommendations !== "object" ||
@@ -1036,6 +1041,16 @@ function parseOutfitAnalysis(content, context = {}) {
           lookIndex,
           usedStyleDirections,
         ),
+        styling_goal: readOptionalString(
+          look.styling_goal || look.stylingGoal,
+        ) || stylingStrategy.visual_goals.join(", ") || "improve visual proportion",
+        proportion_strategy: readOptionalString(
+          look.proportion_strategy || look.proportionStrategy,
+        ) || stylingStrategy.silhouette_strategy || stylingStrategy.waistline_strategy,
+        why_this_changes_the_body_proportion: readOptionalString(
+          look.why_this_changes_the_body_proportion ||
+          look.whyThisChangesTheBodyProportion,
+        ) || "Coordinates silhouette, waistline, length, and footwear for a more balanced visual proportion.",
       };
       const hasAccessoryDecision = Object.prototype.hasOwnProperty.call(
         look,
@@ -1071,6 +1086,10 @@ function parseOutfitAnalysis(content, context = {}) {
       scene: readOptionalString(context.scene),
       style: parsed.style.trim(),
       style_direction: uniqueStyleDirection("", 0, usedStyleDirections),
+      styling_goal: stylingStrategy.visual_goals.join(", ") || "improve visual proportion",
+      proportion_strategy: stylingStrategy.silhouette_strategy || stylingStrategy.waistline_strategy,
+      why_this_changes_the_body_proportion:
+        "Coordinates silhouette, waistline, length, and footwear for a more balanced visual proportion.",
       items: parsed.products.map((product, index) => normalizeItem(product, index, {
         look_id: "look-1",
         gender: analysisGender,
@@ -1092,6 +1111,7 @@ function parseOutfitAnalysis(content, context = {}) {
     bodyProfile: bodyProfile.trim(),
     style: parsed.style.trim(),
     style_upgrade_level: styleUpgradeLevel,
+    styling_strategy: stylingStrategy,
     recommendations,
     looks,
     products,
@@ -1099,6 +1119,46 @@ function parseOutfitAnalysis(content, context = {}) {
 }
 
 const STYLE_DIRECTION_FALLBACKS = ["Clean Fit 高级基础", "韩系氛围", "轻商务"];
+function normalizeStylingStrategy(value, context = {}) {
+  const source = value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
+  const list = (field) => Array.isArray(source[field])
+    ? source[field]
+      .map(readOptionalString)
+      .filter(Boolean)
+      .slice(0, 8)
+    : [];
+  const text = (snakeCase, camelCase, fallback = "") =>
+    readOptionalString(source[snakeCase] || source[camelCase]) || fallback;
+  const bodyProfile = readOptionalString(context.bodyProfile);
+  return {
+    body_strengths: list("body_strengths"),
+    proportion_issues: list("proportion_issues"),
+    visual_goals: list("visual_goals"),
+    waistline_strategy: text("waistline_strategy", "waistlineStrategy"),
+    top_length_strategy: text("top_length_strategy", "topLengthStrategy"),
+    bottom_strategy: text("bottom_strategy", "bottomStrategy"),
+    shoe_strategy: text("shoe_strategy", "shoeStrategy"),
+    color_strategy: text("color_strategy", "colorStrategy"),
+    silhouette_strategy: text(
+      "silhouette_strategy",
+      "silhouetteStrategy",
+      bodyProfile ? `Use the visual body analysis: ${bodyProfile}` : "",
+    ),
+    skin_exposure_strategy: text(
+      "skin_exposure_strategy",
+      "skinExposureStrategy",
+    ),
+    accessory_strategy: text("accessory_strategy", "accessoryStrategy"),
+    weather_strategy: text(
+      "weather_strategy",
+      "weatherStrategy",
+      readOptionalString(context.scene),
+    ),
+  };
+}
+
 const ACCESSORY_DECISION_CATEGORIES = Object.freeze([
   "hat", "bag", "glasses", "belt", "jewelry", "scarf", "watch", "accessory",
 ]);
@@ -1439,6 +1499,16 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
         lookIndex,
         usedStyleDirections,
       ),
+      styling_goal: readOptionalString(
+        look.styling_goal || look.stylingGoal,
+      ),
+      proportion_strategy: readOptionalString(
+        look.proportion_strategy || look.proportionStrategy,
+      ),
+      why_this_changes_the_body_proportion: readOptionalString(
+        look.why_this_changes_the_body_proportion ||
+        look.whyThisChangesTheBodyProportion,
+      ),
       ...(hasAccessoryDecision
         ? {accessories_decision: accessoriesDecision}
         : {}),
@@ -1483,6 +1553,7 @@ async function buildOutfitApiResponse(
         height: outfitRequest.height,
         weight: outfitRequest.weight,
         body_profile: analysis.bodyProfile,
+        styling_strategy: analysis.styling_strategy,
         item_budget: outfitRequest.itemBudget,
         outfit_budget: outfitRequest.outfitBudget,
       },
@@ -1495,6 +1566,7 @@ async function buildOutfitApiResponse(
         user_input: outfitRequest.request,
       },
       outfit_plan: {
+        styling_strategy: analysis.styling_strategy,
         looks,
         top: analysis.recommendations.top,
         bottom: analysis.recommendations.bottom,
@@ -2183,6 +2255,16 @@ function productRecommendationRequest(input = {}, requestId = "") {
           lookIndex,
           usedStyleDirections,
         ),
+        styling_goal: readOptionalString(
+          look.styling_goal || look.stylingGoal,
+        ),
+        proportion_strategy: readOptionalString(
+          look.proportion_strategy || look.proportionStrategy,
+        ),
+        why_this_changes_the_body_proportion: readOptionalString(
+          look.why_this_changes_the_body_proportion ||
+          look.whyThisChangesTheBodyProportion,
+        ),
         ...(hasAccessoryDecision
           ? {accessories_decision: accessoriesDecision}
           : {}),
@@ -2358,6 +2440,12 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
 
 请根据用户的身高、体重、使用场景、穿搭需求，以及按正面、侧面、背面标注的全身照片，分析身体比例并提供可执行的穿搭建议。
 ${partialViewSafetyInstruction}
+Stylist V2 workflow (mandatory): analyze visual proportions first, then output styling_strategy, then design three Looks from that strategy. Never infer proportion from height alone.
+styling_strategy must contain body_strengths[], proportion_issues[], visual_goals[], waistline_strategy, top_length_strategy, bottom_strategy, shoe_strategy, color_strategy, silhouette_strategy, skin_exposure_strategy, accessory_strategy, and weather_strategy.
+Use height, weight, photographed shoulder/waist/leg proportions, current clothing, scene, weather, comfort, and requested style together. Valid visual_goals include elongate_legs, raise_visual_waistline, shorten_visual_torso, emphasize_waist, balance_shoulders, create_vertical_line, reduce_lower_body_bulk, enhance_body_curve, create_lightness, and create_structure.
+Every Look must add styling_goal, proportion_strategy, and why_this_changes_the_body_proportion. The three Looks must differ materially in silhouette, waistline, garment length, shoe shape, skin exposure, or color continuity—not merely color.
+shoe_strategy must deliberately choose the visual role of flat, low_heel, mid_heel, platform, pointed_toe, almond_toe, loafer, or sneaker while respecting comfort, scene, and weather. Never mechanically prescribe heels/platforms for a shorter user, and never recommend weather-inappropriate shoes merely to look taller.
+Socks, hosiery, and skin exposure are styling tools only when they improve this specific Look; never add them mechanically.
 
 安全与输出要求：
 0. 必须先完成 3 套结构化 Look 设计，再由后续商品服务按照每套 Look 的 items 搜索淘宝候选；不得根据淘宝结果反向编写 Look。
@@ -2386,6 +2474,20 @@ ${partialViewSafetyInstruction}
   "bodyProfile": "",
   "style": "",
   "style_upgrade_level": "upgrade",
+  "styling_strategy": {
+    "body_strengths": [],
+    "proportion_issues": [],
+    "visual_goals": [],
+    "waistline_strategy": "",
+    "top_length_strategy": "",
+    "bottom_strategy": "",
+    "shoe_strategy": "",
+    "color_strategy": "",
+    "silhouette_strategy": "",
+    "skin_exposure_strategy": "",
+    "accessory_strategy": "",
+    "weather_strategy": ""
+  },
   "recommendations": {
     "top": "",
     "bottom": "",
@@ -2399,6 +2501,9 @@ ${partialViewSafetyInstruction}
       "gender": "",
       "style": "",
       "style_direction": "",
+      "styling_goal": "",
+      "proportion_strategy": "",
+      "why_this_changes_the_body_proportion": "",
       "scene": "",
       "accessories_decision": [
         {

@@ -7,6 +7,8 @@ const {
 const DEFAULT_SELECTION_LIMIT = 6;
 const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000;
 const DEFAULT_CACHE_ENTRIES = 100;
+const DEFAULT_VISUAL_CANDIDATES_PER_GROUP = 10;
+const MAX_VISUAL_IMAGES_PER_REQUEST = 40;
 const HIGH_QUALITY_BRAND_SCORE = 65;
 
 const BRAND_TIERS = Object.freeze({
@@ -50,6 +52,7 @@ class ProductAestheticReranker {
     timeoutMs = 45_000,
     cacheTtlMs = DEFAULT_CACHE_TTL_MS,
     maxCacheEntries = DEFAULT_CACHE_ENTRIES,
+    visualEvaluationEnabled = true,
     logger = console,
   } = {}) {
     this.client = client || null;
@@ -57,6 +60,7 @@ class ProductAestheticReranker {
     this.timeoutMs = positiveInteger(timeoutMs, 45_000);
     this.cacheTtlMs = positiveInteger(cacheTtlMs, DEFAULT_CACHE_TTL_MS);
     this.maxCacheEntries = positiveInteger(maxCacheEntries, DEFAULT_CACHE_ENTRIES);
+    this.visualEvaluationEnabled = visualEvaluationEnabled !== false;
     this.logger = logger;
     this.cache = new Map();
     this.selectionHistory = new Map();
@@ -66,6 +70,10 @@ class ProductAestheticReranker {
       fallbackCount: 0,
       totalDurationMs: 0,
       lastDurationMs: null,
+      visualCallCount: 0,
+      visualFallbackCount: 0,
+      visualTotalDurationMs: 0,
+      visualLastDurationMs: null,
     };
   }
 
@@ -83,6 +91,12 @@ class ProductAestheticReranker {
         ? Math.round(this.metrics.totalDurationMs / this.metrics.callCount)
         : 0,
       last_duration_ms: this.metrics.lastDurationMs,
+      visual_call_count: this.metrics.visualCallCount,
+      visual_fallback_count: this.metrics.visualFallbackCount,
+      visual_average_duration_ms: this.metrics.visualCallCount > 0
+        ? Math.round(this.metrics.visualTotalDurationMs / this.metrics.visualCallCount)
+        : 0,
+      visual_last_duration_ms: this.metrics.visualLastDurationMs,
       cache_entries: this.cache.size,
     };
   }
@@ -99,6 +113,7 @@ class ProductAestheticReranker {
       });
     }
     const normalizedGroups = normalizeGroups(groups, selectionLimit);
+    let workingGroups = normalizedGroups;
     const candidateCount = normalizedGroups.reduce(
       (total, group) => total + group.candidates.length,
       0,
@@ -109,10 +124,10 @@ class ProductAestheticReranker {
     const finalize = (products) => this.#diversify(
       cacheKey,
       products,
-      normalizedGroups,
+      workingGroups,
       selectionLimit,
     );
-    const fallback = () => finalize(ruleFallback(normalizedGroups, selectionLimit));
+    const fallback = () => finalize(ruleFallback(workingGroups, selectionLimit));
     if (!this.configured) {
       this.metrics.fallbackCount += 1;
       const products = fallback();
@@ -149,12 +164,13 @@ class ProductAestheticReranker {
 
     const startedAt = Date.now();
     try {
+      workingGroups = await this.#assessVisuals(normalizedGroups, context, requestId);
       let selected = validateSelection(
-        await this.#select(normalizedGroups, context),
-        normalizedGroups,
+        await this.#select(workingGroups, context),
+        workingGroups,
         selectionLimit,
       );
-      const incompleteGroups = groupsBelowMinimum(normalizedGroups, selected);
+      const incompleteGroups = groupsBelowMinimum(workingGroups, selected);
       let usedFallback = false;
       if (incompleteGroups.length > 0) {
         const repaired = (await Promise.all(incompleteGroups.map(async (group) => {
@@ -237,6 +253,55 @@ class ProductAestheticReranker {
     }
   }
 
+  async #assessVisuals(groups, context, requestId) {
+    if (!this.visualEvaluationEnabled) return groups;
+    const batch = buildVisualBatch(groups);
+    if (batch.length === 0) return groups;
+    const startedAt = Date.now();
+    this.metrics.visualCallCount += 1;
+    try {
+      const response = await this.client.chat.completions.create(
+        {
+          model: this.model,
+          response_format: {type: "json_object"},
+          enable_thinking: false,
+          temperature: 0,
+          messages: buildVisualQualityMessages(groups, context, batch),
+        },
+        {
+          timeout: this.timeoutMs,
+          maxRetries: 0,
+        },
+      );
+      const assessed = applyVisualAssessments(
+        groups,
+        parseJsonResponse(extractText(response)),
+      );
+      this.logger.info?.("商品图片视觉质量评估完成", {
+        requestId: requestId || undefined,
+        evaluatedCount: batch.length,
+        retainedCount: assessed.reduce(
+          (total, group) => total + group.candidates.length,
+          0,
+        ),
+        visualDurationMs: Date.now() - startedAt,
+      });
+      return assessed;
+    } catch (error) {
+      this.metrics.visualFallbackCount += 1;
+      this.logger.warn?.("商品图片视觉质量评估回退", {
+        requestId: requestId || undefined,
+        evaluatedCount: batch.length,
+        errorCode: safeErrorCode(error),
+      });
+      return groups;
+    } finally {
+      const durationMs = Date.now() - startedAt;
+      this.metrics.visualTotalDurationMs += durationMs;
+      this.metrics.visualLastDurationMs = durationMs;
+    }
+  }
+
   #readCache(key) {
     const entry = this.cache.get(key);
     if (!entry) return null;
@@ -311,7 +376,8 @@ function buildMessages(groups, context) {
       "color_preferences", "colorPreferences", "user_input", "userInput",
     ]),
     outfit_plan: pickFields(context.outfit_plan || context.outfitPlan || {}, [
-      "looks", "top", "bottom", "dress", "shoes", "outerwear", "bag", "accessories", "summary",
+      "styling_strategy", "stylingStrategy", "looks", "top", "bottom", "dress",
+      "shoes", "outerwear", "bag", "accessories", "summary",
     ]),
     product_groups: groups.map((group, index) => ({
       requirement_index: index,
@@ -333,6 +399,11 @@ function buildMessages(groups, context) {
         catalog_aesthetic_score: product.catalog_aesthetic_score,
         aesthetic_score: product.aesthetic_score,
         image_quality_hint: product.image_quality_hint,
+        visual_quality_score: product.visual_quality_score,
+        fashion_taste_score: product.fashion_taste_score,
+        commercial_ad_penalty: product.commercial_ad_penalty,
+        subject_coverage_score: product.subject_coverage_score,
+        commerce_visual_score: product.commerce_visual_score,
         brand_quality_score: product.brand_quality_score,
         brand_tier: product.brand_tier,
         brand_fallback: product.brand_fallback,
@@ -353,6 +424,10 @@ function buildMessages(groups, context) {
         "Never select titles containing manufacturer/wholesale/clearance/viral bargain/street stall/student budget/copy/replica/high replica marketing terms. Only use brand_fallback products when stronger branded candidates are insufficient.",
         "Treat item_budget and outfit_budget as soft preferences for brand choice, price ranking, value assessment, and recommendation reasons; never use them as hard filters.",
         "A slightly over-budget product may be selected when its quality or outfit fit justifies it, but the reason must clearly explain that tradeoff.",
+        "Use styling_strategy plus every Look's styling_goal and proportion_strategy as the source of truth for body-proportion fit.",
+        "Do not equate brand with taste. Brand/shop trust is only supporting evidence; image quality, silhouette, material, Look coherence, and body strategy matter more.",
+        "Never select a candidate with commercial_ad_penalty >= 60.",
+        "Each selected product must also include body_strategy_match_score from 0 to 100.",
         "你是 FitAI 商品审美复选器。只能从候选商品中选择，不得编造或修改 product_id。",
         "综合整套穿搭、用户身材比例、性别、场景、季节、预算、颜色、版型、材质和设计语言判断。",
         "审美分重点判断品牌/店铺可信度、图片呈现、设计感、材质描述和风格匹配；显著降低低价爆款、关键词堆叠标题、廉价感图片和信息不完整商品。",
@@ -368,6 +443,205 @@ function buildMessages(groups, context) {
     },
     {role: "user", content: JSON.stringify(payload)},
   ];
+}
+
+function buildVisualBatch(groups) {
+  const categories = new Map();
+  (Array.isArray(groups) ? groups : []).forEach((group, requirementIndex) => {
+    const category = String(group?.requirement?.category || "other");
+    const bucket = categories.get(category) || [];
+    for (const product of Array.isArray(group?.candidates) ? group.candidates : []) {
+      const productId = String(product?.product_id || "").trim();
+      const imageUrl = String(product?.image_url || "").trim();
+      if (!productId || !/^https:\/\/[^\s]+$/i.test(imageUrl)) continue;
+      if (bucket.some((entry) => entry.product_id === productId)) continue;
+      if (bucket.length >= DEFAULT_VISUAL_CANDIDATES_PER_GROUP) break;
+      bucket.push({
+        requirement_index: requirementIndex,
+        category,
+        product_id: productId,
+        title: safeText(product.title, 120),
+        image_url: imageUrl,
+      });
+    }
+    categories.set(category, bucket);
+  });
+  const buckets = [...categories.values()];
+  const batch = [];
+  for (let offset = 0; batch.length < MAX_VISUAL_IMAGES_PER_REQUEST; offset += 1) {
+    let added = false;
+    for (const bucket of buckets) {
+      if (bucket[offset]) {
+        batch.push(bucket[offset]);
+        added = true;
+        if (batch.length >= MAX_VISUAL_IMAGES_PER_REQUEST) break;
+      }
+    }
+    if (!added) break;
+  }
+  return batch;
+}
+
+function buildVisualQualityMessages(groups, context, batch = buildVisualBatch(groups)) {
+  const stylingStrategy = context?.outfit_plan?.styling_strategy ||
+    context?.outfitPlan?.stylingStrategy ||
+    context?.styling_strategy ||
+    context?.stylingStrategy || {};
+  const content = [{
+    type: "text",
+    text: JSON.stringify({
+      task: "Evaluate ecommerce product image quality for a professional styling service.",
+      styling_strategy: compactObject(stylingStrategy),
+      candidates: batch.map((entry, imageIndex) => ({
+        image_index: imageIndex,
+        requirement_index: entry.requirement_index,
+        category: entry.category,
+        product_id: entry.product_id,
+        title: entry.title,
+      })),
+      output_schema: {
+        image_assessments: [{
+          requirement_index: 0,
+          product_id: "candidate id",
+          visual_quality_score: 0,
+          fashion_taste_score: 0,
+          commercial_ad_penalty: 0,
+          subject_coverage_score: 0,
+          reason: "brief evidence from the image",
+        }],
+      },
+    }),
+  }];
+  batch.forEach((entry, imageIndex) => {
+    content.push({
+      type: "text",
+      text: `image_index=${imageIndex}; product_id=${entry.product_id}; category=${entry.category}`,
+    });
+    content.push({
+      type: "image_url",
+      image_url: {url: entry.image_url, detail: "auto"},
+    });
+  });
+  return [
+    {
+      role: "system",
+      content: [
+        "You are a strict ecommerce image art director for a premium personal styling product.",
+        "Judge the image itself, not only the title or brand.",
+        "High visual_quality_score requires a clear garment/product, clean composition, useful white-background or model presentation, and adequate subject coverage.",
+        "Set commercial_ad_penalty high for large advertising text, red/yellow sale banners, oversized price numbers, messy collage layout, tiny product subjects, or phrases such as 50-year-old store, Beijing Mall, factory direct, livestream deal, buy one get one, flash sale, clearance, bestseller, or lowest price.",
+        "Do not invent product IDs. Return exactly one assessment for every supplied candidate using strict JSON.",
+      ].join("\n"),
+    },
+    {role: "user", content},
+  ];
+}
+
+function applyVisualAssessments(groups, payload) {
+  const values = payload?.image_assessments || payload?.products;
+  if (!Array.isArray(values)) throw new Error("AI_VISUAL_INVALID_RESPONSE");
+  const assessments = new Map();
+  for (const item of values) {
+    const productId = String(item?.product_id || "").trim();
+    const requirementIndex = Number(item?.requirement_index);
+    const visualQuality = score(item?.visual_quality_score);
+    const fashionTaste = score(item?.fashion_taste_score);
+    const adPenalty = score(item?.commercial_ad_penalty);
+    const subjectCoverage = score(item?.subject_coverage_score);
+    if (!productId || visualQuality == null || fashionTaste == null ||
+        adPenalty == null || subjectCoverage == null) continue;
+    const assessment = {
+      visual_quality_score: visualQuality,
+      image_quality_score: visualQuality,
+      fashion_taste_score: fashionTaste,
+      commercial_ad_penalty: adPenalty,
+      subject_coverage_score: subjectCoverage,
+      commerce_visual_score: commerceVisualScore({
+        visualQuality,
+        fashionTaste,
+        adPenalty,
+        subjectCoverage,
+      }),
+      visual_quality_reason: safeText(item.reason, 180),
+    };
+    assessments.set(`id:${productId}`, assessment);
+    if (Number.isInteger(requirementIndex) && requirementIndex >= 0) {
+      assessments.set(`${requirementIndex}:${productId}`, assessment);
+    }
+  }
+  if (assessments.size === 0) throw new Error("AI_VISUAL_NO_VALID_ASSESSMENT");
+  return groups.map((group, requirementIndex) => ({
+    ...group,
+    candidates: group.candidates
+      .map((product) => ({
+        ...product,
+        ...(assessments.get(`${requirementIndex}:${product.product_id}`) ||
+          assessments.get(`id:${product.product_id}`) ||
+          visualAssessmentDefaults(product)),
+      }))
+      .filter((product) => product.commercial_ad_penalty < 60)
+      .sort((left, right) => candidateQualityPrior(right) - candidateQualityPrior(left)),
+  }));
+}
+
+function visualAssessmentDefaults(product) {
+  const existingVisualQuality = score(
+    product?.visual_quality_score ?? product?.image_quality_score,
+  );
+  const existingFashionTaste = score(product?.fashion_taste_score);
+  const existingAdPenalty = score(product?.commercial_ad_penalty);
+  const existingSubjectCoverage = score(product?.subject_coverage_score);
+  if (existingVisualQuality != null && existingFashionTaste != null &&
+      existingAdPenalty != null && existingSubjectCoverage != null) {
+    return {
+      visual_quality_score: existingVisualQuality,
+      image_quality_score: existingVisualQuality,
+      fashion_taste_score: existingFashionTaste,
+      commercial_ad_penalty: existingAdPenalty,
+      subject_coverage_score: existingSubjectCoverage,
+      commerce_visual_score: boundedScore(
+        product?.commerce_visual_score ?? commerceVisualScore({
+          visualQuality: existingVisualQuality,
+          fashionTaste: existingFashionTaste,
+          adPenalty: existingAdPenalty,
+          subjectCoverage: existingSubjectCoverage,
+        }),
+      ),
+      visual_quality_reason: safeText(product?.visual_quality_reason, 180),
+    };
+  }
+  const hint = String(product?.image_quality_hint || "").toLowerCase();
+  const promotion = hint === "promotion_poster";
+  const visualQuality = promotion ? 20
+    : hint === "white_background" ? 86
+      : hint === "model_display" ? 82
+        : hint === "official" ? 78 : 60;
+  const fashionTaste = boundedScore(product?.catalog_aesthetic_score ?? 55);
+  const adPenalty = promotion ? 75 : 20;
+  const subjectCoverage = promotion ? 30 : 65;
+  return {
+    visual_quality_score: visualQuality,
+    image_quality_score: visualQuality,
+    fashion_taste_score: fashionTaste,
+    commercial_ad_penalty: adPenalty,
+    subject_coverage_score: subjectCoverage,
+    commerce_visual_score: commerceVisualScore({
+      visualQuality,
+      fashionTaste,
+      adPenalty,
+      subjectCoverage,
+    }),
+    visual_quality_reason: "",
+  };
+}
+
+function commerceVisualScore({visualQuality, fashionTaste, adPenalty, subjectCoverage}) {
+  return roundScore(boundedScore(
+    boundedScore(visualQuality) * 0.45 +
+    boundedScore(fashionTaste) * 0.25 +
+    boundedScore(subjectCoverage) * 0.3 -
+    boundedScore(adPenalty) * 0.6,
+  ));
 }
 
 function validateSelection(payload, groups, selectionLimit) {
@@ -401,12 +675,19 @@ function validateSelection(payload, groups, selectionLimit) {
     const catalogAesthetic = boundedScore(match.product.catalog_aesthetic_score ?? 50);
     const brandQuality = boundedScore(match.product.brand_quality_score ?? BRAND_SCORE.C);
     const aiAesthetic = score(item.aesthetic_score ?? item.ai_taste_score);
+    const bodyStrategyMatch = score(
+      item.body_strategy_match_score ?? item.fit_score,
+    );
+    const visualQuality = boundedScore(
+      match.product.commerce_visual_score ??
+      match.product.visual_quality_score ??
+      match.product.image_quality_score ?? 60,
+    );
     const values = {
       ai_taste_score: aiAesthetic,
-      aesthetic_score: aiAesthetic == null
-        ? null
-        : roundScore(aiAesthetic * 0.7 + catalogAesthetic * 0.3),
+      aesthetic_score: aiAesthetic,
       fit_score: score(item.fit_score),
+      body_strategy_match_score: bodyStrategyMatch,
       outfit_coherence_score: score(item.outfit_coherence_score),
       value_score: score(item.value_score),
     };
@@ -422,6 +703,8 @@ function validateSelection(payload, groups, selectionLimit) {
     const finalScore = compositeProductScore({
       matchScore,
       aestheticScore: values.aesthetic_score,
+      visualQualityScore: visualQuality,
+      bodyStrategyScore: values.body_strategy_match_score,
       brandQualityScore: brandQuality,
       diversityScore: 100,
     });
@@ -429,6 +712,8 @@ function validateSelection(payload, groups, selectionLimit) {
       ...match.product,
       ...values,
       match_score: matchScore,
+      catalog_aesthetic_score: catalogAesthetic,
+      commerce_visual_score: visualQuality,
       brand_quality_score: brandQuality,
       diversity_score: 100,
       final_score: finalScore,
@@ -500,12 +785,22 @@ function applyDiversityScores(products, groups, {
         const brandQuality = boundedScore(
           product.brand_quality_score ?? BRAND_SCORE.C,
         );
+        const visualQuality = boundedScore(
+          product.commerce_visual_score ??
+          product.visual_quality_score ??
+          product.image_quality_score ?? 60,
+        );
+        const bodyStrategy = boundedScore(
+          product.body_strategy_match_score ?? product.fit_score ?? 60,
+        );
         const exactDuplicate = hasExactDuplicate(product, comparisons);
         const finalScore = roundScore(Math.max(
           0,
           compositeProductScore({
             matchScore: relevance,
             aestheticScore: aesthetic,
+            visualQualityScore: visualQuality,
+            bodyStrategyScore: bodyStrategy,
             brandQualityScore: brandQuality,
             diversityScore: diversity,
           }) - (exactDuplicate ? 35 : 0),
@@ -515,6 +810,8 @@ function applyDiversityScores(products, groups, {
             ...product,
             match_score: relevance,
             aesthetic_score: aesthetic,
+            commerce_visual_score: visualQuality,
+            body_strategy_match_score: bodyStrategy,
             brand_quality_score: brandQuality,
             diversity_score: diversity,
             final_score: finalScore,
@@ -618,15 +915,19 @@ function boundedScore(value) {
 function compositeProductScore({
   matchScore,
   aestheticScore,
+  visualQualityScore = aestheticScore,
+  bodyStrategyScore = matchScore,
   brandQualityScore,
-  diversityScore,
+  diversityScore = 100,
 }) {
-  return roundScore(
+  const baseScore =
     boundedScore(matchScore) * 0.25 +
-    boundedScore(aestheticScore) * 0.4 +
-    boundedScore(brandQualityScore) * 0.25 +
-    boundedScore(diversityScore) * 0.1,
-  );
+    boundedScore(aestheticScore) * 0.3 +
+    boundedScore(visualQualityScore) * 0.2 +
+    boundedScore(bodyStrategyScore) * 0.15 +
+    boundedScore(brandQualityScore) * 0.1;
+  const diversityPenalty = (100 - boundedScore(diversityScore)) * 0.05;
+  return roundScore(Math.max(0, baseScore - diversityPenalty));
 }
 
 function ruleFallback(groups, selectionLimit) {
@@ -638,10 +939,20 @@ function ruleFallback(groups, selectionLimit) {
     const brandQualityScore = boundedScore(
       product.brand_quality_score ?? BRAND_SCORE.C,
     );
+    const visualQualityScore = boundedScore(
+      product.commerce_visual_score ??
+      product.visual_quality_score ??
+      product.image_quality_score ?? 60,
+    );
+    const bodyStrategyScore = boundedScore(
+      product.body_strategy_match_score ?? product.fit_score ?? 60,
+    );
     const diversity = 100;
     const finalScore = compositeProductScore({
       matchScore,
       aestheticScore,
+      visualQualityScore,
+      bodyStrategyScore,
       brandQualityScore,
       diversityScore: diversity,
     });
@@ -649,6 +960,8 @@ function ruleFallback(groups, selectionLimit) {
       ...product,
       match_score: matchScore,
       aesthetic_score: aestheticScore,
+      commerce_visual_score: visualQualityScore,
+      body_strategy_match_score: bodyStrategyScore,
       brand_quality_score: brandQualityScore,
       diversity_score: diversity,
       final_score: finalScore,
@@ -690,11 +1003,14 @@ function normalizeGroups(groups, selectionLimit) {
     const assessedCandidates = Array.isArray(group?.candidates)
       ? group.candidates
         .filter((product) => !productQualityBlock(product, requirement))
-        .map((product) => ({
-          ...product,
-          ...catalogAestheticAssessment(product, requirement),
-          ...brandQualityAssessment(product),
-        }))
+        .map((product) => {
+          const assessed = {
+            ...product,
+            ...catalogAestheticAssessment(product, requirement),
+            ...brandQualityAssessment(product),
+          };
+          return {...assessed, ...visualAssessmentDefaults(assessed)};
+        })
         .filter((product) => !isAestheticJunk(product))
       : [];
     const requiredMinimum = Math.min(4, assessedCandidates.length);
@@ -705,7 +1021,7 @@ function normalizeGroups(groups, selectionLimit) {
       .map((product) => ({...product, brand_fallback: brandFallback}))
       .sort((left, right) => candidateQualityPrior(right) - candidateQualityPrior(left) ||
         String(left.product_id).localeCompare(String(right.product_id)))
-      .slice(0, 20);
+      .slice(0, DEFAULT_VISUAL_CANDIDATES_PER_GROUP);
     return {
       requirement,
       candidates,
@@ -716,8 +1032,9 @@ function normalizeGroups(groups, selectionLimit) {
 
 function candidateQualityPrior(product) {
   return boundedScore(product.relevance_score) * 0.25 +
-    boundedScore(product.aesthetic_score ?? product.catalog_aesthetic_score) * 0.3 +
-    boundedScore(product.brand_quality_score) * 0.3 +
+    boundedScore(product.aesthetic_score ?? product.catalog_aesthetic_score) * 0.25 +
+    boundedScore(product.commerce_visual_score ?? product.visual_quality_score) * 0.25 +
+    boundedScore(product.brand_quality_score) * 0.1 +
     boundedScore(product.budget_preference_score ?? 70) * 0.15;
 }
 
@@ -950,6 +1267,7 @@ function buildCacheKey(groups, context) {
       candidates: group.candidates.map((product) => ({
         product_id: product.product_id,
         title: product.title,
+        image_url: product.image_url,
         price: product.price,
         brand: product.brand,
         brand_quality_score: product.brand_quality_score,
@@ -1034,10 +1352,13 @@ function cloneProducts(products) {
 
 module.exports = {
   ProductAestheticReranker,
+  applyVisualAssessments,
   applyDiversityScores,
   applyLabels,
   brandQualityAssessment,
   buildMessages,
+  buildVisualBatch,
+  buildVisualQualityMessages,
   catalogAestheticAssessment,
   compositeProductScore,
   ruleFallback,

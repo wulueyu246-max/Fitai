@@ -84,6 +84,86 @@ void main() {
     );
   });
 
+  test('preserves Styling Strategy and Look proportion goals for product AI',
+      () {
+    final analysis = OutfitAnalysis.fromJson({
+      'request_id': 'stylist-v2-request',
+      'gender': 'female',
+      'bodyProfile': '160cm，照片显示腿部视觉比例需要优化',
+      'style': '法式约会',
+      'styling_strategy': {
+        'body_strengths': ['肩颈线条清晰'],
+        'proportion_issues': ['腿部视觉比例偏短'],
+        'visual_goals': ['raise_visual_waistline', 'elongate_legs'],
+        'waistline_strategy': '提高视觉腰线',
+        'top_length_strategy': '短款或塞衣角',
+        'bottom_strategy': '高腰并控制裙裤长度',
+        'shoe_strategy': '舒适的浅口杏仁头或低跟鞋',
+        'color_strategy': '下装与鞋保持颜色连续',
+        'silhouette_strategy': '建立轻盈纵向线条',
+        'skin_exposure_strategy': '适度露出脚踝',
+        'accessory_strategy': '配饰保持小体积',
+        'weather_strategy': '夏季使用透气材质',
+      },
+      'recommendations': {
+        'top': '短款针织衫',
+        'bottom': '高腰A字裙',
+        'shoes': '杏仁头低跟鞋',
+        'accessories': '小体积包袋',
+        'summary': '提高腰线并延长腿部视觉线条',
+      },
+      'looks': [
+        for (var index = 1; index <= 3; index += 1)
+          {
+            'request_id': 'stylist-v2-request',
+            'look_id': 'stylist-look-$index',
+            'gender': 'female',
+            'scene': 'date',
+            'style': '法式约会',
+            'style_direction': '比例方向 $index',
+            'styling_goal': '提高视觉腰线',
+            'proportion_strategy': '短上衣、高腰下装与浅口鞋连续',
+            'why_this_changes_the_body_proportion': '提高腰线并增加可见腿长',
+            'items': [
+              {
+                'category': 'top',
+                'gender': 'female',
+                'item_name': '短款针织衫',
+                'search_keywords': ['女士 短款 针织衫'],
+              },
+              {
+                'category': 'bottom',
+                'gender': 'female',
+                'item_name': '高腰A字裙',
+                'search_keywords': ['女士 高腰 A字裙'],
+              },
+              {
+                'category': 'shoes',
+                'gender': 'female',
+                'item_name': '杏仁头低跟鞋',
+                'search_keywords': ['女士 杏仁头 低跟鞋'],
+              },
+            ],
+          },
+      ],
+    });
+
+    expect(
+      analysis.stylingStrategy.visualGoals,
+      ['raise_visual_waistline', 'elongate_legs'],
+    );
+    expect(analysis.looks.first.stylingGoal, '提高视觉腰线');
+    expect(
+      analysis.looks.first.toJson()['proportion_strategy'],
+      '短上衣、高腰下装与浅口鞋连续',
+    );
+    expect(
+      (analysis.toJson()['styling_strategy']
+          as Map<String, dynamic>)['shoe_strategy'],
+      '舒适的浅口杏仁头或低跟鞋',
+    );
+  });
+
   for (final gender in const ['male', 'female']) {
     test('$gender products can only build plans for their own AI Looks', () {
       const service = RecommendationService();

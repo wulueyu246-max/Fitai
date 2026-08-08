@@ -223,6 +223,7 @@ class CatalogProductService implements ProductService {
                 'height': request.height,
                 'weight': request.weight,
                 'body_profile': analysis.bodyAnalysis,
+                'styling_strategy': analysis.stylingStrategy.toJson(),
                 'item_budget': request.itemBudget,
                 'outfit_budget': request.outfitBudget,
               },
@@ -238,6 +239,7 @@ class CatalogProductService implements ProductService {
                 'user_input': request.request,
               },
               'outfit_plan': {
+                'styling_strategy': analysis.stylingStrategy.toJson(),
                 'looks': analysis.looks
                     .map((look) => look.toJson())
                     .toList(growable: false),

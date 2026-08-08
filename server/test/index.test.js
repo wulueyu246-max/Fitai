@@ -445,6 +445,165 @@ test("AI designs three complete male Clean Fit looks before product matching", (
     product.gender === "male" && product.search_keywords.every((keyword) => keyword.startsWith("男士"))));
 });
 
+test("Styling Strategy raises a short visual leg line before designing French Looks", () => {
+  const item = (category, itemName, fit) => ({
+    category,
+    item_name: itemName,
+    color: "cream",
+    fit,
+    material: "structured fabric",
+    style: "French date",
+    season: "summer",
+    scene: "date",
+    search_keywords: [`women cream ${itemName}`, `women French ${itemName}`],
+    negative_keywords: ["menswear"],
+  });
+  const stylingStrategy = {
+    body_strengths: ["defined shoulder line"],
+    proportion_issues: ["visually short leg line"],
+    visual_goals: ["raise_visual_waistline", "elongate_legs"],
+    waistline_strategy: "Use a clear high waist without over-tightening.",
+    top_length_strategy: "Prefer cropped or tucked tops.",
+    bottom_strategy: "Use high-rise A-line or full-length vertical trousers.",
+    shoe_strategy: "Prioritize almond or pointed toes and a comfortable 3cm low heel.",
+    color_strategy: "Continue the lower-body and shoe color where possible.",
+    silhouette_strategy: "Create three distinct vertical and waistline solutions.",
+    skin_exposure_strategy: "Use a measured ankle or neckline opening for lightness.",
+    accessory_strategy: "Keep accessories compact around the raised waistline.",
+    weather_strategy: "Use breathable summer materials.",
+  };
+  const looks = [
+    {
+      look_id: "french-waist-1",
+      styling_goal: "raise the visual waistline",
+      proportion_strategy: "cropped knit plus high-rise A-line skirt and almond-toe low heel",
+      why_this_changes_the_body_proportion: "The shorter top and higher waist increase the visible leg share.",
+      items: [
+        item("top", "cropped knit top", "cropped"),
+        item("bottom", "high-rise A-line skirt", "high-rise A-line"),
+        item("shoes", "almond-toe low heel", "low_heel almond_toe"),
+      ],
+    },
+    {
+      look_id: "french-line-2",
+      styling_goal: "create a long vertical line",
+      proportion_strategy: "tucked blouse plus full-length high-rise trousers and pointed flats",
+      why_this_changes_the_body_proportion: "A continuous trouser line and pointed toe extend the lower-body line.",
+      items: [
+        item("top", "tucked draped blouse", "tucked"),
+        item("bottom", "high-rise wide-leg trousers", "full-length high-rise"),
+        item("shoes", "pointed flat", "flat pointed_toe"),
+      ],
+    },
+    {
+      look_id: "french-dress-3",
+      styling_goal: "use one-color continuity",
+      proportion_strategy: "defined-waist midi dress and low-vamp shoes",
+      why_this_changes_the_body_proportion: "The uninterrupted color column creates a lighter vertical silhouette.",
+      items: [
+        item("dress", "defined-waist midi dress", "defined waist"),
+        item("shoes", "low-vamp Mary Jane", "low_heel low_vamp"),
+      ],
+    },
+  ].map((look, index) => ({
+    ...look,
+    gender: "female",
+    scene: "date",
+    style: "French",
+    style_direction: `French proportion direction ${index + 1}`,
+  }));
+
+  const analysis = parseOutfitAnalysis(JSON.stringify({
+    gender: "female",
+    bodyProfile: "160cm, 49kg, photographed leg line appears slightly short",
+    style: "French date",
+    styling_strategy: stylingStrategy,
+    recommendations: {
+      top: "cropped or tucked refined tops",
+      bottom: "high-rise shaped bottoms",
+      shoes: "leg-line extending but comfortable shoes",
+      accessories: "compact refined accessories",
+      summary: "three proportion-led French Looks",
+    },
+    looks,
+  }), {gender: "female", scene: "date"});
+
+  assert.deepEqual(analysis.styling_strategy.visual_goals, [
+    "raise_visual_waistline",
+    "elongate_legs",
+  ]);
+  assert.match(analysis.styling_strategy.shoe_strategy, /almond|pointed|3cm/);
+  assert.ok(analysis.looks.some((look) =>
+    /high-rise|high waist|raised waist/i.test(look.proportion_strategy) &&
+    look.items.some((product) =>
+      product.category === "shoes" && /pointed|almond|low_heel/i.test(product.fit))));
+  assert.equal(new Set(analysis.looks.map((look) => look.proportion_strategy)).size, 3);
+});
+
+test("balanced Clean Fit and rain strategies do not force impractical height shoes", () => {
+  const makePayload = ({scene, shoeStrategy, weatherStrategy, shoeName, shoeFit}) => ({
+    gender: "male",
+    bodyProfile: "balanced visual proportions",
+    style: "Clean Fit",
+    styling_strategy: {
+      body_strengths: ["balanced shoulder and leg proportion"],
+      proportion_issues: [],
+      visual_goals: ["create_structure"],
+      waistline_strategy: "Keep a natural waistline.",
+      top_length_strategy: "Use a clean regular length.",
+      bottom_strategy: "Use a straight trouser line.",
+      shoe_strategy: shoeStrategy,
+      color_strategy: "Use quiet tonal continuity.",
+      silhouette_strategy: "Keep a clean structured silhouette.",
+      skin_exposure_strategy: "Keep exposure minimal and intentional.",
+      accessory_strategy: "Use one restrained accessory.",
+      weather_strategy: weatherStrategy,
+    },
+    recommendations: {
+      top: "structured knit polo",
+      bottom: "straight trousers",
+      shoes: shoeName,
+      accessories: "minimal watch",
+      summary: "balanced Clean Fit",
+    },
+    looks: [1, 2, 3].map((index) => ({
+      look_id: `clean-weather-${index}`,
+      gender: "male",
+      scene,
+      style: "Clean Fit",
+      style_direction: `Clean direction ${index}`,
+      styling_goal: "preserve balanced proportions",
+      proportion_strategy: "natural waist and straight vertical trouser line",
+      why_this_changes_the_body_proportion: "Structure is added without artificial height devices.",
+      items: [
+        {category: "top", item_name: "knit polo", fit: "regular", search_keywords: ["men knit polo"], negative_keywords: ["women"]},
+        {category: "bottom", item_name: "straight trousers", fit: "straight", search_keywords: ["men straight trousers"], negative_keywords: ["women"]},
+        {category: "shoes", item_name: shoeName, fit: shoeFit, search_keywords: [`men ${shoeName}`], negative_keywords: ["women"]},
+      ],
+    })),
+  });
+  const clean = parseOutfitAnalysis(JSON.stringify(makePayload({
+    scene: "daily",
+    shoeStrategy: "Use flat loafers or light sneakers for comfort.",
+    weatherStrategy: "Dry mild weather.",
+    shoeName: "minimal loafer",
+    shoeFit: "flat loafer",
+  })), {gender: "male", scene: "daily"});
+  const rainy = parseOutfitAnalysis(JSON.stringify(makePayload({
+    scene: "rainy commute",
+    shoeStrategy: "Use water-resistant rubber-soled loafers or sneakers.",
+    weatherStrategy: "Avoid suede, open toes, and slippery soles in rain.",
+    shoeName: "water-resistant rubber-soled loafer",
+    shoeFit: "flat weatherproof loafer",
+  })), {gender: "male", scene: "rainy commute"});
+
+  assert.doesNotMatch(clean.styling_strategy.shoe_strategy, /heel|platform/i);
+  assert.match(rainy.styling_strategy.weather_strategy, /rain|suede|slippery/i);
+  assert.ok(rainy.products
+    .filter((item) => item.category === "shoes")
+    .every((item) => !/open.toe|suede|heel/i.test(`${item.item_name} ${item.fit}`)));
+});
+
 test("upgrade mode rejects repeating a female user's white tee and black shorts", () => {
   const repeatedLook = (index) => ({
     look_id: `female-date-${index}`,
