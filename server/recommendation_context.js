@@ -4,6 +4,11 @@ const {
   normalizeStyleSemantics,
   resolveExpressionFromStyleProfile,
 } = require("./style_interpreter");
+const {
+  LOOK_INTENT_WEIGHTS,
+  PRODUCT_INTENT_WEIGHTS,
+  resolveIntentPriorityScore,
+} = require("./intent_priority");
 
 const STYLE_EXPRESSIONS = new Set(["feminine", "neutral", "masculine", "auto"]);
 
@@ -42,6 +47,11 @@ function createRecommendationContext({
     }),
     style_semantics: normalizeStyleSemantics(styleSemantics),
     style_profile: normalizedStyleProfile,
+    intent_priority_score: resolveIntentPriorityScore(normalizedStyleProfile),
+    intent_weights: Object.freeze({
+      look: LOOK_INTENT_WEIGHTS,
+      product: PRODUCT_INTENT_WEIGHTS,
+    }),
     body_profile: Object.freeze({...bodyProfile}),
     weather: Object.freeze({...weather}),
     budget: Object.freeze({...budget}),
@@ -70,6 +80,10 @@ function logRecommendationStage(logger, stage, context, details = {}) {
     style_semantics_configured: Boolean(
       context?.style_semantics?.interpretation_summary,
     ),
+    requested_style: context?.style_profile?.source_text || undefined,
+    intent_priority_score: context?.intent_priority_score,
+    style_weight: context?.intent_weights?.product?.style,
+    weather_weight: context?.intent_weights?.product?.weather,
     ...details,
   });
 }

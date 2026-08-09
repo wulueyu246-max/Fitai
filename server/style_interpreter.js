@@ -76,9 +76,14 @@ function normalizeStyleProfile(value, {sourceText = ""} = {}) {
   const normalizedSourceText = cleanText(
     source.source_text || source.sourceText || sourceText,
   );
+  const explicitIntentPriority = clampScore(
+    source.intent_priority_score ?? source.intentPriorityScore,
+  );
 
   return Object.freeze({
     source_text: normalizedSourceText,
+    intent_priority_score: explicitIntentPriority ??
+      (normalizedSourceText ? 90 : 60),
     interpretation: cleanText(source.interpretation),
     primary_style: cleanText(source.primary_style || source.primaryStyle),
     secondary_styles: Object.freeze(cleanList(
@@ -97,11 +102,21 @@ function normalizeStyleProfile(value, {sourceText = ""} = {}) {
     preferred_materials: Object.freeze(cleanList(
       source.preferred_materials || source.preferredMaterials,
     )),
-    positive_keywords: Object.freeze(cleanList(
+    must_have: Object.freeze(cleanList(
+      source.must_have || source.mustHave ||
       source.positive_keywords || source.positiveKeywords,
     )),
-    negative_keywords: Object.freeze(cleanList(
+    must_avoid: Object.freeze(cleanList(
+      source.must_avoid || source.mustAvoid ||
       source.negative_keywords || source.negativeKeywords,
+    )),
+    positive_keywords: Object.freeze(cleanList(
+      source.positive_keywords || source.positiveKeywords ||
+      source.must_have || source.mustHave,
+    )),
+    negative_keywords: Object.freeze(cleanList(
+      source.negative_keywords || source.negativeKeywords ||
+      source.must_avoid || source.mustAvoid,
     )),
   });
 }
@@ -151,6 +166,10 @@ function styleInterpretationIssues({styleSemantics, styleProfile, sourceText = "
   if (!profile.silhouette || profile.preferred_items.length === 0 ||
       profile.positive_keywords.length === 0 || profile.negative_keywords.length === 0) {
     issues.push("INCOMPLETE_STYLE_PROFILE");
+  }
+  if (!Number.isFinite(profile.intent_priority_score) ||
+      profile.intent_priority_score < 0 || profile.intent_priority_score > 100) {
+    issues.push("INVALID_INTENT_PRIORITY");
   }
   const express = normalizedSemanticTokens(semantics.must_express);
   const avoid = normalizedSemanticTokens(semantics.must_avoid);
@@ -202,6 +221,11 @@ function resolveExpressionFromStyleProfile(profile) {
 
 function buildStyleInterpreterPrompt() {
   return `
+User Intent Priority System（必须执行）：
+style_profile 必须包含 intent_priority_score（0-100）。只要用户明确提出本次穿搭风格或审美愿景，该值必须不低于 85，并作为后续阶段不可覆盖的统一优先级。
+style_profile 必须同时输出 must_have[] 和 must_avoid[]，内容来自本次语义解释，必须是可用于商品标题与属性核对的具体约束；不得查询或新增任何人工风格词映射。
+Look 决策固定使用：用户风格意图 60%、身材 20%、场景 15%、天气 5%。天气只能改变面料、防水、透气和鞋底等功能属性，不能改变用户风格。
+后续 Look 修复、商品关键词、候选过滤和最终排序只能消费同一个 style_profile，不得重新解释原始风格文字。
 Style Semantic Reasoner（必须先执行）：
 把用户的任意风格词、复合表达或完整自然语言愿景进行语义推理。不得查询、匹配或依赖任何人工风格词典、白名单、关键词映射或预设风格分支；未知、虚构和未来出现的表达都是正常输入，不得回退为普通休闲风。
 先输出 style_semantics：identity_impression[]、emotional_tone[]、visual_personality[]、social_signal[]、must_express[]、must_avoid[]、style_atoms[]、confidence（0-1）和 interpretation_summary。

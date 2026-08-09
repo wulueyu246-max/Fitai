@@ -60,6 +60,16 @@ const {
   normalizeStyleProfile,
   normalizeStyleSemantics,
 } = require("./style_interpreter");
+const {
+  LOOK_INTENT_WEIGHTS,
+  MIN_LOOK_STYLE_SCORE,
+  hasStyleViolation,
+  intentDebugSummary,
+  lookIntentScore,
+  resolveIntentPriorityScore,
+  styleIntentTokens,
+  styleMatchScore,
+} = require("./intent_priority");
 
 require("dotenv").config({
   path: path.join(__dirname, ".env"),
@@ -1322,6 +1332,8 @@ function parseOutfitAnalysis(content, context = {}) {
       stylingStrategy,
       usedStyleDirections,
       normalizeItem,
+      styleProfile,
+      styleSemantics,
     })
     : null;
   const looks = lookRepairResult
@@ -1458,6 +1470,104 @@ function buildRepairedCoreItem(category, look, itemIndex, normalizeItem) {
   }, itemIndex, look);
 }
 
+function repairLookStyleIntent(
+  items,
+  look,
+  normalizeItem,
+  styleProfile = {},
+  styleSemantics = {},
+) {
+  const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
+  const tokens = styleIntentTokens(styleProfile, styleSemantics);
+  const canonicalStyle = readOptionalString(styleProfile.primary_style) ||
+    readOptionalString(look.style);
+  const canonicalKeywords = [
+    canonicalStyle,
+    ...tokens.positive.slice(0, 3),
+  ].filter(Boolean);
+  const retained = [];
+  let repaired = false;
+
+  if (tokens.positive.length === 0 && tokens.negative.length === 0) {
+    return {
+      items: items.map((item) => ({...item, style_match_score: 65})),
+      repaired: false,
+      finalStyleScore: 65,
+    };
+  }
+
+  for (const item of items) {
+    const evidence = [
+      item.item_name,
+      item.style,
+      item.color,
+      item.fit,
+      item.material,
+      ...(item.search_keywords || []),
+    ].filter(Boolean).join(" ");
+    if (intentPriorityScore > 80 &&
+        hasStyleViolation(evidence, styleProfile, styleSemantics)) {
+      repaired = true;
+      continue;
+    }
+    const initialScore = styleMatchScore({
+      evidence,
+      relevanceScore: 65,
+      styleProfile,
+      styleSemantics,
+    });
+    if (intentPriorityScore <= 80 || initialScore >= MIN_LOOK_STYLE_SCORE) {
+      retained.push({...item, style_match_score: initialScore});
+      continue;
+    }
+
+    const audience = look.gender === "male"
+      ? "男士"
+      : look.gender === "female" ? "女士" : "中性";
+    const anchored = normalizeItem({
+      ...item,
+      style: canonicalStyle || item.style,
+      search_keywords: [
+        [audience, canonicalStyle, item.color, item.item_name]
+          .filter(Boolean).join(" "),
+        [audience, canonicalKeywords[1], item.item_name]
+          .filter(Boolean).join(" "),
+        ...(item.search_keywords || []),
+      ].filter(Boolean).slice(0, 3),
+      negative_keywords: [
+        ...(item.negative_keywords || []),
+        ...(styleProfile.negative_keywords || []),
+        ...(styleProfile.must_avoid || []),
+        ...(styleSemantics.must_avoid || []),
+      ],
+    }, retained.length, look);
+    const anchoredEvidence = [
+      anchored.item_name,
+      anchored.style,
+      anchored.color,
+      anchored.fit,
+      anchored.material,
+      ...(anchored.search_keywords || []),
+    ].filter(Boolean).join(" ");
+    retained.push({
+      ...anchored,
+      style_match_score: styleMatchScore({
+        evidence: anchoredEvidence,
+        relevanceScore: 65,
+        styleProfile,
+        styleSemantics,
+      }),
+    });
+    repaired = true;
+  }
+
+  const finalStyleScore = retained.length > 0
+    ? retained.reduce((sum, item) => sum + item.style_match_score, 0) /
+      retained.length
+    : 0;
+  return {items: retained, repaired, finalStyleScore};
+}
+
 function repairCoreLookItems(items, look, normalizeItem) {
   const categories = new Set(items.map((item) => item.category));
   const completeWithShoes = isValidLookComposition(categories, look.gender) &&
@@ -1530,6 +1640,8 @@ function repairAndValidateAiLooks({
   stylingStrategy,
   usedStyleDirections,
   normalizeItem,
+  styleProfile,
+  styleSemantics,
 }) {
   const looks = [];
   let validLooks = 0;
@@ -1617,10 +1729,35 @@ function repairAndValidateAiLooks({
           repaired = true;
         }
       }
-      const coreRepair = repairCoreLookItems(decisionItems, look, normalizeItem);
-      if (!coreRepair) throw new Error("缺少可修复的核心穿搭单品");
-      repaired ||= coreRepair.repaired;
-      looks.push({...look, accessories_decision: decisions, items: coreRepair.items});
+      const initialCoreRepair = repairCoreLookItems(decisionItems, look, normalizeItem);
+      if (!initialCoreRepair) throw new Error("缺少可修复的核心穿搭单品");
+      const styleRepair = repairLookStyleIntent(
+        initialCoreRepair.items,
+        look,
+        normalizeItem,
+        styleProfile,
+        styleSemantics,
+      );
+      const finalCoreRepair = repairCoreLookItems(
+        styleRepair.items,
+        look,
+        normalizeItem,
+      );
+      if (!finalCoreRepair) throw new Error("缺少可修复的核心穿搭单品");
+      repaired ||= initialCoreRepair.repaired || styleRepair.repaired ||
+        finalCoreRepair.repaired;
+      looks.push({
+        ...look,
+        accessories_decision: decisions,
+        items: finalCoreRepair.items,
+        style_match_score: styleRepair.finalStyleScore,
+        intent_score: lookIntentScore({
+          styleMatch: styleRepair.finalStyleScore,
+          bodyMatch: stylingStrategy.visual_goals.length > 0 ? 85 : 65,
+          sceneMatch: look.scene ? 85 : 65,
+          weatherMatch: 70,
+        }),
+      });
       if (repaired) repairedLooks += 1;
       else validLooks += 1;
     } catch {
@@ -3257,6 +3394,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
   },
   "style_profile": {
     "source_text": "",
+    "intent_priority_score": 90,
     "interpretation": "",
     "primary_style": "",
     "secondary_styles": [],
@@ -3278,6 +3416,8 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
     "preferred_items": [],
     "preferred_colors": [],
     "preferred_materials": [],
+    "must_have": [],
+    "must_avoid": [],
     "positive_keywords": [],
     "negative_keywords": []
   },
@@ -3428,6 +3568,21 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       styleInterpretationCache.set(styleCacheContext, validatedStyleInterpretation);
     }
     const parseDurationMs = Date.now() - parseStartedAt;
+
+    const lookStyleScores = analysis.looks
+      .map((look) => Number(look.style_match_score))
+      .filter(Number.isFinite);
+    console.info("user_intent_priority", {
+      ...intentDebugSummary({
+        styleProfile: analysis.style_profile,
+        finalStyleScore: lookStyleScores.length > 0
+          ? lookStyleScores.reduce((sum, score) => sum + score, 0) /
+            lookStyleScores.length
+          : 0,
+      }),
+      style_weight: LOOK_INTENT_WEIGHTS.style,
+      weather_weight: LOOK_INTENT_WEIGHTS.weather,
+    });
 
     console.info("AI 穿搭响应字段校验通过", {
       requestId: res.locals.requestId,

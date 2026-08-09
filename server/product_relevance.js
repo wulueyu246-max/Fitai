@@ -1,3 +1,5 @@
+const {resolveIntentPriorityScore} = require("./intent_priority");
+
 const SUPPORTED_PRODUCT_CATEGORIES = Object.freeze([
   "top",
   "bottom",
@@ -272,6 +274,12 @@ function normalizeProductRequirement(input = {}, context = {}) {
     category,
     search_subcategory: searchSubcategory,
     gender,
+    intent_priority_score: resolveIntentPriorityScore(
+      input.style_profile || input.styleProfile ||
+      context.style_profile || context.styleProfile ||
+      context.recommendation_context?.style_profile || {},
+      input.style || context.style,
+    ),
     item_name: itemName,
     color: optionalText(input.color || context.color, "color"),
     material: optionalText(input.material || context.material, "material"),

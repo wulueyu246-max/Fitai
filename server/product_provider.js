@@ -16,6 +16,13 @@ const {
   rankProducts,
   sortProductsByCategoryPriority,
 } = require("./product_relevance");
+const {
+  evaluateStyleGate,
+  intentDebugSummary,
+  resolveIntentPriorityScore,
+  shouldRejectForStyle,
+  styleMatchScore,
+} = require("./intent_priority");
 
 const PRODUCT_CATEGORIES = SUPPORTED_PRODUCT_CATEGORIES;
 const DEFAULT_SAMPLE_MATERIAL_ID = "28029";
@@ -351,6 +358,26 @@ class TaobaoProductProvider extends ProductProvider {
       } else if (baseProducts.length > 0) {
         products = markRerankFallback(baseProducts);
       }
+      const finalStyleProfile = context.style_profile || context.styleProfile ||
+        context.recommendation_context?.style_profile || {};
+      const finalIntentPriority = resolveIntentPriorityScore(finalStyleProfile);
+      products = products.filter((product) => {
+        const gate = evaluateStyleGate(
+          product,
+          finalStyleProfile,
+          finalIntentPriority,
+        );
+        if (!gate.allowed) {
+          this.logger.info?.("Style Gate rejected final product", {
+            title: product.title,
+            category: product.category,
+            style_conflict: true,
+            matched_negative_keywords: gate.matched_negative_keywords,
+            intent_priority_score: gate.intent_priority_score,
+          });
+        }
+        return gate.allowed;
+      });
       const productAiMs = Date.now() - productAiStartedAt;
       this.logger.info?.("AI最终选择", {
         requestId: context.requestId || undefined,
@@ -456,14 +483,60 @@ class TaobaoProductProvider extends ProductProvider {
       products = uniqueProducts(fallbackBatches.flat())
         .sort((left, right) => right.relevance_score - left.relevance_score);
     }
-    const budgetAssessed = products
-      .map((product) => ({
-        ...product,
-        ...budgetPreferenceAssessment(product, filters.budget),
+    const styleProfile = filters.style_profile || filters.styleProfile ||
+      filters.recommendation_context?.style_profile || {};
+    const styleSemantics = filters.style_semantics || filters.styleSemantics ||
+      filters.recommendation_context?.style_semantics || {};
+    const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
+    const styleGatedProducts = products.filter((product) => {
+      const gate = evaluateStyleGate(product, styleProfile, intentPriorityScore);
+      if (!gate.allowed) {
+        this.logger.info?.("Style Gate rejected candidate", {
+          title: product.title,
+          category: requirement.category,
+          style_conflict: true,
+          matched_negative_keywords: gate.matched_negative_keywords,
+          intent_priority_score: gate.intent_priority_score,
+        });
+      }
+      return gate.allowed;
+    });
+    const budgetAssessed = styleGatedProducts
+      .map((product) => {
+        const productStyleMatch = styleMatchScore({
+          evidence: [
+            product.title,
+            product.brand,
+            product.shop_name,
+            product.material,
+            product.style,
+            product.color,
+          ].filter(Boolean).join(" "),
+          relevanceScore: product.relevance_score,
+          styleProfile,
+          styleSemantics,
+        });
+        return {
+          ...product,
+          ...budgetPreferenceAssessment(product, filters.budget),
+          style_match_score: productStyleMatch,
+        };
+      })
+      .filter((product) => !shouldRejectForStyle({
+        intentPriorityScore,
+        styleMatch: product.style_match_score,
       }))
       .sort((left, right) =>
+        right.style_match_score - left.style_match_score ||
         right.budget_preference_score - left.budget_preference_score ||
         right.relevance_score - left.relevance_score);
+    this.logger.info?.("user_intent_priority", intentDebugSummary({
+      styleProfile,
+      finalStyleScore: budgetAssessed.length > 0
+        ? budgetAssessed.reduce((sum, product) =>
+          sum + product.style_match_score, 0) / budgetAssessed.length
+        : 0,
+    }));
     this.logger.info?.("淘宝返回候选", {
       requestId: filters.requestId || undefined,
       look_id: requirement.look_id || undefined,

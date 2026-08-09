@@ -24,6 +24,7 @@ void main() {
       },
       'style_profile': {
         'source_text': 'Clean Fit 御姐',
+        'intent_priority_score': 93,
         'interpretation': '极简干净与成熟利落女性感的融合',
         'primary_style': 'Clean Fit',
         'secondary_styles': ['御姐'],
@@ -33,12 +34,17 @@ void main() {
         'preferred_items': ['短款针织', '高腰阔腿裤'],
         'preferred_colors': ['黑色', '奶油白'],
         'preferred_materials': ['精纺针织'],
+        'must_have': ['利落', '克制'],
+        'must_avoid': ['繁复印花'],
         'positive_keywords': ['利落', '克制'],
         'negative_keywords': ['繁复印花'],
       },
     });
 
     expect(analysis.styleProfile.sourceText, 'Clean Fit 御姐');
+    expect(analysis.styleProfile.intentPriorityScore, 93);
+    expect(analysis.styleProfile.mustHave, ['利落', '克制']);
+    expect(analysis.styleProfile.mustAvoid, ['繁复印花']);
     expect(analysis.styleProfile.secondaryStyles, ['御姐']);
     expect(analysis.styleProfile.dimensions['minimalism'], 88);
     expect(analysis.styleSemantics.mustAvoid, ['夸张印花']);
@@ -46,6 +52,10 @@ void main() {
     expect(
       analysis.toJson()['style_profile']['primary_style'],
       'Clean Fit',
+    );
+    expect(
+      analysis.toJson()['style_profile']['intent_priority_score'],
+      93,
     );
     expect(
       analysis.toJson()['style_semantics']['interpretation_summary'],

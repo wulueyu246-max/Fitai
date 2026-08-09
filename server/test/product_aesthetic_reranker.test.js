@@ -68,7 +68,7 @@ test("validates candidate IDs and applies the weighted final score", () => {
   }, groups, 6);
 
   assert.deepEqual(products.map((item) => item.product_id), ["top-1", "shoe-1"]);
-  assert.equal(products[0].final_score, 79.9);
+  assert.equal(products[0].final_score, 70);
   assert.equal(products[0].aesthetic_score, 94);
   assert.equal(products[0].brand_quality_score, 45);
   assert.equal(products[0].diversity_score, 100);

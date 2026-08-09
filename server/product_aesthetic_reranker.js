@@ -4,6 +4,15 @@ const {
   productQualityBlock,
   semanticCategoryMatch,
 } = require("./product_relevance");
+const {
+  PRODUCT_INTENT_WEIGHTS,
+  evaluateStyleGate,
+  intentDebugSummary,
+  productIntentScore,
+  resolveIntentPriorityScore,
+  shouldRejectForStyle,
+  styleMatchScore,
+} = require("./intent_priority");
 
 const DEFAULT_SELECTION_LIMIT = 6;
 const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000;
@@ -108,6 +117,22 @@ class ProductAestheticReranker {
   }
 
   async rerank({groups, context = {}, requestId = "", selectionLimit = DEFAULT_SELECTION_LIMIT}) {
+    const gateProfile = contextStyleProfile(context);
+    const gatePriority = resolveIntentPriorityScore(gateProfile);
+    for (const group of Array.isArray(groups) ? groups : []) {
+      for (const product of Array.isArray(group?.candidates) ? group.candidates : []) {
+        const gate = evaluateStyleGate(product, gateProfile, gatePriority);
+        if (!gate.allowed) {
+          this.logger.info?.("Style Gate rejected candidate", {
+            title: product.title,
+            category: group?.requirement?.category || product.category,
+            style_conflict: true,
+            matched_negative_keywords: gate.matched_negative_keywords,
+            intent_priority_score: gate.intent_priority_score,
+          });
+        }
+      }
+    }
     const qualityBlocks = collectQualityBlocks(groups);
     if (qualityBlocks.length > 0) {
       this.logger.warn?.("商品质量过滤", {
@@ -123,7 +148,7 @@ class ProductAestheticReranker {
       0,
     );
     const normalizedGroups = limitCandidatesPerLook(
-      normalizeGroups(groups, selectionLimit),
+      normalizeGroups(groups, selectionLimit, context),
     );
     let workingGroups = normalizedGroups;
     const candidateCount = normalizedGroups.reduce(
@@ -138,8 +163,13 @@ class ProductAestheticReranker {
       products,
       workingGroups,
       selectionLimit,
+      context,
     );
-    const fallback = () => finalize(ruleFallback(workingGroups, selectionLimit));
+    const fallback = () => finalize(ruleFallback(
+      workingGroups,
+      selectionLimit,
+      context,
+    ));
     if (!this.configured) {
       this.metrics.fallbackCount += 1;
       const products = fallback();
@@ -187,6 +217,7 @@ class ProductAestheticReranker {
         await this.#select(workingGroups, context, remainingBudgetMs(deadlineAt)),
         workingGroups,
         selectionLimit,
+        context,
       );
       const incompleteGroups = groupsBelowMinimum(workingGroups, selected);
       let usedFallback = false;
@@ -194,7 +225,7 @@ class ProductAestheticReranker {
         usedFallback = true;
         selected = replaceGroupProducts(
           selected,
-          ruleFallback(incompleteGroups, selectionLimit),
+          ruleFallback(incompleteGroups, selectionLimit, context),
           incompleteGroups,
         );
       }
@@ -331,16 +362,26 @@ class ProductAestheticReranker {
     }
   }
 
-  #diversify(key, products, groups, selectionLimit) {
+  #diversify(key, products, groups, selectionLimit, context) {
     const recent = this.selectionHistory.get(key) || [];
     const result = applyDiversityScores(products, groups, {
       selectionLimit,
       recentSelections: recent.flat(),
+      context,
     });
     this.selectionHistory.set(key, [
       result.primarySelections,
       ...recent,
     ].slice(0, 2));
+    const styleProfile = contextStyleProfile(context);
+    const averageStyleScore = result.products.length > 0
+      ? result.products.reduce((sum, product) =>
+        sum + boundedScore(product.style_match_score), 0) / result.products.length
+      : 0;
+    this.logger.info?.("user_intent_priority", intentDebugSummary({
+      styleProfile,
+      finalStyleScore: averageStyleScore,
+    }));
     return result.products;
   }
 
@@ -364,7 +405,10 @@ class ProductAestheticReranker {
 }
 
 function buildMessages(groups, context) {
+  const styleProfile = contextStyleProfile(context);
   const payload = {
+    intent_priority_score: resolveIntentPriorityScore(styleProfile),
+    product_intent_weights: PRODUCT_INTENT_WEIGHTS,
     user_profile: compactProfile(context.user_profile || context.userProfile || {
       gender: context.gender,
       body_profile: context.bodyType,
@@ -417,6 +461,7 @@ function buildMessages(groups, context) {
         brand_quality_score: product.brand_quality_score,
         brand_tier: product.brand_tier,
         brand_fallback: product.brand_fallback,
+        style_match_score: product.style_match_score,
         budget_preference_score: product.budget_preference_score,
         budget_note: product.budget_note,
         aesthetic_quality_flags: product.aesthetic_quality_flags,
@@ -437,6 +482,9 @@ function buildMessages(groups, context) {
         "A slightly over-budget product may be selected when its quality or outfit fit justifies it, but the reason must clearly explain that tradeoff.",
         "Use styling_strategy plus every Look's styling_goal and proportion_strategy as the source of truth for body-proportion fit.",
         "Use style_semantics and style_profile as the sole source of truth for style_match. Do not reinterpret raw user wording.",
+        "The supplied intent_priority_score and product_intent_weights are immutable. Rank style_match at 60%, body_match at 15%, quality at 10%, brand at 10%, and weather at 5%.",
+        "Weather is a weak functional constraint only. It may affect waterproofing, breathability, sole, or material, but must never replace the requested style.",
+        "Every selected product must include style_match_score and weather_match_score from 0 to 100. If intent_priority_score is above 80, never select a product with style_match_score below 50.",
         "A strong conflict with must_express, must_avoid, silhouette, preferred materials, or continuous style dimensions is disqualifying; brand or image quality cannot override it.",
         "Do not equate brand with taste. Brand/shop trust is only supporting evidence; image quality, silhouette, material, Look coherence, and body strategy matter more.",
         "Never select a candidate with commercial_ad_penalty >= 60.",
@@ -657,11 +705,41 @@ function commerceVisualScore({visualQuality, fashionTaste, adPenalty, subjectCov
   ));
 }
 
-function validateSelection(payload, groups, selectionLimit) {
+function contextStyleProfile(context = {}) {
+  return context.style_profile || context.styleProfile ||
+    context.user_requirements?.style_profile ||
+    context.userRequirements?.styleProfile ||
+    context.outfit_plan?.style_profile ||
+    context.outfitPlan?.styleProfile || {};
+}
+
+function contextStyleSemantics(context = {}) {
+  return context.style_semantics || context.styleSemantics ||
+    context.user_requirements?.style_semantics ||
+    context.userRequirements?.styleSemantics ||
+    context.outfit_plan?.style_semantics ||
+    context.outfitPlan?.styleSemantics || {};
+}
+
+function productStyleEvidence(product = {}, requirement = {}) {
+  return [
+    product.title,
+    product.brand,
+    product.shop_name,
+    product.material,
+    product.style,
+    product.color,
+  ].filter(Boolean).join(" ");
+}
+
+function validateSelection(payload, groups, selectionLimit, context = {}) {
   if (!payload || !Array.isArray(payload.selected_products)) {
     throw new Error("AI_RERANK_INVALID_RESPONSE");
   }
-  const safeGroups = normalizeGroups(groups, selectionLimit);
+  const safeGroups = normalizeGroups(groups, selectionLimit, context);
+  const styleProfile = contextStyleProfile(context);
+  const styleSemantics = contextStyleSemantics(context);
+  const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
   const candidates = new Map();
   const productGroups = new Map();
   safeGroups.forEach((group, groupIndex) => {
@@ -685,6 +763,11 @@ function validateSelection(payload, groups, selectionLimit) {
     const match = candidates.get(`${groupIndex}:${id}`);
     const selectionKey = `${groupIndex}:${id}`;
     if (!match || seen.has(selectionKey)) continue;
+    if (!evaluateStyleGate(
+      match.product,
+      styleProfile,
+      intentPriorityScore,
+    ).allowed) continue;
     const catalogAesthetic = boundedScore(match.product.catalog_aesthetic_score ?? 50);
     const brandQuality = boundedScore(match.product.brand_quality_score ?? BRAND_SCORE.C);
     const aiAesthetic = score(item.aesthetic_score ?? item.ai_taste_score);
@@ -709,22 +792,38 @@ function validateSelection(payload, groups, selectionLimit) {
     if (groupProducts.length >= selectionLimit) continue;
     seen.add(selectionKey);
     const matchScore = budgetAdjustedMatchScore(match.product);
+    const localStyleMatch = styleMatchScore({
+      evidence: productStyleEvidence(match.product, safeGroups[match.groupIndex]?.requirement),
+      relevanceScore: matchScore,
+      styleProfile,
+      styleSemantics,
+    });
+    const selectedStyleMatch = score(item.style_match_score) ?? localStyleMatch;
+    if (shouldRejectForStyle({
+      intentPriorityScore,
+      styleMatch: selectedStyleMatch,
+    })) continue;
+    const weatherMatch = score(item.weather_match_score) ?? 70;
     const recommendationReason = appendBudgetNote(
       userFacingChineseText(item.reason, "该商品与当前穿搭方案和身体比例策略相匹配", 240),
       match.product.budget_note,
     );
     const finalScore = compositeProductScore({
       matchScore,
+      styleMatchScore: selectedStyleMatch,
       aestheticScore: values.aesthetic_score,
       visualQualityScore: visualQuality,
       bodyStrategyScore: values.body_strategy_match_score,
       brandQualityScore: brandQuality,
+      weatherMatchScore: weatherMatch,
       diversityScore: 100,
     });
     groupProducts.push({
       ...match.product,
       ...values,
       match_score: matchScore,
+      style_match_score: selectedStyleMatch,
+      weather_match_score: weatherMatch,
       catalog_aesthetic_score: catalogAesthetic,
       commerce_visual_score: visualQuality,
       brand_quality_score: brandQuality,
@@ -765,8 +864,9 @@ function productGroupKey(product) {
 function applyDiversityScores(products, groups, {
   selectionLimit = DEFAULT_SELECTION_LIMIT,
   recentSelections = [],
+  context = {},
 } = {}) {
-  const safeGroups = normalizeGroups(groups, selectionLimit);
+  const safeGroups = normalizeGroups(groups, selectionLimit, context);
   const available = new Map((Array.isArray(products) ? products : [])
     .map((product) => [productGroupKey(product), product]));
   const previousLookPrimaries = [];
@@ -806,15 +906,19 @@ function applyDiversityScores(products, groups, {
         const bodyStrategy = boundedScore(
           product.body_strategy_match_score ?? product.fit_score ?? 60,
         );
+        const styleMatch = boundedScore(product.style_match_score ?? relevance);
+        const weatherMatch = boundedScore(product.weather_match_score ?? 70);
         const exactDuplicate = hasExactDuplicate(product, comparisons);
         const finalScore = roundScore(Math.max(
           0,
           compositeProductScore({
             matchScore: relevance,
+            styleMatchScore: styleMatch,
             aestheticScore: aesthetic,
             visualQualityScore: visualQuality,
             bodyStrategyScore: bodyStrategy,
             brandQualityScore: brandQuality,
+            weatherMatchScore: weatherMatch,
             diversityScore: diversity,
           }) - (exactDuplicate ? 35 : 0),
         ));
@@ -822,6 +926,8 @@ function applyDiversityScores(products, groups, {
           product: {
             ...product,
             match_score: relevance,
+            style_match_score: styleMatch,
+            weather_match_score: weatherMatch,
             aesthetic_score: aesthetic,
             commerce_visual_score: visualQuality,
             body_strategy_match_score: bodyStrategy,
@@ -927,23 +1033,30 @@ function boundedScore(value) {
 
 function compositeProductScore({
   matchScore,
+  styleMatchScore = matchScore,
   aestheticScore,
   visualQualityScore = aestheticScore,
   bodyStrategyScore = matchScore,
   brandQualityScore,
+  weatherMatchScore = 70,
   diversityScore = 100,
 }) {
-  const baseScore =
-    boundedScore(matchScore) * 0.25 +
-    boundedScore(aestheticScore) * 0.3 +
-    boundedScore(visualQualityScore) * 0.2 +
-    boundedScore(bodyStrategyScore) * 0.15 +
-    boundedScore(brandQualityScore) * 0.1;
-  const diversityPenalty = (100 - boundedScore(diversityScore)) * 0.05;
-  return roundScore(Math.max(0, baseScore - diversityPenalty));
+  const qualityScore = boundedScore(aestheticScore) * 0.6 +
+    boundedScore(visualQualityScore) * 0.4;
+  return productIntentScore({
+    styleMatch: styleMatchScore,
+    bodyMatch: bodyStrategyScore,
+    quality: qualityScore,
+    brand: brandQualityScore,
+    weather: weatherMatchScore,
+    diversityScore,
+  });
 }
 
-function ruleFallback(groups, selectionLimit) {
+function ruleFallback(groups, selectionLimit, context = {}) {
+  const styleProfile = contextStyleProfile(context);
+  const styleSemantics = contextStyleSemantics(context);
+  const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
   return groups.flatMap((group) => group.candidates.slice(0, selectionLimit).map((product) => {
     const matchScore = budgetAdjustedMatchScore(product);
     const aestheticScore = boundedScore(
@@ -960,18 +1073,30 @@ function ruleFallback(groups, selectionLimit) {
     const bodyStrategyScore = boundedScore(
       product.body_strategy_match_score ?? product.fit_score ?? 60,
     );
+    const styleMatch = boundedScore(product.style_match_score ?? styleMatchScore({
+      evidence: productStyleEvidence(product, group.requirement),
+      relevanceScore: matchScore,
+      styleProfile,
+      styleSemantics,
+    }));
+    if (shouldRejectForStyle({intentPriorityScore, styleMatch})) return null;
+    const weatherMatch = boundedScore(product.weather_match_score ?? 70);
     const diversity = 100;
     const finalScore = compositeProductScore({
       matchScore,
+      styleMatchScore: styleMatch,
       aestheticScore,
       visualQualityScore,
       bodyStrategyScore,
       brandQualityScore,
+      weatherMatchScore: weatherMatch,
       diversityScore: diversity,
     });
     return {
       ...product,
       match_score: matchScore,
+      style_match_score: styleMatch,
+      weather_match_score: weatherMatch,
       aesthetic_score: aestheticScore,
       commerce_visual_score: visualQualityScore,
       body_strategy_match_score: bodyStrategyScore,
@@ -989,7 +1114,7 @@ function ruleFallback(groups, selectionLimit) {
       ),
       ai_rerank_fallback: true,
     };
-  }));
+  }).filter(Boolean));
 }
 
 function applyLabels(products) {
@@ -1013,13 +1138,21 @@ function applyLabels(products) {
   }));
 }
 
-function normalizeGroups(groups, selectionLimit) {
+function normalizeGroups(groups, selectionLimit, context = {}) {
   const limit = Math.min(positiveInteger(selectionLimit, DEFAULT_SELECTION_LIMIT), 4);
+  const styleProfile = contextStyleProfile(context);
+  const styleSemantics = contextStyleSemantics(context);
+  const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
   return (Array.isArray(groups) ? groups : []).map((group) => {
     const requirement = compactObject(group?.requirement || {});
     const assessedCandidates = Array.isArray(group?.candidates)
       ? group.candidates
         .filter((product) => semanticCategoryMatch(product, requirement))
+        .filter((product) => evaluateStyleGate(
+          product,
+          styleProfile,
+          intentPriorityScore,
+        ).allowed)
         .filter((product) => !productQualityBlock(product, requirement))
         .map((product) => {
           const assessed = {
@@ -1027,8 +1160,21 @@ function normalizeGroups(groups, selectionLimit) {
             ...catalogAestheticAssessment(product, requirement),
             ...brandQualityAssessment(product),
           };
-          return {...assessed, ...visualAssessmentDefaults(assessed)};
+          const normalized = {...assessed, ...visualAssessmentDefaults(assessed)};
+          return {
+            ...normalized,
+            style_match_score: styleMatchScore({
+              evidence: productStyleEvidence(normalized, requirement),
+              relevanceScore: normalized.relevance_score,
+              styleProfile,
+              styleSemantics,
+            }),
+          };
         })
+        .filter((product) => !shouldRejectForStyle({
+          intentPriorityScore,
+          styleMatch: product.style_match_score,
+        }))
         .filter((product) => !isAestheticJunk(product))
       : [];
     const requiredMinimum = Math.min(4, assessedCandidates.length);
@@ -1072,11 +1218,14 @@ function remainingBudgetMs(deadlineAt) {
 }
 
 function candidateQualityPrior(product) {
-  return boundedScore(product.relevance_score) * 0.25 +
-    boundedScore(product.aesthetic_score ?? product.catalog_aesthetic_score) * 0.25 +
-    boundedScore(product.commerce_visual_score ?? product.visual_quality_score) * 0.25 +
-    boundedScore(product.brand_quality_score) * 0.1 +
-    boundedScore(product.budget_preference_score ?? 70) * 0.15;
+  return productIntentScore({
+    styleMatch: product.style_match_score ?? product.relevance_score,
+    bodyMatch: product.body_strategy_match_score ?? product.fit_score ?? 60,
+    quality: boundedScore(product.aesthetic_score ?? product.catalog_aesthetic_score) * 0.6 +
+      boundedScore(product.commerce_visual_score ?? product.visual_quality_score) * 0.4,
+    brand: product.brand_quality_score,
+    weather: product.weather_match_score ?? 70,
+  });
 }
 
 function budgetAdjustedMatchScore(product) {
