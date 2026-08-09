@@ -482,7 +482,7 @@ function buildMessages(groups, context) {
         "A slightly over-budget product may be selected when its quality or outfit fit justifies it, but the reason must clearly explain that tradeoff.",
         "Use styling_strategy plus every Look's styling_goal and proportion_strategy as the source of truth for body-proportion fit.",
         "Use style_semantics and style_profile as the sole source of truth for style_match. Do not reinterpret raw user wording.",
-        "The supplied intent_priority_score and product_intent_weights are immutable. Rank style_match at 60%, body_match at 15%, quality at 10%, brand at 10%, and weather at 5%.",
+        "The supplied intent_priority_score and product_intent_weights are immutable. Rank style_match at 75%, body_match at 8%, quality at 7%, brand at 5%, and weather at 5%.",
         "Weather is a weak functional constraint only. It may affect waterproofing, breathability, sole, or material, but must never replace the requested style.",
         "Every selected product must include style_match_score and weather_match_score from 0 to 100. If intent_priority_score is above 80, never select a product with style_match_score below 50.",
         "A strong conflict with must_express, must_avoid, silhouette, preferred materials, or continuous style dimensions is disqualifying; brand or image quality cannot override it.",

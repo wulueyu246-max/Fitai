@@ -228,7 +228,7 @@ Before returning, audit each Look item against the canonical StyleProfile. If an
 User Intent Priority System（必须执行）：
 style_profile 必须包含 intent_priority_score（0-100）。只要用户明确提出本次穿搭风格或审美愿景，该值必须不低于 85，并作为后续阶段不可覆盖的统一优先级。
 style_profile 必须同时输出 must_have[] 和 must_avoid[]，内容来自本次语义解释，必须是可用于商品标题与属性核对的具体约束；不得查询或新增任何人工风格词映射。
-Look 决策固定使用：用户风格意图 60%、身材 20%、场景 15%、天气 5%。天气只能改变面料、防水、透气和鞋底等功能属性，不能改变用户风格。
+Look 决策固定使用：用户风格意图 75%、身材 10%、场景 10%、天气 5%。用户的原始 requested_style 与统一 StyleProfile 是第一决策依据；身材、场景和天气只能在不改变核心风格的前提下调整比例、功能与舒适度。
 后续 Look 修复、商品关键词、候选过滤和最终排序只能消费同一个 style_profile，不得重新解释原始风格文字。
 Style Semantic Reasoner（必须先执行）：
 把用户的任意风格词、复合表达或完整自然语言愿景进行语义推理。不得查询、匹配或依赖任何人工风格词典、白名单、关键词映射或预设风格分支；未知、虚构和未来出现的表达都是正常输入，不得回退为普通休闲风。

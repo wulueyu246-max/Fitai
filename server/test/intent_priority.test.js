@@ -48,7 +48,7 @@ test("the same immutable weights flow through recommendation context", () => {
   assert.deepEqual(context.intent_weights.look, LOOK_INTENT_WEIGHTS);
   assert.deepEqual(context.intent_weights.product, PRODUCT_INTENT_WEIGHTS);
   assert.equal(context.intent_weights.look.weather, 5);
-  assert.equal(context.intent_weights.product.style, 60);
+  assert.equal(context.intent_weights.product.style, 75);
 });
 
 test("style dominates product score while weather remains a weak constraint", () => {
@@ -59,12 +59,30 @@ test("style dominates product score while weather remains a weak constraint", ()
     styleMatch: 40, bodyMatch: 70, quality: 70, brand: 70, weather: 100,
   });
   assert.ok(highStyle > highWeather);
-  assert.equal(PRODUCT_INTENT_WEIGHTS.style, 60);
+  assert.equal(PRODUCT_INTENT_WEIGHTS.style, 75);
   assert.equal(PRODUCT_INTENT_WEIGHTS.weather, 5);
   assert.ok(
     lookIntentScore({styleMatch: 95, bodyMatch: 70, sceneMatch: 70, weatherMatch: 0}) >
     lookIntentScore({styleMatch: 40, bodyMatch: 70, sceneMatch: 70, weatherMatch: 100}),
   );
+});
+
+test("high relevance alone cannot pass a high-priority style match", () => {
+  const profile = {
+    ...highPriorityProfile(),
+    must_avoid: [],
+    negative_keywords: [],
+  };
+  const score = styleMatchScore({
+    evidence: "361白色网面休闲运动鞋",
+    relevanceScore: 100,
+    styleProfile: profile,
+  });
+  assert.ok(score < 50);
+  assert.equal(shouldRejectForStyle({
+    intentPriorityScore: profile.intent_priority_score,
+    styleMatch: score,
+  }), true);
 });
 
 test("high-priority intent hard-rejects low style matches", () => {

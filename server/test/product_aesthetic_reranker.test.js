@@ -68,7 +68,7 @@ test("validates candidate IDs and applies the weighted final score", () => {
   }, groups, 6);
 
   assert.deepEqual(products.map((item) => item.product_id), ["top-1", "shoe-1"]);
-  assert.equal(products[0].final_score, 70);
+  assert.equal(products[0].final_score, 69.2);
   assert.equal(products[0].aesthetic_score, 94);
   assert.equal(products[0].brand_quality_score, 45);
   assert.equal(products[0].diversity_score, 100);
@@ -339,7 +339,10 @@ test("COS and Uniqlo products rank before an ordinary Taobao white tee", async (
     }],
   });
 
-  assert.deepEqual(products.slice(0, 2).map((item) => item.brand), ["COS", "Uniqlo"]);
+  assert.deepEqual(
+    new Set(products.slice(0, 2).map((item) => item.brand)),
+    new Set(["COS", "Uniqlo"]),
+  );
   assert.ok(products[0].brand_quality_score > products[2].brand_quality_score);
 });
 

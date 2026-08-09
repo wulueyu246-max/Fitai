@@ -1476,6 +1476,27 @@ function shouldEnforceCanonicalStyle(styleProfile = {}, styleSemantics = {}) {
   );
 }
 
+function ensureStyleAnchoredSearchKeywords(
+  keywords,
+  styleProfile = {},
+  styleSemantics = {},
+) {
+  const values = Array.isArray(keywords) ? keywords : [];
+  if (!shouldEnforceCanonicalStyle(styleProfile, styleSemantics)) return values;
+  const anchor = readOptionalString(styleProfile.primary_style) ||
+    readOptionalString(styleProfile.source_text) ||
+    styleIntentAnchors(styleProfile, styleSemantics)[0];
+  if (!anchor) return values;
+  const normalizedAnchor = anchor.toLowerCase().replace(/\s+/g, "");
+  return values.map((keyword) => {
+    const value = readOptionalString(keyword);
+    const normalizedValue = value.toLowerCase().replace(/\s+/g, "");
+    return normalizedValue.includes(normalizedAnchor)
+      ? value
+      : `${anchor} ${value}`.trim();
+  });
+}
+
 function preferredStyleItemForCategory(category, styleProfile = {}, usedNames) {
   const preferredItems = Array.isArray(styleProfile.preferred_items)
     ? styleProfile.preferred_items
@@ -1816,6 +1837,7 @@ function createRepairedFallbackLook({
   normalizeItem,
   styleProfile = {},
   styleSemantics = {},
+  usedStyleItemNames = new Set(),
 }) {
   const canonicalStyle = readOptionalString(styleProfile.primary_style) ||
     readOptionalString(style);
@@ -1847,7 +1869,7 @@ function createRepairedFallbackLook({
       styleSemantics,
     );
   }
-  const usedNames = new Set();
+  const usedNames = usedStyleItemNames;
   look.items = ["top", "bottom", "shoes"].map((category, itemIndex) =>
     buildRepairedCoreItem(category, look, itemIndex, normalizeItem, {
       styleProfile,
@@ -2015,17 +2037,25 @@ function repairAndValidateAiLooks({
       );
       if (!finalCoreRepair) throw new Error("缺少可修复的核心穿搭单品");
       const finalItems = finalCoreRepair.items.map((item) => {
-        if (Number.isFinite(Number(item.style_match_score))) return item;
+        const searchKeywords = ensureStyleAnchoredSearchKeywords(
+          item.search_keywords,
+          styleProfile,
+          styleSemantics,
+        );
+        if (Number.isFinite(Number(item.style_match_score))) {
+          return {...item, search_keywords: searchKeywords};
+        }
         const evidence = [
           item.item_name,
           item.style,
           item.color,
           item.fit,
           item.material,
-          ...(item.search_keywords || []),
+          ...searchKeywords,
         ].filter(Boolean).join(" ");
         return {
           ...item,
+          search_keywords: searchKeywords,
           style_match_score: styleMatchScore({
             evidence,
             relevanceScore: 65,
@@ -2395,35 +2425,170 @@ function createMockOutfitAnalysis(outfitRequest) {
   };
 }
 
-function createBasicFallbackOutfitAnalysis(outfitRequest, reason = "AI_OUTPUT_INVALID") {
-  const analysis = createMockOutfitAnalysis(outfitRequest);
+function parseAiPayloadBestEffort(content) {
+  const withoutFence = String(content || "")
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+  if (!withoutFence) return null;
+  try {
+    return JSON.parse(withoutFence);
+  } catch {
+    const completed = completeTruncatedJson(withoutFence);
+    if (!completed) return null;
+    try {
+      return JSON.parse(completed);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function createBasicFallbackOutfitAnalysis(
+  outfitRequest,
+  reason = "AI_OUTPUT_INVALID",
+  {aiContent = "", styleInterpretation = null} = {},
+) {
   const gender = normalizeGender(outfitRequest.gender);
-  const look = {
-    request_id: readOptionalString(outfitRequest.requestId),
-    look_id: "fallback-look-1",
-    gender,
-    scene: readOptionalString(outfitRequest.scene),
-    style: "简洁实穿",
-    style_direction: "基础稳定搭配",
-    styling_goal: "保持核心穿搭完整并兼顾整体比例",
-    proportion_strategy: "使用清晰腰线和顺直轮廓保持视觉平衡",
-    why_this_changes_the_body_proportion:
-      "通过协调上衣长度、下装腰线和鞋型保持整体视觉平衡",
-    accessories_decision: [],
-    items: analysis.products,
+  const requestedStyle = readOptionalString(outfitRequest.request) ||
+    "用户指定风格";
+  const parsedPayload = parseAiPayloadBestEffort(aiContent);
+  const normalizedPayload = parsedPayload && typeof parsedPayload === "object" &&
+    !Array.isArray(parsedPayload)
+    ? normalizeAiOutfitPayload(parsedPayload)
+    : {};
+  const rawStyleProfile = styleInterpretation?.style_profile ||
+    normalizedPayload.style_profile || normalizedPayload.styleProfile || {};
+  const rawStyleSemantics = styleInterpretation?.style_semantics ||
+    normalizedPayload.style_semantics || normalizedPayload.styleSemantics || {};
+  const existingMustHave = rawStyleProfile.must_have ||
+    rawStyleProfile.mustHave || rawStyleProfile.positive_keywords || [];
+  const existingPositive = rawStyleProfile.positive_keywords ||
+    rawStyleProfile.positiveKeywords || existingMustHave;
+  const rawIntentPriority = Number(
+    rawStyleProfile.intent_priority_score ||
+    rawStyleProfile.intentPriorityScore,
+  );
+  const styleProfile = normalizeStyleProfile({
+    ...rawStyleProfile,
+    source_text: requestedStyle,
+    intent_priority_score: Number.isFinite(rawIntentPriority)
+      ? Math.max(90, rawIntentPriority)
+      : 90,
+    primary_style: readOptionalString(
+      rawStyleProfile.primary_style || rawStyleProfile.primaryStyle,
+    ) || requestedStyle,
+    must_have: Array.isArray(existingMustHave) && existingMustHave.length > 0
+      ? existingMustHave
+      : [requestedStyle],
+    positive_keywords: Array.isArray(existingPositive) && existingPositive.length > 0
+      ? existingPositive
+      : [requestedStyle],
+  }, {sourceText: requestedStyle});
+  const styleSemantics = normalizeStyleSemantics({
+    ...rawStyleSemantics,
+    must_express: Array.isArray(rawStyleSemantics.must_express) &&
+      rawStyleSemantics.must_express.length > 0
+      ? rawStyleSemantics.must_express
+      : [requestedStyle],
+  });
+  let stylingStrategy;
+  try {
+    stylingStrategy = normalizeStylingStrategy(
+      normalizedPayload.styling_strategy || normalizedPayload.stylingStrategy,
+      {
+        bodyProfile: readOptionalString(normalizedPayload.bodyProfile),
+        scene: outfitRequest.scene,
+      },
+    );
+  } catch {
+    stylingStrategy = {
+      body_strengths: [],
+      proportion_issues: [],
+      visual_goals: ["preserve_style_intent"],
+      waistline_strategy: "在保持用户指定风格的前提下调整视觉腰线",
+      top_length_strategy: "根据用户指定风格选择合适衣长",
+      bottom_strategy: "根据用户指定风格选择下装轮廓",
+      shoe_strategy: "鞋型必须延续用户指定风格，不使用无关休闲鞋替代",
+      color_strategy: "优先使用风格档案中的配色",
+      silhouette_strategy: "优先使用风格档案中的轮廓语言",
+      skin_exposure_strategy: "根据用户指定风格和舒适度控制露肤",
+      accessory_strategy: "仅加入能强化用户指定风格的配饰",
+      weather_strategy: "天气只调整材质与功能，不改变用户指定风格",
+    };
+  }
+  const normalizeFallbackItem = (product, index, look) => {
+    const requirement = normalizeProductRequirement({
+      ...product,
+      look_id: look.look_id,
+      gender: look.gender,
+      item_name: product.item_name || product.itemName || product.keyword,
+      search_keywords: product.search_keywords ||
+        product.searchKeywords ||
+        (typeof product.keyword === "string" ? [product.keyword] : []),
+      negative_keywords: product.negative_keywords ||
+        product.negativeKeywords || [],
+    });
+    return {
+      ...requirement,
+      accessory_type: accessoryTypeForItem(product),
+      search_keywords: ensureStyleAnchoredSearchKeywords(
+        buildSearchKeywords(requirement),
+        styleProfile,
+        styleSemantics,
+      ),
+    };
   };
-  return {
-    ...analysis,
-    bodyProfile: "AI 视觉分析暂未完整返回，已先生成一套可继续使用的基础搭配。",
-    style: "简洁实穿，以清晰比例和协调配色为主。",
-    recommendations: {
-      top: "选择肩线清晰、长度适中的上衣。",
-      bottom: "选择中高腰、线条顺直的下装。",
-      shoes: "选择与下装颜色协调、适合当前场景的鞋型。",
-      accessories: "配饰可以留空，优先保证核心穿搭完整。",
-      summary: "AI 输出未完整通过校验，已保留一套基础穿搭供继续使用。",
+  const usedStyleDirections = new Set();
+  const usedStyleItemNames = new Set();
+  const looks = [0, 1, 2].map((lookIndex) => createRepairedFallbackLook({
+    lookIndex,
+    gender,
+    context: {
+      requestId: outfitRequest.requestId,
+      scene: outfitRequest.scene,
     },
-    looks: [look],
+    style: styleProfile.primary_style || requestedStyle,
+    stylingStrategy,
+    usedStyleDirections,
+    normalizeItem: normalizeFallbackItem,
+    styleProfile,
+    styleSemantics,
+    usedStyleItemNames,
+  }));
+  const recommendations = intentAlignedRecommendations({
+    top: `上装必须直接表达“${requestedStyle}”`,
+    bottom: `下装必须直接表达“${requestedStyle}”`,
+    shoes: `鞋履必须直接表达“${requestedStyle}”`,
+    accessories: `仅选择能强化“${requestedStyle}”的配饰`,
+    summary: `本次搭配以“${requestedStyle}”为第一优先级`,
+  }, looks, styleProfile, styleSemantics);
+  return {
+    gender,
+    style_expression: resolveStyleExpression({styleProfile}),
+    style_semantics: styleSemantics,
+    style_profile: styleProfile,
+    bodyProfile: readOptionalString(normalizedPayload.bodyProfile) ||
+      "AI 视觉分析暂未完整返回；用户风格意图已保留并优先用于生成搭配。",
+    style: styleProfile.primary_style || requestedStyle,
+    style_upgrade_level: "upgrade",
+    styling_strategy: stylingStrategy,
+    recommendations,
+    looks,
+    products: looks.flatMap((look) => look.items),
+    look_validation_summary: {
+      request_id: readOptionalString(outfitRequest.requestId),
+      total_looks: Array.isArray(normalizedPayload.looks)
+        ? normalizedPayload.looks.length
+        : 0,
+      valid_looks: 0,
+      repaired_looks: looks.length,
+      removed_looks: Array.isArray(normalizedPayload.looks)
+        ? normalizedPayload.looks.length
+        : 0,
+      fallback_used: true,
+    },
     analysisMode: "rule_fallback",
     fallbackReason: reason,
   };
@@ -3487,6 +3652,7 @@ All user-facing natural-language values MUST be Simplified Chinese. Preserve gen
 app.post("/outfit", outfitRateLimiter, async (req, res) => {
   let outfitRequest;
   let aiRequestStartedAt;
+  let fallbackStyleInterpretation;
   const requestStartedAt = Date.now();
   const deferProducts = req.get("x-defer-products") === "true";
 
@@ -3512,6 +3678,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
     const cachedStyleInterpretation = styleInterpretationCache.get(
       styleCacheContext,
     );
+    fallbackStyleInterpretation = cachedStyleInterpretation;
     const requestContext = createRecommendationContext({
       requestId: res.locals.requestId,
       gender: outfitRequest.gender,
@@ -3829,15 +3996,19 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       });
     } catch (error) {
       if (!/^AI 返回/.test(String(error?.message || ""))) throw error;
-      analysis = createBasicFallbackOutfitAnalysis(outfitRequest, "AI_OUTPUT_INVALID");
-      analysis.look_validation_summary = {
-        request_id: res.locals.requestId,
-        total_looks: 0,
-        valid_looks: 0,
-        repaired_looks: 1,
-        removed_looks: 0,
-        fallback_used: true,
-      };
+      console.warn("AI Look 输出进入风格保真修复", {
+        requestId: res.locals.requestId,
+        errorMessage: error.message,
+        requestedStyle: styleCacheContext.requested_style,
+      });
+      analysis = createBasicFallbackOutfitAnalysis(
+        outfitRequest,
+        "AI_OUTPUT_INVALID",
+        {
+          aiContent: aiText,
+          styleInterpretation: fallbackStyleInterpretation,
+        },
+      );
     }
     console.info("look_validation_summary", analysis.look_validation_summary || {
       request_id: res.locals.requestId,
@@ -3873,6 +4044,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
           {sourceText: styleCacheContext.requested_style},
         );
       }
+      fallbackStyleInterpretation = validatedStyleInterpretation;
       styleInterpretationCache.set(styleCacheContext, validatedStyleInterpretation);
     }
     const parseDurationMs = Date.now() - parseStartedAt;
@@ -4008,6 +4180,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       const fallbackAnalysis = createBasicFallbackOutfitAnalysis(
         outfitRequest,
         "AI_TIMEOUT",
+        {styleInterpretation: fallbackStyleInterpretation},
       );
       console.info("look_validation_summary", {
         request_id: res.locals.requestId,

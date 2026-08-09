@@ -14,6 +14,7 @@ const {
   createAiDispatcher,
   createDiagnosticFetch,
   createAiErrorDetails,
+  createBasicFallbackOutfitAnalysis,
   createMockOutfitAnalysis,
   buildOutfitApiResponse,
   configureProxyEnvironment,
@@ -979,7 +980,15 @@ test("high-priority style intent replaces generic casual Looks and advice", () =
   const forbidden = /白色T恤|弯刀裤|361|运动鞋/u;
 
   assert.equal(analysis.looks.length, 3);
-  assert.equal(allItems.some((item) => forbidden.test(item.item_name)), false);
+  assert.equal(
+    allItems.some((item) => forbidden.test(item.item_name)),
+    false,
+    JSON.stringify(allItems.map((item) => ({
+      category: item.category,
+      item_name: item.item_name,
+      style_match_score: item.style_match_score,
+    }))),
+  );
   assert.ok(analysis.looks.every((look) =>
     look.style === "甜美精致" &&
     look.style_match_score >= 60 &&
@@ -990,6 +999,63 @@ test("high-priority style intent replaces generic casual Looks and advice", () =
     Object.values(analysis.recommendations).join(" "),
     /保持休闲舒适|普通上衣|普通裤子/u,
   );
+});
+
+test("invalid AI Look output keeps the requested style instead of generic casual fallback", () => {
+  const aiContent = JSON.stringify({
+    gender: "female",
+    bodyProfile: "身材比例分析已完成",
+    style: "甜美精致",
+    style_semantics: {
+      must_express: ["甜美", "轻盈", "精致细节"],
+      must_avoid: ["普通休闲", "运动鞋", "工装"],
+    },
+    style_profile: {
+      source_text: "甜美穿搭",
+      intent_priority_score: 95,
+      primary_style: "甜美精致",
+      preferred_items: [
+        "蝴蝶结针织衫",
+        "荷叶边雪纺衫",
+        "短款柔软开衫",
+        "高腰A字半身裙",
+        "柔粉垂坠半身裙",
+        "高腰微喇长裤",
+        "圆头玛丽珍鞋",
+        "缎面芭蕾鞋",
+        "精致低跟单鞋",
+      ],
+      preferred_colors: ["柔粉色", "奶油白"],
+      preferred_materials: ["细腻针织", "轻盈雪纺"],
+      must_have: ["甜美", "轻盈", "精致"],
+      must_avoid: ["普通休闲", "运动鞋", "工装"],
+      positive_keywords: ["甜美", "轻盈", "精致"],
+      negative_keywords: ["普通休闲", "运动鞋", "工装"],
+    },
+    looks: [{look_id: "broken-look", items: []}],
+  });
+  const analysis = createBasicFallbackOutfitAnalysis({
+    requestId: "sweet-fallback-request",
+    request: "甜美穿搭",
+    gender: "female",
+    scene: "约会",
+  }, "AI_OUTPUT_INVALID", {aiContent});
+
+  const itemNames = analysis.looks.flatMap((look) =>
+    look.items.map((item) => item.item_name));
+  const searchKeywords = analysis.looks.flatMap((look) =>
+    look.items.flatMap((item) => item.search_keywords));
+
+  assert.equal(analysis.analysisMode, "rule_fallback");
+  assert.equal(analysis.style_profile.source_text, "甜美穿搭");
+  assert.equal(analysis.style_profile.intent_priority_score, 95);
+  assert.equal(analysis.looks.length, 3);
+  assert.ok(analysis.recommendations.summary.includes("甜美穿搭"));
+  assert.ok(itemNames.some((name) => name.includes("蝴蝶结")));
+  assert.ok(itemNames.some((name) => name.includes("玛丽珍")));
+  assert.ok(searchKeywords.every((keyword) => keyword.includes("甜美")));
+  assert.equal(itemNames.some((name) => /简洁实穿|休闲弯刀|361/.test(name)), false);
+  assert.ok(analysis.looks.every((look) => look.style_match_score >= 60));
 });
 
 test("AI Style Interpreter preserves an unknown blended style through Look parsing", () => {

@@ -1,15 +1,15 @@
 const LOOK_INTENT_WEIGHTS = Object.freeze({
-  style: 60,
-  body: 20,
-  scene: 15,
+  style: 75,
+  body: 10,
+  scene: 10,
   weather: 5,
 });
 
 const PRODUCT_INTENT_WEIGHTS = Object.freeze({
-  style: 60,
-  body: 15,
-  quality: 10,
-  brand: 10,
+  style: 75,
+  body: 8,
+  quality: 7,
+  brand: 5,
   weather: 5,
 });
 
@@ -142,13 +142,23 @@ function styleMatchScore({
   if (tokens.negative.some((token) => normalizedEvidence.includes(token))) return 0;
   const positiveMatches = tokens.positive.filter((token) =>
     normalizedEvidence.includes(token)).length;
+  const highIntent = resolveIntentPriorityScore(styleProfile) >=
+    HIGH_INTENT_THRESHOLD;
+  const expectedEvidenceCount = highIntent ? 2 : 4;
   const coverage = tokens.positive.length > 0
-    ? Math.min(1, positiveMatches / Math.min(tokens.positive.length, 4))
+    ? Math.min(
+      1,
+      positiveMatches / Math.min(tokens.positive.length, expectedEvidenceCount),
+    )
     : 0;
   const relevance = Number.isFinite(Number(relevanceScore))
     ? boundedScore(relevanceScore)
     : 50;
-  return Math.round((relevance * 0.75 + coverage * 25) * 10) / 10;
+  const styleEvidenceWeight = highIntent ? 0.75 : 0.25;
+  const relevanceWeight = 1 - styleEvidenceWeight;
+  return Math.round((
+    relevance * relevanceWeight + coverage * 100 * styleEvidenceWeight
+  ) * 10) / 10;
 }
 
 function hasStyleViolation(evidence, styleProfile = {}, styleSemantics = {}) {
@@ -171,21 +181,21 @@ function productIntentScore({
   diversityScore = 100,
 } = {}) {
   const base =
-    boundedScore(styleMatch) * 0.6 +
-    boundedScore(bodyMatch) * 0.15 +
-    boundedScore(quality) * 0.1 +
-    boundedScore(brand) * 0.1 +
-    boundedScore(weather, 70) * 0.05;
+    boundedScore(styleMatch) * (PRODUCT_INTENT_WEIGHTS.style / 100) +
+    boundedScore(bodyMatch) * (PRODUCT_INTENT_WEIGHTS.body / 100) +
+    boundedScore(quality) * (PRODUCT_INTENT_WEIGHTS.quality / 100) +
+    boundedScore(brand) * (PRODUCT_INTENT_WEIGHTS.brand / 100) +
+    boundedScore(weather, 70) * (PRODUCT_INTENT_WEIGHTS.weather / 100);
   const diversityPenalty = (100 - boundedScore(diversityScore, 100)) * 0.02;
   return Math.round(Math.max(0, base - diversityPenalty) * 10) / 10;
 }
 
 function lookIntentScore({styleMatch, bodyMatch, sceneMatch, weatherMatch} = {}) {
   return Math.round((
-    boundedScore(styleMatch) * 0.6 +
-    boundedScore(bodyMatch) * 0.2 +
-    boundedScore(sceneMatch) * 0.15 +
-    boundedScore(weatherMatch, 70) * 0.05
+    boundedScore(styleMatch) * (LOOK_INTENT_WEIGHTS.style / 100) +
+    boundedScore(bodyMatch) * (LOOK_INTENT_WEIGHTS.body / 100) +
+    boundedScore(sceneMatch) * (LOOK_INTENT_WEIGHTS.scene / 100) +
+    boundedScore(weatherMatch, 70) * (LOOK_INTENT_WEIGHTS.weather / 100)
   ) * 10) / 10;
 }
 
