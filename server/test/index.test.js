@@ -21,6 +21,7 @@ const {
   configureProxyEnvironment,
   extractAiText,
   parseOutfitAnalysis,
+  parseIntentPhase,
   parseBlueprintPhase,
   mergeBlueprintAndLookPhase,
   generatePhasedOutfitAnalysis,
@@ -35,6 +36,7 @@ const {
   resolveAiModeReason,
   resolveAiConfig,
   resolveAiTimeoutMs,
+  resolveIntentTimeoutMs,
   resolveBlueprintTimeoutMs,
   resolveLookTimeoutMs,
   sanitizeAiErrorMessage,
@@ -46,6 +48,7 @@ const {
   validateOutfitRequest,
   DEFAULT_AI_MODEL,
   DEFAULT_AI_TIMEOUT_MS,
+  DEFAULT_INTENT_TIMEOUT_MS,
   DEFAULT_BLUEPRINT_TIMEOUT_MS,
   DEFAULT_LOOK_TIMEOUT_MS,
   LEGACY_AI_MODEL,
@@ -1913,6 +1916,9 @@ test("uses qwen3.7-plus by default and keeps legacy rollback explicit", () => {
   assert.equal(resolveAiTimeoutMs("45000"), 45_000);
   assert.equal(resolveAiTimeoutMs("60000"), 60_000);
   assert.equal(resolveAiTimeoutMs("120000"), 60_000);
+  assert.equal(DEFAULT_INTENT_TIMEOUT_MS, 20_000);
+  assert.equal(resolveIntentTimeoutMs("15000"), 15_000);
+  assert.equal(resolveIntentTimeoutMs("60000"), 20_000);
   assert.equal(DEFAULT_BLUEPRINT_TIMEOUT_MS, 120_000);
   assert.equal(resolveBlueprintTimeoutMs("90000"), 90_000);
   assert.equal(resolveBlueprintTimeoutMs("180000"), 120_000);
@@ -2012,6 +2018,34 @@ function phasedBlueprintFixture() {
     },
   };
 }
+
+function phasedIntentFixture() {
+  const blueprint = phasedBlueprintFixture();
+  return {
+    semantic_intent: {
+      identity_impression: blueprint.style_semantics.identity_impression,
+      emotional_tone: blueprint.style_semantics.emotional_tone,
+      style_direction: blueprint.style_semantics.interpretation_summary,
+      must_express: blueprint.style_semantics.must_express,
+      must_avoid: blueprint.style_semantics.must_avoid,
+    },
+    style_profile: blueprint.style_profile,
+  };
+}
+
+test("parses unrestricted style intent before Blueprint generation", () => {
+  const result = parseIntentPhase(JSON.stringify(phasedIntentFixture()), {
+    sourceText: "甜妹穿搭",
+  });
+
+  assert.equal(result.semantic_intent.style_direction.includes("甜美"), true);
+  assert.deepEqual(
+    result.semantic_intent.must_avoid,
+    phasedBlueprintFixture().style_semantics.must_avoid,
+  );
+  assert.equal(result.style_profile.intent_priority_score, 92);
+  assert.equal(result.style_profile.dimensions.femininity, 92);
+});
 
 test("parses the AI Blueprint independently before Look generation", () => {
   const result = parseBlueprintPhase(JSON.stringify(phasedBlueprintFixture()), {
@@ -2145,6 +2179,11 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
           requests.push(request);
           if (callCount === 1) {
             return {choices: [{message: {content: JSON.stringify(
+              phasedIntentFixture(),
+            )}}]};
+          }
+          if (callCount === 2) {
+            return {choices: [{message: {content: JSON.stringify(
               phasedBlueprintFixture(),
             )}}]};
           }
@@ -2161,45 +2200,71 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
       request: "甜妹穿搭",
       gender: "female",
       scene: "约会",
+      height: 168,
+      weight: 55,
       itemBudget: "200-500",
       outfitBudget: "800-1500",
+      images: {front: imageDataUrl},
     },
     requestContext: {gender: "female", style_expression: "feminine"},
     userContent: [{type: "text", text: "甜妹穿搭"}],
     sourceText: "甜妹穿搭",
     client,
+    intentTimeoutMs: 1_000,
     blueprintTimeoutMs: 1_000,
     lookTimeoutMs: 1_000,
   });
 
-  assert.equal(callCount, 2);
+  assert.equal(callCount, 3);
   assert.equal(result.analysis.analysisMode, "blueprint_partial");
   assert.equal(shouldRepairStyleInterpretation(result.analysis), false);
   assert.equal(result.analysis.outfit_blueprint.blueprint_source, "ai_generated");
   assert.equal(result.analysis.look_validation_summary.blueprint_preserved, true);
   assert.equal(result.analysis.look_validation_summary.fallback_used, false);
-  assert.match(requests[0].messages[0].content, /Phase 1 only/);
-  assert.equal(requests[0].max_tokens, 3200);
-  assert.match(requests[0].messages[0].content, /Do not generate Looks/);
+  assert.match(requests[0].messages[0].content, /Style Intent Parser/);
+  assert.equal(requests[0].max_tokens, 1400);
+  const intentInput = JSON.parse(requests[0].messages[1].content);
+  assert.deepEqual(Object.keys(intentInput).sort(), [
+    "gender",
+    "requested_style",
+    "scene",
+  ]);
+  assert.equal(intentInput.requested_style, "甜妹穿搭");
+
+  assert.match(requests[1].messages[0].content, /semantic_intent/);
+  assert.equal(requests[1].max_tokens, 1800);
+  assert.match(requests[1].messages[0].content, /Do not generate Looks/);
   assert.doesNotMatch(
-    requests[0].messages[0].content,
+    requests[1].messages[0].content,
     /styling_strategy must contain/,
   );
-  assert.match(requests[1].messages[0].content, /Phase 2 only/);
+  const blueprintContent = requests[1].messages[1].content;
+  assert.equal(Array.isArray(blueprintContent), true);
+  const blueprintInput = JSON.parse(blueprintContent[0].text);
+  assert.deepEqual(Object.keys(blueprintInput).sort(), [
+    "body_analysis",
+    "budget",
+    "scene",
+    "semantic_intent",
+  ]);
+  assert.equal(Object.hasOwn(blueprintInput, "requested_style"), false);
+  assert.equal(blueprintInput.semantic_intent.must_avoid.length > 0, true);
+
+  assert.match(requests[2].messages[0].content, /Phase 2 only/);
   assert.match(
-    requests[1].messages[0].content,
+    requests[2].messages[0].content,
     /one and only aesthetic source/,
   );
-  assert.equal(requests[1].max_tokens, 2600);
+  assert.equal(requests[2].max_tokens, 2600);
   assert.match(
-    requests[1].messages[0].content,
+    requests[2].messages[0].content,
     /styling_strategy must contain/,
   );
   assert.match(
-    requests[1].messages[0].content,
+    requests[2].messages[0].content,
     /Do not generate search_keywords or negative_keywords/,
   );
-  const lookInput = JSON.parse(requests[1].messages[1].content);
+  const lookInput = JSON.parse(requests[2].messages[1].content);
   assert.deepEqual(Object.keys(lookInput).sort(), [
     "body_analysis",
     "budget",

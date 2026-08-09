@@ -111,9 +111,11 @@ function readBoolean(value, fallback = false) {
 
 const DEFAULT_AI_MODEL = "qwen3.7-plus";
 const DEFAULT_AI_TIMEOUT_MS = 60_000;
+const DEFAULT_INTENT_TIMEOUT_MS = 20_000;
 const DEFAULT_BLUEPRINT_TIMEOUT_MS = 120_000;
 const DEFAULT_LOOK_TIMEOUT_MS = 60_000;
-const BLUEPRINT_PHASE_MAX_TOKENS = 3_200;
+const INTENT_PHASE_MAX_TOKENS = 1_400;
+const BLUEPRINT_PHASE_MAX_TOKENS = 1_800;
 const LOOK_PHASE_MAX_TOKENS = 2_600;
 // Manual rollback only: set AI_MODEL=qwen-vl-plus in the environment.
 // The server never switches to this legacy model automatically.
@@ -131,6 +133,13 @@ function resolveBlueprintTimeoutMs(value) {
   return Math.min(
     readPositiveInteger(value, DEFAULT_BLUEPRINT_TIMEOUT_MS),
     DEFAULT_BLUEPRINT_TIMEOUT_MS,
+  );
+}
+
+function resolveIntentTimeoutMs(value) {
+  return Math.min(
+    readPositiveInteger(value, DEFAULT_INTENT_TIMEOUT_MS),
+    DEFAULT_INTENT_TIMEOUT_MS,
   );
 }
 
@@ -228,6 +237,7 @@ const config = Object.freeze({
   apiKey: aiConfig.apiKey,
   aiTimeoutMs: resolveAiTimeoutMs(process.env.AI_TIMEOUT_MS),
   phasedOutfitEnabled: true,
+  intentTimeoutMs: resolveIntentTimeoutMs(process.env.AI_INTENT_TIMEOUT_MS),
   blueprintTimeoutMs: resolveBlueprintTimeoutMs(
     process.env.AI_BLUEPRINT_TIMEOUT_MS,
   ),
@@ -3483,6 +3493,7 @@ app.get("/health", (req, res) => {
     ai_mode_reason: resolveAiModeReason(config, aiClient),
     ai_request_url: buildAiRequestUrl(config.baseURL),
     ai_timeout_ms: config.aiTimeoutMs,
+    ai_intent_timeout_ms: config.intentTimeoutMs,
     ai_blueprint_timeout_ms: config.blueprintTimeoutMs,
     ai_look_timeout_ms: config.lookTimeoutMs,
     ai_connect_timeout_ms: config.aiConnectTimeoutMs,
@@ -4023,6 +4034,131 @@ All user-facing natural-language values MUST be Simplified Chinese. Preserve gen
   }
 }
 
+function normalizeIntentList(value, field) {
+  const values = [...new Set((Array.isArray(value) ? value : [])
+    .map(readOptionalString)
+    .filter(Boolean))].slice(0, 12);
+  if (values.length === 0) {
+    throw new Error(`AI Intent 缺少 ${field}`);
+  }
+  return Object.freeze(values);
+}
+
+function buildIntentPhaseResult({
+  semanticIntent,
+  styleProfile,
+  sourceText = "",
+}) {
+  const identityImpression = normalizeIntentList(
+    semanticIntent?.identity_impression || semanticIntent?.identityImpression,
+    "identity_impression",
+  );
+  const emotionalTone = normalizeIntentList(
+    semanticIntent?.emotional_tone || semanticIntent?.emotionalTone,
+    "emotional_tone",
+  );
+  const styleDirection = readOptionalString(
+    semanticIntent?.style_direction || semanticIntent?.styleDirection,
+  );
+  if (!styleDirection) throw new Error("AI Intent 缺少 style_direction");
+  const mustExpress = normalizeIntentList(
+    semanticIntent?.must_express || semanticIntent?.mustExpress,
+    "must_express",
+  );
+  const mustAvoid = normalizeIntentList(
+    semanticIntent?.must_avoid || semanticIntent?.mustAvoid,
+    "must_avoid",
+  );
+  const normalizedIntent = Object.freeze({
+    identity_impression: identityImpression,
+    emotional_tone: emotionalTone,
+    style_direction: styleDirection,
+    must_express: mustExpress,
+    must_avoid: mustAvoid,
+  });
+  const styleSemantics = normalizeStyleSemantics({
+    identity_impression: identityImpression,
+    emotional_tone: emotionalTone,
+    visual_personality: [styleDirection],
+    social_signal: identityImpression,
+    must_express: mustExpress,
+    must_avoid: mustAvoid,
+    style_atoms: [...mustExpress, styleDirection],
+    confidence: 0.9,
+    interpretation_summary: styleDirection,
+  });
+  const profileSource = styleProfile && typeof styleProfile === "object"
+    ? styleProfile
+    : {};
+  const normalizedProfile = normalizeStyleProfile({
+    ...profileSource,
+    source_text: sourceText,
+    interpretation: readOptionalString(profileSource.interpretation) ||
+      styleDirection,
+    primary_style: readOptionalString(
+      profileSource.primary_style || profileSource.primaryStyle,
+    ) || styleDirection,
+    secondary_styles: profileSource.secondary_styles ||
+      profileSource.secondaryStyles || emotionalTone,
+    blend_rationale: readOptionalString(
+      profileSource.blend_rationale || profileSource.blendRationale,
+    ) || styleDirection,
+    silhouette: readOptionalString(profileSource.silhouette) || styleDirection,
+    preferred_items: profileSource.preferred_items ||
+      profileSource.preferredItems || mustExpress,
+    must_have: profileSource.must_have || profileSource.mustHave || mustExpress,
+    must_avoid: profileSource.must_avoid || profileSource.mustAvoid || mustAvoid,
+    positive_keywords: profileSource.positive_keywords ||
+      profileSource.positiveKeywords || mustExpress,
+    negative_keywords: profileSource.negative_keywords ||
+      profileSource.negativeKeywords || mustAvoid,
+  }, {sourceText});
+  assertValidStyleInterpretation({
+    style_semantics: styleSemantics,
+    style_profile: normalizedProfile,
+  }, {sourceText});
+  return Object.freeze({
+    semantic_intent: normalizedIntent,
+    style_semantics: styleSemantics,
+    style_profile: normalizedProfile,
+    style_expression: resolveStyleExpression({styleProfile: normalizedProfile}),
+  });
+}
+
+function parseIntentPhase(content, context = {}) {
+  const parsed = parseAiPayloadBestEffort(content);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("AI Intent 返回内容不是有效 JSON 对象");
+  }
+  return buildIntentPhaseResult({
+    semanticIntent: parsed.semantic_intent || parsed.semanticIntent,
+    styleProfile: parsed.style_profile || parsed.styleProfile,
+    sourceText: context.sourceText,
+  });
+}
+
+function intentPhaseFromCachedInterpretation(value, sourceText = "") {
+  const styleSemantics = normalizeStyleSemantics(
+    value?.style_semantics || value?.styleSemantics,
+  );
+  const styleProfile = normalizeStyleProfile(
+    value?.style_profile || value?.styleProfile,
+    {sourceText},
+  );
+  return buildIntentPhaseResult({
+    semanticIntent: {
+      identity_impression: styleSemantics.identity_impression,
+      emotional_tone: styleSemantics.emotional_tone,
+      style_direction: styleSemantics.interpretation_summary ||
+        styleProfile.interpretation || styleProfile.primary_style,
+      must_express: styleSemantics.must_express,
+      must_avoid: styleSemantics.must_avoid,
+    },
+    styleProfile,
+    sourceText,
+  });
+}
+
 function parseBlueprintPhase(content, context = {}) {
   const parsedPayload = parseAiPayloadBestEffort(content);
   if (!parsedPayload || typeof parsedPayload !== "object" ||
@@ -4152,6 +4288,7 @@ function parseBlueprintPhase(content, context = {}) {
     gender,
     bodyProfile,
     style,
+    semantic_intent: context.semanticIntent || context.semantic_intent,
     style_expression: resolveStyleExpression({
       explicit: parsed.style_expression || parsed.styleExpression ||
         context.style_expression || context.styleExpression,
@@ -4170,7 +4307,7 @@ function mergeBlueprintAndLookPhase(blueprintPhase, content, context = {}) {
   if (!lookPayload || typeof lookPayload !== "object" || Array.isArray(lookPayload)) {
     throw new Error("AI Look 返回内容不是有效 JSON 对象");
   }
-  return parseOutfitAnalysis(JSON.stringify({
+  const analysis = parseOutfitAnalysis(JSON.stringify({
     ...lookPayload,
     gender: blueprintPhase.gender,
     bodyProfile: blueprintPhase.bodyProfile,
@@ -4189,6 +4326,10 @@ function mergeBlueprintAndLookPhase(blueprintPhase, content, context = {}) {
     styleProfile: blueprintPhase.style_profile,
     outfitBlueprint: blueprintPhase.outfit_blueprint,
   });
+  return {
+    ...analysis,
+    semantic_intent: blueprintPhase.semantic_intent,
+  };
 }
 
 function createBlueprintPartialAnalysis(blueprintPhase, requestId) {
@@ -4303,22 +4444,26 @@ recommendations 必须包含 top、bottom、shoes、accessories、summary，且�
 只返回一个 JSON 对象，字段仅为 recommendations、looks、style_upgrade_level。`;
 }
 
-// Keep Phase 1 intentionally compact: image/body understanding and the immutable
-// Blueprint belong here; proportion tactics and concrete Looks belong to Phase 2.
-function compactBlueprintPhaseSystemPrompt(cachedStyleInterpretation) {
+function intentPhaseSystemPrompt() {
+  return `You are the lightweight Style Intent Parser for a personal styling system.
+Interpret the user's unrestricted natural-language request exactly once. Do not analyze images, body proportions, weather, products, or generate an Outfit Blueprint or Look. Never use a style-name dictionary, whitelist, hard-coded style branch, or generic-casual fallback.
+All natural-language values MUST be Simplified Chinese. English is allowed only for internal identifiers and the 11 dimension keys.
+Return exactly one JSON object with only semantic_intent and style_profile.
+semantic_intent must contain exactly identity_impression[], emotional_tone[], style_direction, must_express[], and must_avoid[]. Preserve compound, unknown, and future style descriptions without reducing them to one familiar label. must_express and must_avoid must be concrete enough to guide garments, silhouettes, materials, details, and shoes.
+style_profile must contain intent_priority_score (explicit style requests >=85), interpretation, primary_style, secondary_styles[], blend_rationale, dimensions with all 11 differentiated 0-100 values (maturity, femininity, masculinity, structure, minimalism, romantic, sportiness, sexiness, youthfulness, luxury, casualness), silhouette, preferred_items[], preferred_colors[], preferred_materials[], must_have[], must_avoid[], positive_keywords[], and negative_keywords[].`;
+}
+
+// The Blueprint phase consumes canonical intent and visual evidence. It never
+// receives or reinterprets the user's raw style wording.
+function compactBlueprintPhaseSystemPrompt() {
   return `You are a senior personal stylist and visual-proportion analyst.
-This is Phase 1 only. Analyze the supplied body photos and the user's intent, then create the immutable Outfit Blueprint. Do not generate Looks, products, search keywords, recommendations, or styling_strategy in this phase.
+This phase only analyzes the supplied body photos and executes the immutable semantic_intent to create BodyAnalysis and Outfit Blueprint. semantic_intent is the one and only aesthetic source; do not reinterpret, rename, broaden, or replace it. Do not generate Looks, products, search keywords, recommendations, or styling_strategy.
 ${partialViewSafetyInstruction}
 All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.
-The raw requested style is the highest-priority constraint. Interpret unrestricted natural language directly; never use a style-name whitelist, never replace an unfamiliar aesthetic with generic casual clothing, and never let weather or scene overwrite the requested aesthetic.
-${cachedStyleInterpretation
-    ? "The user message includes validated style_semantics and style_profile. Preserve them as immutable canonical facts without reinterpreting the raw wording."
-    : "Interpret the raw requested style once and return compact canonical style_semantics and style_profile together with the Blueprint."}
-Return exactly one JSON object with only these top-level keys: gender, bodyProfile, style, style_expression, style_semantics, style_profile, outfit_blueprint.
-style_semantics must include identity_impression[], emotional_tone[], visual_personality[], social_signal[], must_express[], must_avoid[], style_atoms[], confidence (0-1), and interpretation_summary.
-style_profile must include source_text, intent_priority_score (explicit user style >=85), interpretation, primary_style, secondary_styles[], blend_rationale, all 11 numeric dimensions (maturity, femininity, masculinity, structure, minimalism, romantic, sportiness, sexiness, youthfulness, luxury, casualness), silhouette, preferred_items[], preferred_colors[], preferred_materials[], must_have[], must_avoid[], positive_keywords[], and negative_keywords[]. Values must be meaningfully differentiated rather than all near 50.
-outfit_blueprint must include blueprint_source="ai_generated", style_identity, character_impression, visual_keywords[], core_elements[], silhouette_strategy[], color_palette[], material_direction[], must_have_items{}, avoid_items[], and occasion_strategy.
-The Blueprint must contain concrete purchasable core items for top+bottom+shoes or dress+shoes. It decides what the user should wear before any marketplace search. Base it on the photos, body proportions, height, weight, scene, budget, and raw request without mechanically inferring proportions from height alone.`;
+Use body information, photographed proportions, scene, and budget only to make the immutable intent wearable. They may not override its must_express or introduce anything in must_avoid. Never infer proportions from height alone.
+Return exactly one JSON object with only gender, bodyProfile, style, style_expression, and outfit_blueprint.
+outfit_blueprint must set blueprint_source="ai_generated" and contain style_identity, character_impression, visual_keywords[], core_elements[], silhouette_strategy[], color_palette[], material_direction[], must_have_items{}, avoid_items[], and occasion_strategy.
+The Blueprint must contain concrete purchasable core items for top+bottom+shoes or dress+shoes. It decides what the user should wear before any marketplace search.`;
 }
 
 function phasedLookSystemPrompt() {
@@ -4339,9 +4484,76 @@ async function generatePhasedOutfitAnalysis({
   cachedStyleInterpretation,
   sourceText,
   client = aiClient,
+  intentTimeoutMs = config.intentTimeoutMs,
   blueprintTimeoutMs = config.blueprintTimeoutMs,
   lookTimeoutMs = config.lookTimeoutMs,
 }) {
+  const intentStartedAt = Date.now();
+  let intentResponse;
+  let intentPhase;
+  if (cachedStyleInterpretation) {
+    intentPhase = intentPhaseFromCachedInterpretation(
+      cachedStyleInterpretation,
+      sourceText,
+    );
+    console.info("ai_outfit_phase", {
+      requestId: outfitRequest.requestId,
+      phase: "intent",
+      duration_ms: Date.now() - intentStartedAt,
+      success: true,
+      source: "cache",
+    });
+  } else {
+    intentResponse = await requestStructuredAiPhase({
+      phase: "intent",
+      client,
+      timeoutMs: intentTimeoutMs,
+      maxTokens: INTENT_PHASE_MAX_TOKENS,
+      requestId: outfitRequest.requestId,
+      messages: [
+        {role: "system", content: intentPhaseSystemPrompt()},
+        {
+          role: "user",
+          content: JSON.stringify({
+            requested_style: sourceText,
+            scene: outfitRequest.scene,
+            gender: requestContext.gender,
+          }),
+        },
+      ],
+    });
+    intentPhase = parseIntentPhase(extractAiText(intentResponse), {sourceText});
+  }
+  const intentDurationMs = Date.now() - intentStartedAt;
+
+  const profile = intentPhase.style_profile;
+  const blueprintSemanticIntent = {
+    ...intentPhase.semantic_intent,
+    intent_priority_score: profile.intent_priority_score,
+    dimensions: profile.dimensions,
+    silhouette: profile.silhouette,
+    preferred_items: profile.preferred_items,
+    preferred_colors: profile.preferred_colors,
+    preferred_materials: profile.preferred_materials,
+  };
+  const blueprintInput = {
+    semantic_intent: blueprintSemanticIntent,
+    body_analysis: {
+      height: outfitRequest.height,
+      weight: outfitRequest.weight,
+      gender: requestContext.gender,
+      supplied_photo_roles: Object.keys(outfitRequest.images || {}),
+    },
+    scene: outfitRequest.scene,
+    budget: {
+      item: outfitRequest.itemBudget,
+      outfit: outfitRequest.outfitBudget,
+    },
+  };
+  const blueprintUserContent = [
+    {type: "text", text: JSON.stringify(blueprintInput)},
+    ...(Array.isArray(userContent) ? userContent.slice(1) : []),
+  ];
   const blueprintStartedAt = Date.now();
   const blueprintResponse = await requestStructuredAiPhase({
     phase: "blueprint",
@@ -4352,9 +4564,9 @@ async function generatePhasedOutfitAnalysis({
     messages: [
       {
         role: "system",
-        content: compactBlueprintPhaseSystemPrompt(cachedStyleInterpretation),
+        content: compactBlueprintPhaseSystemPrompt(),
       },
-      {role: "user", content: userContent},
+      {role: "user", content: blueprintUserContent},
     ],
   });
   const blueprintPhase = parseBlueprintPhase(extractAiText(blueprintResponse), {
@@ -4362,9 +4574,10 @@ async function generatePhasedOutfitAnalysis({
     scene: outfitRequest.scene,
     requestId: outfitRequest.requestId,
     userInput: sourceText,
-    style_expression: requestContext.style_expression,
-    styleSemantics: cachedStyleInterpretation?.style_semantics,
-    styleProfile: cachedStyleInterpretation?.style_profile,
+    style_expression: intentPhase.style_expression,
+    semanticIntent: intentPhase.semantic_intent,
+    styleSemantics: intentPhase.style_semantics,
+    styleProfile: intentPhase.style_profile,
   });
   const blueprintDurationMs = Date.now() - blueprintStartedAt;
 
@@ -4425,6 +4638,7 @@ async function generatePhasedOutfitAnalysis({
   const lookDurationMs = Date.now() - lookStartedAt;
   console.info("ai_outfit_phase_summary", {
     requestId: outfitRequest.requestId,
+    intent_duration: intentDurationMs,
     blueprint_duration: blueprintDurationMs,
     look_duration: lookDurationMs,
     look_input_size: Buffer.byteLength(lookInputJson, "utf8"),
@@ -4443,9 +4657,11 @@ async function generatePhasedOutfitAnalysis({
   });
   return {
     analysis,
+    intentResponse,
     blueprintResponse,
     lookResponse,
     aiText: lookResponse ? extractAiText(lookResponse) : "",
+    intentDurationMs,
     blueprintDurationMs,
     lookDurationMs,
   };
@@ -4593,6 +4809,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
     let response;
     let phasedAnalysis;
     let phasedAiText = "";
+    let phasedIntentDurationMs = 0;
     let phasedBlueprintDurationMs = 0;
     let phasedLookDurationMs = 0;
     const preAiDurationMs = Date.now() - requestStartedAt;
@@ -4609,6 +4826,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
       response = phasedResult.lookResponse || phasedResult.blueprintResponse;
       phasedAnalysis = phasedResult.analysis;
       phasedAiText = phasedResult.aiText;
+      phasedIntentDurationMs = phasedResult.intentDurationMs;
       phasedBlueprintDurationMs = phasedResult.blueprintDurationMs;
       phasedLookDurationMs = phasedResult.lookDurationMs;
     } else {
@@ -4828,7 +5046,8 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
     }
 
     const dashscopeDurationMs = config.phasedOutfitEnabled
-      ? phasedBlueprintDurationMs + phasedLookDurationMs
+      ? phasedIntentDurationMs + phasedBlueprintDurationMs +
+        phasedLookDurationMs
       : Date.now() - aiRequestStartedAt;
     const parseStartedAt = Date.now();
     const aiText = config.phasedOutfitEnabled
@@ -5019,6 +5238,9 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
     const totalDurationMs = Date.now() - requestStartedAt;
     setServerTiming(res, {
       pre_ai: preAiDurationMs,
+      intent: phasedIntentDurationMs,
+      blueprint: phasedBlueprintDurationMs,
+      look: phasedLookDurationMs,
       dashscope: dashscopeDurationMs,
       parse: parseDurationMs,
       products: productDurationMs,
@@ -5028,6 +5250,9 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       requestId: res.locals.requestId,
       statusCode: 200,
       preAiDurationMs,
+      intentDurationMs: phasedIntentDurationMs,
+      blueprintDurationMs: phasedBlueprintDurationMs,
+      lookDurationMs: phasedLookDurationMs,
       dashscopeDurationMs,
       parseDurationMs,
       productDurationMs,
@@ -5366,6 +5591,7 @@ module.exports = {
   extractAiText,
   normalizeAiOutfitPayload,
   parseOutfitAnalysis,
+  parseIntentPhase,
   parseBlueprintPhase,
   mergeBlueprintAndLookPhase,
   createBlueprintPartialAnalysis,
@@ -5387,6 +5613,7 @@ module.exports = {
   resolveAiModeReason,
   resolveAiConfig,
   resolveAiTimeoutMs,
+  resolveIntentTimeoutMs,
   resolveBlueprintTimeoutMs,
   resolveLookTimeoutMs,
   listenForRequests,
@@ -5405,6 +5632,7 @@ module.exports = {
   productRecommendationRequest,
   DEFAULT_AI_MODEL,
   DEFAULT_AI_TIMEOUT_MS,
+  DEFAULT_INTENT_TIMEOUT_MS,
   DEFAULT_BLUEPRINT_TIMEOUT_MS,
   DEFAULT_LOOK_TIMEOUT_MS,
   LEGACY_AI_MODEL,
