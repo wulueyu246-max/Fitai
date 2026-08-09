@@ -3,17 +3,18 @@ import 'package:flutter/foundation.dart';
 class AppConfig {
   static const defaultApiBaseUrl = 'https://fitai-jqtl.onrender.com';
   static const backendTimeout = Duration(seconds: 120);
+  static const defaultAiTimeout = Duration(seconds: 190);
 
   const AppConfig({
     required this.apiBaseUrl,
     this.maxImageBytes = 5 * 1024 * 1024,
-    this.aiTimeout = backendTimeout,
+    this.aiTimeout = defaultAiTimeout,
   });
 
   factory AppConfig.fromEnvironment() {
     const timeoutMs = int.fromEnvironment(
       'AI_TIMEOUT_MS',
-      defaultValue: 120000,
+      defaultValue: 190000,
     );
     const configuredApiBaseUrl = String.fromEnvironment(
       'API_BASE_URL',

@@ -28,6 +28,9 @@ const {
   blueprintMatchAssessment,
   blueprintMatchPassesHardGate,
 } = require("./outfit_blueprint");
+const {
+  expandBlueprintSearchPlan,
+} = require("./blueprint_search_expansion");
 
 const PRODUCT_CATEGORIES = SUPPORTED_PRODUCT_CATEGORIES;
 const DEFAULT_SAMPLE_MATERIAL_ID = "28029";
@@ -502,7 +505,13 @@ class TaobaoProductProvider extends ProductProvider {
 
   async #candidatePool(filters, metrics = null) {
     const requirement = normalizeProductRequirement(filters, filters);
-    const searchPlan = buildTaobaoSearchPlan(requirement);
+    const outfitBlueprint = filters.outfit_blueprint || filters.outfitBlueprint ||
+      filters.recommendation_context?.outfit_blueprint || {};
+    const searchPlan = expandBlueprintSearchPlan(
+      requirement,
+      outfitBlueprint,
+      buildTaobaoSearchPlan(requirement),
+    );
     this.logger.info?.("淘宝商品搜索需求", {
       requestId: filters.requestId || undefined,
       look_id: requirement.look_id || undefined,
@@ -518,6 +527,7 @@ class TaobaoProductProvider extends ProductProvider {
     });
     const candidateLimit = Math.min(positiveInteger(filters.limit, 20), 20);
     let products = [];
+    let successfulQuery = "";
     if (searchPlan.exact) {
       products = await this.#search({
         ...filters,
@@ -529,6 +539,7 @@ class TaobaoProductProvider extends ProductProvider {
         minimumRelevanceScore: 35,
         limit: 50,
       }, metrics);
+      if (products.length > 0) successfulQuery = searchPlan.exact;
     }
     if (products.length === 0 && searchPlan.fallbacks.length > 0) {
       const fallbackBatches = await Promise.all(searchPlan.fallbacks.map(
@@ -543,17 +554,32 @@ class TaobaoProductProvider extends ProductProvider {
           limit: 50,
         }, metrics),
       ));
+      const successfulIndex = fallbackBatches.findIndex((batch) => batch.length > 0);
+      if (successfulIndex >= 0) {
+        successfulQuery = searchPlan.fallbacks[successfulIndex];
+      }
       products = uniqueProducts(fallbackBatches.flat())
         .sort((left, right) => right.relevance_score - left.relevance_score);
     }
+    this.logger.info?.("search_expansion_summary", {
+      request_id: filters.requestId || undefined,
+      look_id: requirement.look_id || undefined,
+      category: requirement.category,
+      blueprint_element: searchPlan.blueprint_element || requirement.item_name,
+      original_query: searchPlan.original_keyword,
+      expanded_queries: searchPlan.expanded_queries || [
+        searchPlan.exact,
+        ...searchPlan.fallbacks,
+      ].filter(Boolean),
+      successful_query: successfulQuery || null,
+      candidate_count: products.length,
+    });
     const styleProfile = filters.style_profile || filters.styleProfile ||
       filters.recommendation_context?.style_profile || {};
     const styleSemantics = filters.style_semantics || filters.styleSemantics ||
       filters.recommendation_context?.style_semantics || {};
     const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
     const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
-    const outfitBlueprint = filters.outfit_blueprint || filters.outfitBlueprint ||
-      filters.recommendation_context?.outfit_blueprint || {};
     const blueprintGatedProducts = products.flatMap((product) => {
       const assessment = blueprintMatchAssessment(
         product,

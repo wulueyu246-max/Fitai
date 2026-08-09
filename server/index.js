@@ -111,6 +111,8 @@ function readBoolean(value, fallback = false) {
 
 const DEFAULT_AI_MODEL = "qwen3.7-plus";
 const DEFAULT_AI_TIMEOUT_MS = 60_000;
+const DEFAULT_BLUEPRINT_TIMEOUT_MS = 120_000;
+const DEFAULT_LOOK_TIMEOUT_MS = 60_000;
 // Manual rollback only: set AI_MODEL=qwen-vl-plus in the environment.
 // The server never switches to this legacy model automatically.
 const LEGACY_AI_MODEL = "qwen-vl-plus";
@@ -120,6 +122,20 @@ function resolveAiTimeoutMs(value) {
   return Math.min(
     readPositiveInteger(value, DEFAULT_AI_TIMEOUT_MS),
     DEFAULT_AI_TIMEOUT_MS,
+  );
+}
+
+function resolveBlueprintTimeoutMs(value) {
+  return Math.min(
+    readPositiveInteger(value, DEFAULT_BLUEPRINT_TIMEOUT_MS),
+    DEFAULT_BLUEPRINT_TIMEOUT_MS,
+  );
+}
+
+function resolveLookTimeoutMs(value) {
+  return Math.min(
+    readPositiveInteger(value, DEFAULT_LOOK_TIMEOUT_MS),
+    DEFAULT_LOOK_TIMEOUT_MS,
   );
 }
 
@@ -209,6 +225,11 @@ const config = Object.freeze({
   baseURL: aiConfig.baseURL,
   apiKey: aiConfig.apiKey,
   aiTimeoutMs: resolveAiTimeoutMs(process.env.AI_TIMEOUT_MS),
+  phasedOutfitEnabled: true,
+  blueprintTimeoutMs: resolveBlueprintTimeoutMs(
+    process.env.AI_BLUEPRINT_TIMEOUT_MS,
+  ),
+  lookTimeoutMs: resolveLookTimeoutMs(process.env.AI_LOOK_TIMEOUT_MS),
   aiConnectTimeoutMs: readPositiveInteger(
     process.env.AI_CONNECT_TIMEOUT_MS,
     30_000,
@@ -519,7 +540,11 @@ function createAiClient(
   return new OpenAIClient({
     apiKey: currentConfig.apiKey,
     baseURL: currentConfig.baseURL,
-    timeout: currentConfig.aiTimeoutMs,
+    timeout: Math.max(
+      currentConfig.aiTimeoutMs,
+      currentConfig.blueprintTimeoutMs || 0,
+      currentConfig.lookTimeoutMs || 0,
+    ),
     maxRetries: currentConfig.aiMaxRetries ?? 0,
     fetch: createDiagnosticFetch(currentConfig, fetchImplementation),
     fetchOptions: {
@@ -3456,6 +3481,8 @@ app.get("/health", (req, res) => {
     ai_mode_reason: resolveAiModeReason(config, aiClient),
     ai_request_url: buildAiRequestUrl(config.baseURL),
     ai_timeout_ms: config.aiTimeoutMs,
+    ai_blueprint_timeout_ms: config.blueprintTimeoutMs,
+    ai_look_timeout_ms: config.lookTimeoutMs,
     ai_connect_timeout_ms: config.aiConnectTimeoutMs,
     ai_max_retries: config.aiMaxRetries,
     ai_fallback_on_error: config.fallbackOnAiError,
@@ -3994,6 +4021,307 @@ All user-facing natural-language values MUST be Simplified Chinese. Preserve gen
   }
 }
 
+function parseBlueprintPhase(content, context = {}) {
+  const parsedPayload = parseAiPayloadBestEffort(content);
+  if (!parsedPayload || typeof parsedPayload !== "object" ||
+      Array.isArray(parsedPayload)) {
+    throw new Error("AI Blueprint 返回内容不是有效 JSON 对象");
+  }
+  const parsed = normalizeAiOutfitPayload(parsedPayload);
+  const bodyProfile = readOptionalString(
+    parsed.bodyProfile ?? parsed.body_profile ??
+    parsed.bodyAnalysis ?? parsed.body_analysis,
+  );
+  if (!bodyProfile) throw new Error("AI Blueprint 缺少 bodyProfile");
+  const style = readOptionalString(parsed.style);
+  if (!style) throw new Error("AI Blueprint 缺少 style");
+  if (Object.prototype.hasOwnProperty.call(parsed, "gender") &&
+      !isSupportedAiGender(parsed.gender)) {
+    throw new Error("AI Blueprint gender 非法");
+  }
+  const contextGender = normalizeGender(context.gender);
+  const returnedGender = Object.prototype.hasOwnProperty.call(parsed, "gender")
+    ? normalizeGender(parsed.gender)
+    : contextGender;
+  const gender = contextGender === "unisex"
+    ? returnedGender
+    : assertContextGender(context, returnedGender, "blueprint_phase");
+  const validatedStyle = assertValidStyleInterpretation({
+    style_semantics: context.styleSemantics || context.style_semantics ||
+      parsed.style_semantics || parsed.styleSemantics,
+    style_profile: context.styleProfile || context.style_profile ||
+      parsed.style_profile || parsed.styleProfile,
+  }, {sourceText: context.userInput || style});
+  const outfitBlueprint = normalizeOutfitBlueprint(
+    parsed.outfit_blueprint || parsed.outfitBlueprint,
+    {
+      styleProfile: validatedStyle.style_profile,
+      styleSemantics: validatedStyle.style_semantics,
+      defaultSource: "ai_generated",
+    },
+  );
+  if (!blueprintHasCoreItems(outfitBlueprint)) {
+    throw new Error("AI Blueprint 缺少可执行的核心单品");
+  }
+  const stylingStrategy = normalizeStylingStrategy(
+    parsed.styling_strategy || parsed.stylingStrategy,
+    {bodyProfile, scene: context.scene},
+  );
+  return Object.freeze({
+    gender,
+    bodyProfile,
+    style,
+    style_expression: resolveStyleExpression({
+      explicit: parsed.style_expression || parsed.styleExpression ||
+        context.style_expression || context.styleExpression,
+      styleProfile: validatedStyle.style_profile,
+    }),
+    ...validatedStyle,
+    outfit_blueprint: outfitBlueprint,
+    styling_strategy: stylingStrategy,
+  });
+}
+
+function mergeBlueprintAndLookPhase(blueprintPhase, content, context = {}) {
+  const lookPayload = parseAiPayloadBestEffort(content);
+  if (!lookPayload || typeof lookPayload !== "object" || Array.isArray(lookPayload)) {
+    throw new Error("AI Look 返回内容不是有效 JSON 对象");
+  }
+  return parseOutfitAnalysis(JSON.stringify({
+    ...lookPayload,
+    gender: blueprintPhase.gender,
+    bodyProfile: blueprintPhase.bodyProfile,
+    style: blueprintPhase.style,
+    style_expression: blueprintPhase.style_expression,
+    style_semantics: blueprintPhase.style_semantics,
+    style_profile: blueprintPhase.style_profile,
+    outfit_blueprint: blueprintPhase.outfit_blueprint,
+    styling_strategy: lookPayload.styling_strategy ||
+      blueprintPhase.styling_strategy,
+  }), {
+    ...context,
+    gender: blueprintPhase.gender,
+    style_expression: blueprintPhase.style_expression,
+    styleSemantics: blueprintPhase.style_semantics,
+    styleProfile: blueprintPhase.style_profile,
+    outfitBlueprint: blueprintPhase.outfit_blueprint,
+  });
+}
+
+function createBlueprintPartialAnalysis(blueprintPhase, requestId) {
+  const style = blueprintPhase.style;
+  return {
+    ...blueprintPhase,
+    recommendations: {
+      top: `已完成“${style}”上装蓝图，具体 Look 正在等待重新生成`,
+      bottom: `已完成“${style}”下装蓝图，具体 Look 正在等待重新生成`,
+      shoes: `已完成“${style}”鞋履蓝图，具体 Look 正在等待重新生成`,
+      accessories: "配饰将严格依据本次造型蓝图决定",
+      summary: "造型蓝图已成功保存，但本次 Look 生成未在时限内完成",
+    },
+    looks: [],
+    products: [],
+    look_validation_summary: {
+      request_id: readOptionalString(requestId),
+      total_looks: 0,
+      valid_looks: 0,
+      repaired_looks: 0,
+      removed_looks: 0,
+      fallback_used: false,
+      blueprint_preserved: true,
+    },
+    analysisMode: "blueprint_partial",
+  };
+}
+
+async function requestStructuredAiPhase({
+  phase,
+  client = aiClient,
+  messages,
+  timeoutMs,
+  requestId,
+}) {
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => abortController.abort(), timeoutMs);
+  timeout.unref();
+  const startedAt = Date.now();
+  activeAiRequests += 1;
+  try {
+    const response = await client.chat.completions.create(
+      {
+        model: config.model,
+        ...structuredJsonRequestOptions(),
+        messages,
+      },
+      {
+        signal: abortController.signal,
+        timeout: timeoutMs,
+        maxRetries: config.aiMaxRetries,
+      },
+    );
+    console.info("ai_outfit_phase", {
+      requestId,
+      phase,
+      duration_ms: Date.now() - startedAt,
+      success: true,
+      source: "ai_generated",
+    });
+    return response;
+  } catch (error) {
+    console.warn("ai_outfit_phase", {
+      requestId,
+      phase,
+      duration_ms: Date.now() - startedAt,
+      success: false,
+      source: "ai_error",
+      errorCode: resolveAiFallbackReason(error),
+    });
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    activeAiRequests -= 1;
+  }
+}
+
+function blueprintPhaseSystemPrompt(cachedStyleInterpretation) {
+  return `你是一名高级私人造型师、服装搭配专家和视觉比例分析师。
+本阶段只完成图片理解、身体分析、用户风格语义理解、Outfit Blueprint 与 Styling Strategy；不要生成 Look、商品或搜索词。
+${partialViewSafetyInstruction}
+${buildStyleInterpreterPrompt()}
+所有用户可见自然语言必须使用简体中文；英文只允许用于内部枚举和标识符。
+用户原始风格意图是最高优先级。Outfit Blueprint 必须先决定用户应该穿什么，淘宝不能参与这个决定。
+必须综合照片、身高、体重、场景、预算和用户原始描述，但不得仅根据身高机械推断比例。
+${cachedStyleInterpretation
+    ? "用户消息包含已验证的 style_semantics/style_profile；将其视为不可变事实，不要重新解释。"
+    : "只在本阶段解释一次用户原始风格描述，输出完整且可验证的 style_semantics/style_profile。"}
+outfit_blueprint 必须包含 style_identity、character_impression、visual_keywords[]、core_elements[]、silhouette_strategy[]、color_palette[]、material_direction[]、must_have_items{}、avoid_items[]、occasion_strategy，并覆盖可执行的核心穿搭（top+bottom+shoes 或 dress+shoes）。
+styling_strategy 必须包含 body_strengths[]、proportion_issues[]、visual_goals[]、waistline_strategy、top_length_strategy、bottom_strategy、shoe_strategy、color_strategy、silhouette_strategy、skin_exposure_strategy、accessory_strategy、weather_strategy。
+只返回一个 JSON 对象，字段仅为 gender、bodyProfile、style、style_expression、style_semantics、style_profile、outfit_blueprint、styling_strategy。`;
+}
+
+function lookPhaseSystemPrompt() {
+  return `你是一名高级私人造型师。本阶段只根据用户消息中已经完成且不可变的 BodyAnalysis、StyleProfile、Outfit Blueprint 和 Styling Strategy 设计三套完整 Look。
+禁止重新解释用户原始风格，禁止改变 gender、style_profile、outfit_blueprint 或 styling_strategy。
+所有用户可见自然语言必须使用简体中文；英文只允许用于内部枚举和标识符。
+三套 Look 必须明显体现 Blueprint，并在轮廓、腰线、衣长/裙裤长度、鞋型、露肤程度或颜色连续性上有实质差异，不能只是换颜色。
+每套 Look 必须包含唯一 look_id、gender、style、style_direction、styling_goal、proportion_strategy、why_this_changes_the_body_proportion、scene、accessories_decision[]、items[]。
+核心组合必须为 top+bottom+shoes、dress+shoes 或 outerwear+bottom+shoes。配饰可为空。
+每个 item 必须包含 category、gender、item_name、color、fit、material、style、season、scene、search_keywords[2-3]、negative_keywords[]。搜索词必须围绕 Blueprint 已决定的具体单品，包含性别人群词和具体商品类别。
+recommendations 必须包含 top、bottom、shoes、accessories、summary，且具体说明 Blueprint 的服装、轮廓、材质、鞋型和细节选择。
+不得使用与 style_profile.must_avoid 或 outfit_blueprint.avoid_items 冲突的普通休闲填充项。
+只返回一个 JSON 对象，字段仅为 recommendations、looks、style_upgrade_level。`;
+}
+
+async function generatePhasedOutfitAnalysis({
+  outfitRequest,
+  requestContext,
+  userContent,
+  cachedStyleInterpretation,
+  sourceText,
+  client = aiClient,
+  blueprintTimeoutMs = config.blueprintTimeoutMs,
+  lookTimeoutMs = config.lookTimeoutMs,
+}) {
+  const blueprintStartedAt = Date.now();
+  const blueprintResponse = await requestStructuredAiPhase({
+    phase: "blueprint",
+    client,
+    timeoutMs: blueprintTimeoutMs,
+    requestId: outfitRequest.requestId,
+    messages: [
+      {role: "system", content: blueprintPhaseSystemPrompt(cachedStyleInterpretation)},
+      {role: "user", content: userContent},
+    ],
+  });
+  const blueprintPhase = parseBlueprintPhase(extractAiText(blueprintResponse), {
+    gender: requestContext.gender,
+    scene: outfitRequest.scene,
+    requestId: outfitRequest.requestId,
+    userInput: sourceText,
+    style_expression: requestContext.style_expression,
+    styleSemantics: cachedStyleInterpretation?.style_semantics,
+    styleProfile: cachedStyleInterpretation?.style_profile,
+  });
+  const blueprintDurationMs = Date.now() - blueprintStartedAt;
+
+  const lookStartedAt = Date.now();
+  let lookResponse;
+  let analysis;
+  try {
+    lookResponse = await requestStructuredAiPhase({
+      phase: "look",
+      client,
+      timeoutMs: lookTimeoutMs,
+      requestId: outfitRequest.requestId,
+      messages: [
+        {role: "system", content: lookPhaseSystemPrompt()},
+        {
+          role: "user",
+          content: JSON.stringify({
+            request_id: outfitRequest.requestId,
+            requested_style: sourceText,
+            scene: outfitRequest.scene,
+            budget: {
+              item: outfitRequest.itemBudget,
+              outfit: outfitRequest.outfitBudget,
+            },
+            body_analysis: blueprintPhase.bodyProfile,
+            gender: blueprintPhase.gender,
+            style: blueprintPhase.style,
+            style_expression: blueprintPhase.style_expression,
+            style_semantics: blueprintPhase.style_semantics,
+            style_profile: blueprintPhase.style_profile,
+            outfit_blueprint: blueprintPhase.outfit_blueprint,
+            styling_strategy: blueprintPhase.styling_strategy,
+          }),
+        },
+      ],
+    });
+    analysis = mergeBlueprintAndLookPhase(
+      blueprintPhase,
+      extractAiText(lookResponse),
+      {
+        gender: requestContext.gender,
+        scene: outfitRequest.scene,
+        requestId: outfitRequest.requestId,
+        userInput: sourceText,
+        style_expression: blueprintPhase.style_expression,
+      },
+    );
+  } catch (error) {
+    console.warn("AI Look phase unavailable; preserving completed Blueprint", {
+      requestId: outfitRequest.requestId,
+      errorCode: resolveAiFallbackReason(error),
+      errorMessage: sanitizeAiErrorMessage(error),
+      blueprintSource: blueprintPhase.outfit_blueprint.blueprint_source,
+    });
+    analysis = createBlueprintPartialAnalysis(
+      blueprintPhase,
+      outfitRequest.requestId,
+    );
+  }
+  const lookDurationMs = Date.now() - lookStartedAt;
+
+  const productRequirementStartedAt = Date.now();
+  analysis.products = analysis.looks.flatMap((look) => look.items);
+  console.info("ai_outfit_phase", {
+    requestId: outfitRequest.requestId,
+    phase: "product_requirements",
+    duration_ms: Date.now() - productRequirementStartedAt,
+    success: true,
+    source: "derived_from_look",
+    requirement_count: analysis.products.length,
+  });
+  return {
+    analysis,
+    blueprintResponse,
+    lookResponse,
+    aiText: lookResponse ? extractAiText(lookResponse) : "",
+    blueprintDurationMs,
+    lookDurationMs,
+  };
+}
+
 app.post("/outfit", outfitRateLimiter, async (req, res) => {
   let outfitRequest;
   let aiRequestStartedAt;
@@ -4133,6 +4461,28 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
       );
     }
 
+    let response;
+    let phasedAnalysis;
+    let phasedAiText = "";
+    let phasedBlueprintDurationMs = 0;
+    let phasedLookDurationMs = 0;
+    const preAiDurationMs = Date.now() - requestStartedAt;
+
+    if (config.phasedOutfitEnabled) {
+      aiRequestStartedAt = Date.now();
+      const phasedResult = await generatePhasedOutfitAnalysis({
+        outfitRequest,
+        requestContext,
+        userContent,
+        cachedStyleInterpretation,
+        sourceText: styleCacheContext.requested_style,
+      });
+      response = phasedResult.lookResponse || phasedResult.blueprintResponse;
+      phasedAnalysis = phasedResult.analysis;
+      phasedAiText = phasedResult.aiText;
+      phasedBlueprintDurationMs = phasedResult.blueprintDurationMs;
+      phasedLookDurationMs = phasedResult.lookDurationMs;
+    } else {
     const abortController = new AbortController();
     const timeout = setTimeout(
       () => abortController.abort(),
@@ -4141,8 +4491,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
     timeout.unref();
     activeAiRequests += 1;
 
-    let response;
-    const preAiDurationMs = Date.now() - requestStartedAt;
+    response = null;
 
     try {
       aiRequestStartedAt = Date.now();
@@ -4347,10 +4696,15 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       clearTimeout(timeout);
       activeAiRequests -= 1;
     }
+    }
 
-    const dashscopeDurationMs = Date.now() - aiRequestStartedAt;
+    const dashscopeDurationMs = config.phasedOutfitEnabled
+      ? phasedBlueprintDurationMs + phasedLookDurationMs
+      : Date.now() - aiRequestStartedAt;
     const parseStartedAt = Date.now();
-    const aiText = extractAiText(response);
+    const aiText = config.phasedOutfitEnabled
+      ? phasedAiText
+      : extractAiText(response);
     console.info("AI 响应元数据", {
       requestId: res.locals.requestId,
       responseId: response?.id ?? null,
@@ -4359,8 +4713,8 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       finishReason: response?.choices?.[0]?.finish_reason ?? null,
       contentLength: aiText.length,
     });
-    let analysis;
-    try {
+    let analysis = phasedAnalysis;
+    if (!analysis) try {
       analysis = parseOutfitAnalysis(aiText, {
         gender: requestContext.gender,
         scene: outfitRequest.scene,
@@ -4536,7 +4890,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
 
     return res.json({
       ...responsePayload,
-      analysisMode: "ai",
+      analysisMode: analysis.analysisMode || "ai",
     });
   } catch (error) {
     if (error instanceof RequestValidationError) {
@@ -4865,6 +5219,11 @@ module.exports = {
   extractAiText,
   normalizeAiOutfitPayload,
   parseOutfitAnalysis,
+  parseBlueprintPhase,
+  mergeBlueprintAndLookPhase,
+  createBlueprintPartialAnalysis,
+  requestStructuredAiPhase,
+  generatePhasedOutfitAnalysis,
   repairAndValidateAiLooks,
   parseStyleRepairPatch,
   repairStyleInterpretationAndLooks,
@@ -4880,6 +5239,8 @@ module.exports = {
   resolveAiModeReason,
   resolveAiConfig,
   resolveAiTimeoutMs,
+  resolveBlueprintTimeoutMs,
+  resolveLookTimeoutMs,
   listenForRequests,
   shouldUseMockAi,
   validateOutfitRequest,
@@ -4896,6 +5257,8 @@ module.exports = {
   productRecommendationRequest,
   DEFAULT_AI_MODEL,
   DEFAULT_AI_TIMEOUT_MS,
+  DEFAULT_BLUEPRINT_TIMEOUT_MS,
+  DEFAULT_LOOK_TIMEOUT_MS,
   LEGACY_AI_MODEL,
   structuredJsonRequestOptions,
 };

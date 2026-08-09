@@ -860,6 +860,139 @@ test("final provider output exposes Blueprint score and hard-rejects conflicts",
   assert.equal(summary[1].final_rank, 1);
 });
 
+test("Blueprint search expansion recovers abstract queries and logs the successful level", async () => {
+  const calls = [];
+  const logs = [];
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client: {
+      call: async (method, params) => {
+        calls.push(params.q);
+        if (params.q !== "女士 单鞋") return response(method, []);
+        return response(method, [taobaoItem({
+          item_basic_info: {
+            item_id: "expanded-mary-jane",
+            title: "女士蝴蝶结圆头低跟玛丽珍单鞋",
+            category_name: "女鞋",
+            pict_url: "//img.example.com/expanded-mary-jane.jpg",
+          },
+          publish_info: {click_url: "//s.click.taobao.com/expanded-mary-jane"},
+        })]);
+      },
+    },
+    reranker: null,
+    logger: {
+      info: (...args) => logs.push(args),
+      warn() {},
+    },
+  });
+
+  const products = await provider.recommendForQueries([{
+    look_id: "sweet-expanded-look",
+    category: "shoes",
+    gender: "female",
+    item_name: "甜美穿搭风格鞋履",
+    search_keywords: ["甜美穿搭风格鞋履"],
+  }], {
+    requestId: "blueprint-expansion-request",
+    style_profile: {intent_priority_score: 95},
+    outfit_blueprint: {
+      core_elements: ["蝴蝶结", "女性化", "复古甜美"],
+      must_have_items: {shoes: ["圆头低跟玛丽珍皮鞋"]},
+      avoid_items: ["运动鞋", "跑步鞋", "训练鞋"],
+    },
+  });
+
+  assert.deepEqual(calls, [
+    "女士 蝴蝶结 玛丽珍鞋",
+    "女士 玛丽珍鞋",
+    "女士 单鞋",
+  ]);
+  assert.equal(products.length, 1);
+  assert.equal(products[0].product_id, "expanded-mary-jane");
+  assert.ok(products[0].blueprint_match_score >= 50);
+  const summary = logs.find(([name]) => name === "search_expansion_summary");
+  assert.equal(summary[1].blueprint_element, "圆头低跟玛丽珍皮鞋");
+  assert.equal(summary[1].successful_query, "女士 单鞋");
+  assert.equal(summary[1].candidate_count, 1);
+});
+
+test("mature, classic and unknown Blueprints all retain at least one matching candidate", async (t) => {
+  const cases = [
+    {
+      name: "mature pointed shoe",
+      itemName: "高级成熟鞋履",
+      title: "女士真皮尖头低跟皮鞋通勤单鞋",
+      blueprint: {
+        core_elements: ["结构感", "利落"],
+        material_direction: ["真皮"],
+        must_have_items: {shoes: ["尖头低跟皮鞋"]},
+        avoid_items: ["运动鞋", "跑鞋"],
+      },
+    },
+    {
+      name: "classic leather loafer",
+      itemName: "经典克制鞋履",
+      title: "女士真皮低Logo经典乐福鞋",
+      blueprint: {
+        core_elements: ["低Logo", "经典轮廓"],
+        material_direction: ["真皮"],
+        must_have_items: {shoes: ["真皮乐福鞋"]},
+        avoid_items: ["大Logo运动"],
+      },
+    },
+    {
+      name: "unknown gallery description",
+      category: "dress",
+      itemName: "夜间艺术展造型",
+      title: "女士银灰色不对称立体剪裁连衣裙",
+      blueprint: {
+        core_elements: ["不对称结构"],
+        color_palette: ["银灰色"],
+        must_have_items: {dress: ["不对称立体剪裁连衣裙"]},
+        avoid_items: ["普通运动套装"],
+      },
+    },
+  ];
+
+  for (const [index, sample] of cases.entries()) {
+    await t.test(sample.name, async () => {
+      const category = sample.category || "shoes";
+      const provider = new TaobaoProductProvider({
+        pid: "mm_100_200_300",
+        adzoneId: "300",
+        client: {
+          call: async (method) => response(method, [taobaoItem({
+            item_basic_info: {
+              item_id: `expanded-case-${index}`,
+              title: sample.title,
+              category_name: category === "dress" ? "女装连衣裙" : "女鞋",
+              pict_url: `//img.example.com/expanded-case-${index}.jpg`,
+            },
+            publish_info: {click_url: `//s.click.taobao.com/expanded-case-${index}`},
+          })]),
+        },
+        reranker: null,
+      });
+      const products = await provider.recommendForQueries([{
+        look_id: `expanded-case-look-${index}`,
+        category,
+        gender: "female",
+        item_name: sample.itemName,
+        search_keywords: [sample.itemName],
+      }], {
+        requestId: `expanded-case-request-${index}`,
+        style_profile: {intent_priority_score: 95},
+        outfit_blueprint: sample.blueprint,
+      });
+
+      assert.ok(products.length > 0);
+      assert.ok(products.every((product) => product.blueprint_match_score >= 50));
+    });
+  }
+});
+
 test("recommendation cache reuses request, look, category and keyword results", async () => {
   let calls = 0;
   const provider = new TaobaoProductProvider({

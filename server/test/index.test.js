@@ -21,6 +21,9 @@ const {
   configureProxyEnvironment,
   extractAiText,
   parseOutfitAnalysis,
+  parseBlueprintPhase,
+  mergeBlueprintAndLookPhase,
+  generatePhasedOutfitAnalysis,
   repairStyleInterpretationAndLooks,
   readBoolean,
   listenForRequests,
@@ -32,6 +35,8 @@ const {
   resolveAiModeReason,
   resolveAiConfig,
   resolveAiTimeoutMs,
+  resolveBlueprintTimeoutMs,
+  resolveLookTimeoutMs,
   sanitizeAiErrorMessage,
   shouldUseMockAi,
   isAllowedOrigin,
@@ -40,6 +45,8 @@ const {
   validateOutfitRequest,
   DEFAULT_AI_MODEL,
   DEFAULT_AI_TIMEOUT_MS,
+  DEFAULT_BLUEPRINT_TIMEOUT_MS,
+  DEFAULT_LOOK_TIMEOUT_MS,
   LEGACY_AI_MODEL,
   structuredJsonRequestOptions,
 } = require("../index");
@@ -1904,6 +1911,12 @@ test("uses qwen3.7-plus by default and keeps legacy rollback explicit", () => {
   assert.equal(resolveAiTimeoutMs("45000"), 45_000);
   assert.equal(resolveAiTimeoutMs("60000"), 60_000);
   assert.equal(resolveAiTimeoutMs("120000"), 60_000);
+  assert.equal(DEFAULT_BLUEPRINT_TIMEOUT_MS, 120_000);
+  assert.equal(resolveBlueprintTimeoutMs("90000"), 90_000);
+  assert.equal(resolveBlueprintTimeoutMs("180000"), 120_000);
+  assert.equal(DEFAULT_LOOK_TIMEOUT_MS, 60_000);
+  assert.equal(resolveLookTimeoutMs("45000"), 45_000);
+  assert.equal(resolveLookTimeoutMs("120000"), 60_000);
   assert.equal(LEGACY_AI_MODEL, "qwen-vl-plus");
   assert.equal(resolveAiConfig({
     DASHSCOPE_API_KEY: "dashscope-test-key",
@@ -1916,6 +1929,204 @@ test("disables thinking for stable structured JSON output", () => {
     response_format: {type: "json_object"},
     enable_thinking: false,
   });
+});
+
+function phasedBlueprintFixture() {
+  return {
+    gender: "female",
+    bodyProfile: "肩腰比例协调，适合通过高腰线强化腿部视觉长度",
+    style: "甜美穿搭",
+    style_expression: "feminine",
+    style_semantics: {
+      identity_impression: ["甜美", "精致"],
+      emotional_tone: ["浪漫"],
+      visual_personality: ["轻盈"],
+      social_signal: ["约会感"],
+      must_express: ["蝴蝶结", "蕾丝", "少女感"],
+      must_avoid: ["跑步鞋", "工装裤", "训练外套"],
+      style_atoms: ["圆润线条", "精致细节"],
+      confidence: 0.94,
+      interpretation_summary: "以女性化细节和轻盈轮廓完成甜美约会造型",
+    },
+    style_profile: {
+      source_text: "甜妹穿搭",
+      intent_priority_score: 92,
+      interpretation: "甜美、精致且具有少女感",
+      primary_style: "甜美穿搭",
+      secondary_styles: ["浪漫"],
+      blend_rationale: "用轻盈轮廓承载精致细节",
+      dimensions: {
+        maturity: 42,
+        femininity: 92,
+        masculinity: 8,
+        structure: 38,
+        minimalism: 32,
+        romantic: 90,
+        sportiness: 6,
+        sexiness: 30,
+        youthfulness: 84,
+        luxury: 52,
+        casualness: 36,
+      },
+      silhouette: "高腰A字与收腰轮廓",
+      preferred_items: ["蕾丝上衣", "高腰百褶裙", "玛丽珍鞋"],
+      preferred_colors: ["奶油白", "樱花粉"],
+      preferred_materials: ["蕾丝", "细针织"],
+      must_have: ["蝴蝶结", "蕾丝", "玛丽珍鞋"],
+      must_avoid: ["跑步鞋", "工装裤", "训练外套"],
+      positive_keywords: ["甜美", "女性化", "精致"],
+      negative_keywords: ["运动风", "机能风", "男款"],
+    },
+    outfit_blueprint: {
+      blueprint_source: "ai_generated",
+      style_identity: "甜美穿搭",
+      character_impression: "精致而轻盈的约会少女感",
+      visual_keywords: ["蝴蝶结", "蕾丝", "高腰线"],
+      core_elements: ["女性化领口", "A字轮廓", "圆头鞋型"],
+      silhouette_strategy: ["短上衣配高腰下装"],
+      color_palette: ["奶油白", "樱花粉"],
+      material_direction: ["蕾丝", "细针织"],
+      must_have_items: {
+        top: ["蕾丝上衣"],
+        bottom: ["高腰百褶裙"],
+        shoes: ["玛丽珍鞋"],
+      },
+      avoid_items: ["跑步鞋", "工装裤", "训练外套"],
+      occasion_strategy: "保持约会场景所需的精致与舒适",
+    },
+    styling_strategy: {
+      body_strengths: ["肩腰比例协调"],
+      proportion_issues: ["需要强调腰线"],
+      visual_goals: ["raise_visual_waistline"],
+      waistline_strategy: "使用高腰线",
+      top_length_strategy: "上衣控制在腰线附近",
+      bottom_strategy: "选择高腰A字轮廓",
+      shoe_strategy: "圆头低跟鞋延续女性化线条",
+      color_strategy: "奶油白与柔粉形成轻盈层次",
+      silhouette_strategy: "短上衣配高腰下装",
+      skin_exposure_strategy: "保持克制露肤",
+      accessory_strategy: "少量精致配饰",
+      weather_strategy: "按天气调整面料厚度",
+    },
+  };
+}
+
+test("parses the AI Blueprint independently before Look generation", () => {
+  const result = parseBlueprintPhase(JSON.stringify(phasedBlueprintFixture()), {
+    gender: "female",
+    scene: "约会",
+    userInput: "甜妹穿搭",
+  });
+
+  assert.equal(result.gender, "female");
+  assert.equal(result.outfit_blueprint.blueprint_source, "ai_generated");
+  assert.deepEqual(
+    result.outfit_blueprint.must_have_items.shoes,
+    ["玛丽珍鞋"],
+  );
+});
+
+test("merges a text-only Look phase into the immutable AI Blueprint", () => {
+  const blueprint = parseBlueprintPhase(JSON.stringify(phasedBlueprintFixture()), {
+    gender: "female",
+    scene: "约会",
+    userInput: "甜妹穿搭",
+  });
+  const item = (category, itemName, color) => ({
+    category,
+    gender: "female",
+    item_name: itemName,
+    color,
+    fit: "合身",
+    material: category === "shoes" ? "真皮" : "细腻面料",
+    style: "甜美穿搭",
+    season: "all",
+    scene: "约会",
+    search_keywords: [`女士 ${color} ${itemName}`, `女士 甜美 ${itemName}`],
+    negative_keywords: ["男款", "运动风", "工装"],
+  });
+  const result = mergeBlueprintAndLookPhase(blueprint, JSON.stringify({
+    style_upgrade_level: "upgrade",
+    recommendations: {
+      top: "选择带蕾丝与蝴蝶结细节的女性化上衣",
+      bottom: "用高腰百褶裙建立轻盈A字轮廓",
+      shoes: "圆头玛丽珍鞋延续甜美精致感",
+      accessories: "使用小体量珍珠配饰点亮造型",
+      summary: "整套造型以高腰线、蕾丝和圆润鞋型回应甜美诉求",
+    },
+    looks: [{
+      request_id: "phase-look-test",
+      look_id: "look-1",
+      gender: "female",
+      style: "甜美穿搭",
+      style_direction: "蕾丝高腰约会造型",
+      styling_goal: "强化轻盈甜美气质",
+      proportion_strategy: "短上衣配高腰A字裙",
+      why_this_changes_the_body_proportion: "提高视觉腰线并延长腿部线条",
+      scene: "约会",
+      accessories_decision: [],
+      items: [
+        item("top", "蕾丝上衣", "奶油白"),
+        item("bottom", "高腰百褶裙", "樱花粉"),
+        item("shoes", "玛丽珍鞋", "奶油白"),
+      ],
+    }],
+  }), {
+    gender: "female",
+    scene: "约会",
+    requestId: "phase-look-test",
+    userInput: "甜妹穿搭",
+  });
+
+  assert.equal(result.looks.length, 1);
+  assert.equal(result.outfit_blueprint.style_identity, "甜美穿搭");
+  assert.deepEqual(
+    result.products.map((product) => product.item_name),
+    ["蕾丝上衣", "高腰百褶裙", "玛丽珍鞋"],
+  );
+});
+
+test("preserves a successful Blueprint when the Look phase times out", async () => {
+  let callCount = 0;
+  const client = {
+    chat: {
+      completions: {
+        create: async () => {
+          callCount += 1;
+          if (callCount === 1) {
+            return {choices: [{message: {content: JSON.stringify(
+              phasedBlueprintFixture(),
+            )}}]};
+          }
+          const timeout = new Error("Request timed out.");
+          timeout.code = "ETIMEDOUT";
+          throw timeout;
+        },
+      },
+    },
+  };
+  const result = await generatePhasedOutfitAnalysis({
+    outfitRequest: {
+      requestId: "phase-test-1",
+      request: "甜妹穿搭",
+      gender: "female",
+      scene: "约会",
+      itemBudget: "200-500",
+      outfitBudget: "800-1500",
+    },
+    requestContext: {gender: "female", style_expression: "feminine"},
+    userContent: [{type: "text", text: "甜妹穿搭"}],
+    sourceText: "甜妹穿搭",
+    client,
+    blueprintTimeoutMs: 1_000,
+    lookTimeoutMs: 1_000,
+  });
+
+  assert.equal(callCount, 2);
+  assert.equal(result.analysis.analysisMode, "blueprint_partial");
+  assert.equal(result.analysis.outfit_blueprint.blueprint_source, "ai_generated");
+  assert.equal(result.analysis.look_validation_summary.blueprint_preserved, true);
+  assert.equal(result.analysis.look_validation_summary.fallback_used, false);
 });
 
 test("respects explicit compatible API configuration", () => {
