@@ -750,6 +750,51 @@ test("AI rerank error cannot clear valid Taobao products", async () => {
   assert.equal(products[0].rerank_status, "fallback");
 });
 
+test("timeout fallback style profile cannot clear valid Taobao products", async () => {
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client: {
+      call: async (method) => response(method, [taobaoItem({
+        item_basic_info: {
+          item_id: "fallback-style-top-1",
+          title: "女士甜美短袖上衣",
+          category_name: "女士上衣",
+          pict_url: "//img.example.com/fallback-style-top-1.jpg",
+        },
+        publish_info: {click_url: "//s.click.taobao.com/fallback-style-top-1"},
+      })]),
+    },
+    reranker: null,
+    logger: {info() {}, warn() {}},
+  });
+  const fallbackStyleProfile = {
+    source_text: "甜美穿搭",
+    intent_priority_score: 90,
+    primary_style: "甜美穿搭",
+    must_have: ["甜美穿搭"],
+    positive_keywords: ["甜美穿搭"],
+    must_avoid: [],
+  };
+
+  const products = await provider.recommendForQueries([{
+    look_id: "fallback-look-1",
+    category: "top",
+    gender: "female",
+    item_name: "简洁合身上衣",
+    style: "甜美穿搭",
+    search_keywords: ["女士 甜美穿搭 简洁合身上衣"],
+  }], {
+    requestId: "timeout-fallback-products",
+    style_profile: fallbackStyleProfile,
+  });
+
+  assert.equal(products.length, 1);
+  assert.equal(products[0].product_id, "fallback-style-top-1");
+  assert.equal(products[0].source, "taobao");
+  assert.equal(products[0].is_mock, false);
+});
+
 test("recommendation cache reuses request, look, category and keyword results", async () => {
   let calls = 0;
   const provider = new TaobaoProductProvider({

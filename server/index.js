@@ -64,6 +64,7 @@ const {
 const {
   LOOK_INTENT_WEIGHTS,
   MIN_LOOK_STYLE_SCORE,
+  hasActionableStyleConstraints,
   hasStyleViolation,
   intentDebugSummary,
   lookIntentScore,
@@ -1492,7 +1493,8 @@ function boundedSearchKeyword(parts, maxLength = 160) {
 }
 
 function shouldEnforceCanonicalStyle(styleProfile = {}, styleSemantics = {}) {
-  return resolveIntentPriorityScore(styleProfile) >= 80 && (
+  return resolveIntentPriorityScore(styleProfile) >= 80 &&
+    hasActionableStyleConstraints(styleProfile) && (
     styleIntentAnchors(styleProfile, styleSemantics).length > 0 ||
     (styleProfile.preferred_items || []).length > 0 ||
     (styleProfile.must_avoid || []).length > 0 ||

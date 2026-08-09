@@ -82,6 +82,18 @@ function styleGateConstraints(styleProfile = {}) {
   });
 }
 
+function hasActionableStyleConstraints(styleProfile = {}) {
+  const constraints = styleGateConstraints(styleProfile);
+  const preferredItems = Array.isArray(styleProfile.preferred_items)
+    ? styleProfile.preferred_items
+    : Array.isArray(styleProfile.preferredItems)
+      ? styleProfile.preferredItems
+      : [];
+  return preferredItems.some((value) => String(value || "").trim()) &&
+    constraints.must_have.length > 0 &&
+    constraints.must_avoid.length > 0;
+}
+
 function evaluateStyleGate(product = {}, styleProfile = {}, intentPriorityScore) {
   const priority = Number.isFinite(Number(intentPriorityScore))
     ? Math.round(boundedScore(intentPriorityScore))
@@ -167,7 +179,8 @@ function hasStyleViolation(evidence, styleProfile = {}, styleSemantics = {}) {
     .some((token) => normalizedEvidence.includes(token));
 }
 
-function shouldRejectForStyle({intentPriorityScore, styleMatch}) {
+function shouldRejectForStyle({intentPriorityScore, styleMatch, enforce = true}) {
+  if (!enforce) return false;
   return boundedScore(intentPriorityScore) >= HIGH_INTENT_THRESHOLD &&
     boundedScore(styleMatch) < MIN_PRODUCT_STYLE_SCORE;
 }
@@ -216,6 +229,7 @@ module.exports = {
   MIN_PRODUCT_STYLE_SCORE,
   PRODUCT_INTENT_WEIGHTS,
   evaluateStyleGate,
+  hasActionableStyleConstraints,
   hasStyleViolation,
   intentDebugSummary,
   lookIntentScore,

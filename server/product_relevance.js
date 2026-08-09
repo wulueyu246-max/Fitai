@@ -424,9 +424,20 @@ function extractTaobaoSearchColors(evidence) {
 function firstTaobaoSearchStyle(style, evidence) {
   const normalizedStyle = normalizeText(style);
   const normalizedEvidence = normalizeText(evidence);
-  return TAOBAO_SEARCH_STYLES.find((term) =>
+  const knownStyle = TAOBAO_SEARCH_STYLES.find((term) =>
     normalizedStyle.includes(normalizeText(term))) ||
-    TAOBAO_SEARCH_STYLES.find((term) => normalizedEvidence.includes(normalizeText(term))) || "";
+    TAOBAO_SEARCH_STYLES.find((term) => normalizedEvidence.includes(normalizeText(term)));
+  if (knownStyle) return knownStyle;
+
+  // Unknown and newly coined style descriptions are valid. Keep a compact
+  // user-provided style signal in the exact Taobao query without turning the
+  // codebase into a style-name dictionary. Category-only fallbacks remain in
+  // buildTaobaoSearchPlan when this exact query has no result.
+  return normalizeWhitespace(style)
+    .split(/[，,。；;：:|/]/u, 1)[0]
+    .replace(/(?:穿搭|搭配|风格)$/u, "")
+    .trim()
+    .slice(0, 12);
 }
 
 function hasSpecificTaobaoCategory(query, requirement) {

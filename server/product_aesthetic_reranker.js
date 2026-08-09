@@ -7,6 +7,7 @@ const {
 const {
   PRODUCT_INTENT_WEIGHTS,
   evaluateStyleGate,
+  hasActionableStyleConstraints,
   intentDebugSummary,
   productIntentScore,
   resolveIntentPriorityScore,
@@ -740,6 +741,7 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
   const styleProfile = contextStyleProfile(context);
   const styleSemantics = contextStyleSemantics(context);
   const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
+  const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
   const candidates = new Map();
   const productGroups = new Map();
   safeGroups.forEach((group, groupIndex) => {
@@ -802,6 +804,7 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
     if (shouldRejectForStyle({
       intentPriorityScore,
       styleMatch: selectedStyleMatch,
+      enforce: enforceStyleThreshold,
     })) continue;
     const weatherMatch = score(item.weather_match_score) ?? 70;
     const recommendationReason = appendBudgetNote(
@@ -1057,6 +1060,7 @@ function ruleFallback(groups, selectionLimit, context = {}) {
   const styleProfile = contextStyleProfile(context);
   const styleSemantics = contextStyleSemantics(context);
   const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
+  const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
   return groups.flatMap((group) => group.candidates.slice(0, selectionLimit).map((product) => {
     const matchScore = budgetAdjustedMatchScore(product);
     const aestheticScore = boundedScore(
@@ -1079,7 +1083,11 @@ function ruleFallback(groups, selectionLimit, context = {}) {
       styleProfile,
       styleSemantics,
     }));
-    if (shouldRejectForStyle({intentPriorityScore, styleMatch})) return null;
+    if (shouldRejectForStyle({
+      intentPriorityScore,
+      styleMatch,
+      enforce: enforceStyleThreshold,
+    })) return null;
     const weatherMatch = boundedScore(product.weather_match_score ?? 70);
     const diversity = 100;
     const finalScore = compositeProductScore({
@@ -1143,6 +1151,7 @@ function normalizeGroups(groups, selectionLimit, context = {}) {
   const styleProfile = contextStyleProfile(context);
   const styleSemantics = contextStyleSemantics(context);
   const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
+  const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
   return (Array.isArray(groups) ? groups : []).map((group) => {
     const requirement = compactObject(group?.requirement || {});
     const assessedCandidates = Array.isArray(group?.candidates)
@@ -1174,6 +1183,7 @@ function normalizeGroups(groups, selectionLimit, context = {}) {
         .filter((product) => !shouldRejectForStyle({
           intentPriorityScore,
           styleMatch: product.style_match_score,
+          enforce: enforceStyleThreshold,
         }))
         .filter((product) => !isAestheticJunk(product))
       : [];

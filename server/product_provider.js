@@ -18,6 +18,7 @@ const {
 } = require("./product_relevance");
 const {
   evaluateStyleGate,
+  hasActionableStyleConstraints,
   intentDebugSummary,
   resolveIntentPriorityScore,
   shouldRejectForStyle,
@@ -488,6 +489,7 @@ class TaobaoProductProvider extends ProductProvider {
     const styleSemantics = filters.style_semantics || filters.styleSemantics ||
       filters.recommendation_context?.style_semantics || {};
     const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
+    const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
     const styleGatedProducts = products.filter((product) => {
       const gate = evaluateStyleGate(product, styleProfile, intentPriorityScore);
       if (!gate.allowed) {
@@ -525,6 +527,7 @@ class TaobaoProductProvider extends ProductProvider {
       .filter((product) => !shouldRejectForStyle({
         intentPriorityScore,
         styleMatch: product.style_match_score,
+        enforce: enforceStyleThreshold,
       }))
       .sort((left, right) =>
         right.style_match_score - left.style_match_score ||

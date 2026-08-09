@@ -1068,6 +1068,8 @@ test("AI timeout fallback keeps weather context out of product search keywords",
 
   const keywords = analysis.looks.flatMap((look) =>
     look.items.flatMap((item) => item.search_keywords));
+  const itemNames = analysis.looks.flatMap((look) =>
+    look.items.map((item) => item.item_name));
 
   assert.equal(analysis.analysisMode, "rule_fallback");
   assert.equal(analysis.fallbackReason, "AI_TIMEOUT");
@@ -1077,6 +1079,8 @@ test("AI timeout fallback keeps weather context out of product search keywords",
   assert.ok(keywords.every((keyword) => keyword.length <= 160));
   assert.ok(keywords.every((keyword) => !keyword.includes("当前实时天气")));
   assert.ok(keywords.every((keyword) => !keyword.includes("穿搭方案必须遵循")));
+  assert.ok(keywords.some((keyword) => keyword.includes("甜美穿搭")));
+  assert.equal(itemNames.some((name) => /甜美穿搭(?:上衣|下装|鞋履)/u.test(name)), false);
 });
 
 test("AI Style Interpreter preserves an unknown blended style through Look parsing", () => {

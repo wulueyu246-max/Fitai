@@ -44,6 +44,20 @@ test("Taobao keyword normalization removes duplicate gender and splits color alt
     query.includes("/") || /女士.*\s女(?:\s|$)/.test(query)));
 });
 
+test("unknown style wording remains in the exact query with a category-only fallback", () => {
+  const plan = buildTaobaoSearchPlan({
+    category: "top",
+    gender: "female",
+    item_name: "简洁合身上衣",
+    style: "甜美穿搭",
+    search_keywords: ["女士 甜美穿搭 简洁合身上衣"],
+  });
+
+  assert.equal(plan.exact, "女士 甜美 上衣");
+  assert.ok(plan.fallbacks.includes("女士 上衣"));
+  assert.ok([plan.exact, ...plan.fallbacks].every((query) => query.includes("上衣")));
+});
+
 test("Taobao fallback plans always retain a concrete category", () => {
   for (const requirement of [
     {

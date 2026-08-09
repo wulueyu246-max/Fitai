@@ -5,6 +5,7 @@ const {
   LOOK_INTENT_WEIGHTS,
   PRODUCT_INTENT_WEIGHTS,
   evaluateStyleGate,
+  hasActionableStyleConstraints,
   productIntentScore,
   lookIntentScore,
   resolveIntentPriorityScore,
@@ -36,6 +37,29 @@ test("an explicit user style receives high priority without a style-name mapping
   const normalized = normalizeStyleProfile({source_text: "甜妹穿搭"});
   assert.ok(normalized.intent_priority_score >= 85);
   assert.equal(resolveIntentPriorityScore(normalized), 90);
+});
+
+test("an uninterpreted timeout style does not hard-reject every real product", () => {
+  const fallbackProfile = normalizeStyleProfile({
+    source_text: "甜美穿搭",
+    intent_priority_score: 90,
+    primary_style: "甜美穿搭",
+    must_have: ["甜美穿搭"],
+    positive_keywords: ["甜美穿搭"],
+  });
+  const styleMatch = styleMatchScore({
+    evidence: "女士甜美短袖上衣",
+    relevanceScore: 80,
+    styleProfile: fallbackProfile,
+  });
+
+  assert.equal(hasActionableStyleConstraints(fallbackProfile), false);
+  assert.ok(styleMatch < 50);
+  assert.equal(shouldRejectForStyle({
+    intentPriorityScore: fallbackProfile.intent_priority_score,
+    styleMatch,
+    enforce: hasActionableStyleConstraints(fallbackProfile),
+  }), false);
 });
 
 test("the same immutable weights flow through recommendation context", () => {
