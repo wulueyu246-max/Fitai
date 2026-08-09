@@ -1,4 +1,5 @@
 import 'outfit_plan.dart';
+import 'outfit_blueprint.dart';
 import 'outfit_look.dart';
 import 'product.dart';
 import 'product_recommendation.dart';
@@ -20,6 +21,7 @@ class OutfitAnalysis {
     this.styleExpression = 'auto',
     this.styleSemantics = const StyleSemantics(),
     this.styleProfile = const StyleProfile(),
+    this.outfitBlueprint = const OutfitBlueprint(),
     this.analysisMode = 'ai',
     this.stylingStrategy = const StylingStrategy(),
     this.recommendedProducts = const [],
@@ -62,6 +64,9 @@ class OutfitAnalysis {
       ),
       styleProfile: StyleProfile.fromJson(
         json['style_profile'] ?? json['styleProfile'],
+      ),
+      outfitBlueprint: OutfitBlueprint.fromJson(
+        json['outfit_blueprint'] ?? json['outfitBlueprint'],
       ),
       analysisMode: json['analysis_mode'] is String
           ? json['analysis_mode'] as String
@@ -191,6 +196,9 @@ class OutfitAnalysis {
       styleProfile: StyleProfile.fromJson(
         json['style_profile'] ?? json['styleProfile'],
       ),
+      outfitBlueprint: OutfitBlueprint.fromJson(
+        json['outfit_blueprint'] ?? json['outfitBlueprint'],
+      ),
       analysisMode: _readOptionalAliasedString(
         json,
         const ['analysisMode', 'analysis_mode'],
@@ -224,6 +232,7 @@ class OutfitAnalysis {
   final String styleExpression;
   final StyleSemantics styleSemantics;
   final StyleProfile styleProfile;
+  final OutfitBlueprint outfitBlueprint;
   final String analysisMode;
   final StylingStrategy stylingStrategy;
   final List<Product> recommendedProducts;
@@ -248,6 +257,7 @@ class OutfitAnalysis {
     String? styleExpression,
     StyleSemantics? styleSemantics,
     StyleProfile? styleProfile,
+    OutfitBlueprint? outfitBlueprint,
     String? analysisMode,
     StylingStrategy? stylingStrategy,
     List<Product>? recommendedProducts,
@@ -270,6 +280,7 @@ class OutfitAnalysis {
       styleExpression: styleExpression ?? this.styleExpression,
       styleSemantics: styleSemantics ?? this.styleSemantics,
       styleProfile: styleProfile ?? this.styleProfile,
+      outfitBlueprint: outfitBlueprint ?? this.outfitBlueprint,
       analysisMode: analysisMode ?? this.analysisMode,
       stylingStrategy: stylingStrategy ?? this.stylingStrategy,
       recommendedProducts: recommendedProducts ?? this.recommendedProducts,
@@ -296,6 +307,7 @@ class OutfitAnalysis {
       'style_expression': styleExpression,
       'style_semantics': styleSemantics.toJson(),
       'style_profile': styleProfile.toJson(),
+      'outfit_blueprint': outfitBlueprint.toJson(),
       'analysis_mode': analysisMode,
       'styling_strategy': stylingStrategy.toJson(),
       'recommended_products':

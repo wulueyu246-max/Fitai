@@ -79,6 +79,9 @@ const ACCESSORY_SUBCATEGORY_TERMS = Object.freeze({
   scarf: Object.freeze(["丝巾", "围巾", "披肩", "scarf"]),
   glasses: Object.freeze(["眼镜", "墨镜", "太阳镜", "glasses", "sunglasses"]),
   watch: Object.freeze(["手表", "腕表", "watch"]),
+  socks: Object.freeze([
+    "袜子", "丝袜", "长袜", "短袜", "连裤袜", "过膝袜", "stocking", "socks", "hosiery",
+  ]),
 });
 
 const NON_FASHION_PRODUCT_TERMS = Object.freeze([
@@ -101,6 +104,7 @@ const SEARCH_SUBCATEGORY_LABELS = Object.freeze({
   scarf: "丝巾",
   glasses: "眼镜",
   watch: "腕表",
+  socks: "袜子",
 });
 
 const CATEGORY_LABELS = Object.freeze({
@@ -202,6 +206,9 @@ function normalizeProductCategory(value) {
   const normalized = normalizeText(value);
   if (!normalized) return "";
   if (containsAny(normalized, NON_FASHION_PRODUCT_TERMS)) return "";
+  if (/袜|丝袜|连裤袜|(^|[^a-z])(socks?|stockings?|hosiery)([^a-z]|$)/.test(normalized)) {
+    return "accessory";
+  }
   if (/连衣裙|礼服裙|裙装|(^|[^a-z])dress([^a-z]|$)/.test(normalized)) return "dress";
   if (containsAny(normalized, ACCESSORY_SUBCATEGORY_TERMS.bag) ||
       /(^|[^a-z])(bag|handbag|tote|backpack)([^a-z]|$)/.test(normalized)) return "bag";
@@ -236,7 +243,7 @@ function normalizeSearchSubcategory(value, itemName = "", category = "") {
   }
   const evidence = normalizeText(`${value || ""} ${itemName || ""}`);
   for (const subcategory of [
-    "bag", "hat", "jewelry", "belt", "scarf", "glasses", "watch",
+    "bag", "hat", "jewelry", "belt", "scarf", "glasses", "watch", "socks",
   ]) {
     if (containsAny(evidence, ACCESSORY_SUBCATEGORY_TERMS[subcategory])) {
       return subcategory;
@@ -269,6 +276,14 @@ function normalizeProductRequirement(input = {}, context = {}) {
     "negative_keywords",
     30,
   );
+  const sourceElements = normalizeStringList(
+    input.source_elements || input.sourceElements || [],
+    "source_elements",
+    20,
+  );
+  const translatedQueries = normalizeTranslatedQueries(
+    input.translated_queries || input.translatedQueries,
+  );
   return {
     look_id: optionalText(input.look_id || input.lookId || context.look_id || context.lookId, "look_id"),
     category,
@@ -280,6 +295,8 @@ function normalizeProductRequirement(input = {}, context = {}) {
       context.recommendation_context?.style_profile || {},
       input.style || context.style,
     ),
+    blueprint_required: input.blueprint_required === true ||
+      context.blueprint_required === true,
     item_name: itemName,
     color: optionalText(input.color || context.color, "color"),
     material: optionalText(input.material || context.material, "material"),
@@ -293,12 +310,39 @@ function normalizeProductRequirement(input = {}, context = {}) {
       ...(gender === "male" ? MALE_NEGATIVE_TERMS : []),
       ...(gender === "female" ? FEMALE_NEGATIVE_TERMS : []),
     ]),
+    query_reason: optionalLooseText(
+      input.query_reason || input.queryReason || context.query_reason,
+    ),
+    source_elements: sourceElements,
+    translated_queries: translatedQueries,
     explicit_user_search: input.explicit_user_search === true ||
       context.explicit_user_search === true,
     user_search_keyword: optionalLooseText(
       input.user_search_keyword || context.user_search_keyword,
     ),
   };
+}
+
+function normalizeTranslatedQueries(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) {
+    throw new TypeError("translated_queries must be an array");
+  }
+  return value.slice(0, 3).map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new TypeError("translated_queries entries must be objects");
+    }
+    return {
+      category: optionalLooseText(entry.category),
+      query: optionalLooseText(entry.query),
+      source_elements: normalizeStringList(
+        entry.source_elements || entry.sourceElements || [],
+        "translated_queries.source_elements",
+        12,
+      ),
+      query_reason: optionalLooseText(entry.query_reason || entry.queryReason),
+    };
+  }).filter((entry) => entry.query);
 }
 
 function buildSearchKeywords(input = {}, context = {}) {
@@ -531,7 +575,9 @@ function productQualityBlock(product, requirement = {}) {
       blocked_keyword: lowQualityKeyword,
     };
   }
-  if (explicitlyRequestsLowValueProduct(requirement)) return null;
+  if (explicitlyRequestsLowValueProduct(requirement) ||
+      (requirement.blueprint_required === true &&
+       requirement.search_subcategory === "socks")) return null;
   for (const group of LOW_VALUE_PRODUCT_GROUPS) {
     const blockedKeyword = group.terms.find((term) => evidence.includes(normalizeText(term)));
     if (blockedKeyword) {

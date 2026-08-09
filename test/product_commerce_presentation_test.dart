@@ -143,6 +143,9 @@ void main() {
       'source': 'taobao',
       'is_mock': false,
       'relevance_score': 88,
+      'blueprint_match_score': 96,
+      'matched_elements': ['玛丽珍', '女性化', '复古甜美'],
+      'conflict_elements': <String>[],
       'brand_quality_score': 85,
       'brand_fallback': false,
       'ai_taste_score': 94,
@@ -157,6 +160,9 @@ void main() {
     });
 
     expect(parsed.relevanceScore, 88);
+    expect(parsed.blueprintMatchScore, 96);
+    expect(parsed.matchedElements, ['玛丽珍', '女性化', '复古甜美']);
+    expect(parsed.conflictElements, isEmpty);
     expect(parsed.brandQualityScore, 85);
     expect(parsed.brandFallback, isFalse);
     expect(parsed.aiTasteScore, 94);

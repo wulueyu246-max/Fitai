@@ -24,6 +24,10 @@ const {
   shouldRejectForStyle,
   styleMatchScore,
 } = require("./intent_priority");
+const {
+  blueprintMatchAssessment,
+  blueprintMatchPassesHardGate,
+} = require("./outfit_blueprint");
 
 const PRODUCT_CATEGORIES = SUPPORTED_PRODUCT_CATEGORIES;
 const DEFAULT_SAMPLE_MATERIAL_ID = "28029";
@@ -237,6 +241,11 @@ class TaobaoProductProvider extends ProductProvider {
         cache_hit: true,
         total_ms: 0,
       });
+      logProductBlueprintSummaries(
+        this.logger,
+        cached,
+        context.requestId || undefined,
+      );
       return cloneProductArray(cached);
     }
     const inflight = this.inflightRecommendations.get(cacheKey);
@@ -362,7 +371,45 @@ class TaobaoProductProvider extends ProductProvider {
       const finalStyleProfile = context.style_profile || context.styleProfile ||
         context.recommendation_context?.style_profile || {};
       const finalIntentPriority = resolveIntentPriorityScore(finalStyleProfile);
-      products = products.filter((product) => {
+      const finalOutfitBlueprint = context.outfit_blueprint ||
+        context.outfitBlueprint ||
+        context.recommendation_context?.outfit_blueprint || {};
+      products = products.flatMap((product) => {
+        const requirement = values.find((value) =>
+          String(value.look_id || value.lookId || "") ===
+            String(product.look_id || "") &&
+          normalizeProductCategory(value.category) === product.category) ||
+          values.find((value) =>
+            normalizeProductCategory(value.category) === product.category) || {};
+        const blueprintAssessment = blueprintMatchAssessment(
+          product,
+          requirement,
+          finalOutfitBlueprint,
+        );
+        const blueprintScore = Number.isFinite(Number(product.blueprint_match_score))
+          ? Number(product.blueprint_match_score)
+          : blueprintAssessment.score;
+        const finalBlueprintAssessment = {
+          ...blueprintAssessment,
+          score: blueprintScore,
+        };
+        if (!blueprintMatchPassesHardGate(
+          finalBlueprintAssessment,
+          finalIntentPriority,
+        )) {
+          this.logger.info?.("Outfit Blueprint rejected final product", {
+            request_id: context.requestId || undefined,
+            product_title: product.title,
+            category: product.category,
+            blueprint_score: blueprintScore,
+            matched_elements: product.matched_elements ||
+              blueprintAssessment.matched_elements,
+            conflict_elements: product.conflict_elements ||
+              blueprintAssessment.conflict_elements,
+            intent_priority_score: finalIntentPriority,
+          });
+          return [];
+        }
         const gate = evaluateStyleGate(
           product,
           finalStyleProfile,
@@ -377,7 +424,14 @@ class TaobaoProductProvider extends ProductProvider {
             intent_priority_score: gate.intent_priority_score,
           });
         }
-        return gate.allowed;
+        return gate.allowed ? [{
+          ...product,
+          blueprint_match_score: blueprintScore,
+          matched_elements: product.matched_elements ||
+            blueprintAssessment.matched_elements,
+          conflict_elements: product.conflict_elements ||
+            blueprintAssessment.conflict_elements,
+        }] : [];
       });
       const productAiMs = Date.now() - productAiStartedAt;
       this.logger.info?.("AI最终选择", {
@@ -403,8 +457,14 @@ class TaobaoProductProvider extends ProductProvider {
           ? (fallbackUsed ? "fallback_success" : "success")
           : "empty",
       });
-      return uniqueProducts(sortProductsByCategoryPriority(products))
+      const finalProducts = uniqueProducts(sortProductsByCategoryPriority(products))
         .slice(0, values.length * 4);
+      logProductBlueprintSummaries(
+        this.logger,
+        finalProducts,
+        context.requestId || undefined,
+      );
+      return finalProducts;
     } catch (error) {
       this.status = "error";
       throw asProductProviderError(error);
@@ -453,6 +513,8 @@ class TaobaoProductProvider extends ProductProvider {
       category: requirement.category,
       search_subcategory: requirement.search_subcategory || undefined,
       item_name: requirement.item_name,
+      query_reason: requirement.query_reason || undefined,
+      source_elements: requirement.source_elements,
     });
     const candidateLimit = Math.min(positiveInteger(filters.limit, 20), 20);
     let products = [];
@@ -490,7 +552,35 @@ class TaobaoProductProvider extends ProductProvider {
       filters.recommendation_context?.style_semantics || {};
     const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
     const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
-    const styleGatedProducts = products.filter((product) => {
+    const outfitBlueprint = filters.outfit_blueprint || filters.outfitBlueprint ||
+      filters.recommendation_context?.outfit_blueprint || {};
+    const blueprintGatedProducts = products.flatMap((product) => {
+      const assessment = blueprintMatchAssessment(
+        product,
+        requirement,
+        outfitBlueprint,
+      );
+      if (!blueprintMatchPassesHardGate(assessment, intentPriorityScore)) {
+        this.logger.info?.("Outfit Blueprint rejected candidate", {
+          title: product.title,
+          look_id: requirement.look_id || undefined,
+          category: requirement.category,
+          blueprint_score: assessment.score,
+          matched_elements: assessment.matched_elements,
+          conflict_elements: assessment.conflict_elements,
+          matched_avoid_items: assessment.matched_avoid,
+          intent_priority_score: intentPriorityScore,
+        });
+        return [];
+      }
+      return [{
+        ...product,
+        blueprint_match_score: assessment.score,
+        matched_elements: assessment.matched_elements,
+        conflict_elements: assessment.conflict_elements,
+      }];
+    });
+    const styleGatedProducts = blueprintGatedProducts.filter((product) => {
       const gate = evaluateStyleGate(product, styleProfile, intentPriorityScore);
       if (!gate.allowed) {
         this.logger.info?.("Style Gate rejected candidate", {
@@ -530,6 +620,7 @@ class TaobaoProductProvider extends ProductProvider {
         enforce: enforceStyleThreshold,
       }))
       .sort((left, right) =>
+        right.blueprint_match_score - left.blueprint_match_score ||
         right.style_match_score - left.style_match_score ||
         right.budget_preference_score - left.budget_preference_score ||
         right.relevance_score - left.relevance_score);
@@ -548,6 +639,7 @@ class TaobaoProductProvider extends ProductProvider {
       gender: requirement.gender,
       category: requirement.category,
       candidateCount: products.length,
+      blueprintPassCount: blueprintGatedProducts.length,
       budgetPreferredCount: budgetAssessed.filter((product) =>
         product.budget_preference_score >= 80).length,
     });
@@ -1226,6 +1318,23 @@ function summarizeProductsByLook(products) {
     counts[lookId] = (counts[lookId] || 0) + 1;
   }
   return counts;
+}
+
+function logProductBlueprintSummaries(logger, products, requestId) {
+  (Array.isArray(products) ? products : []).forEach((product, index) => {
+    logger.info?.("product_blueprint_summary", {
+      request_id: requestId,
+      product_title: product.title,
+      blueprint_score: Number(product.blueprint_match_score),
+      matched_elements: Array.isArray(product.matched_elements)
+        ? product.matched_elements
+        : [],
+      conflict_elements: Array.isArray(product.conflict_elements)
+        ? product.conflict_elements
+        : [],
+      final_rank: index + 1,
+    });
+  });
 }
 
 function recommendationCacheKey(queries, context = {}) {

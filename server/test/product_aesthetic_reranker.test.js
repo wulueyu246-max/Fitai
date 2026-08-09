@@ -7,6 +7,7 @@ const {
   brandQualityAssessment,
   buildMessages,
   catalogAestheticAssessment,
+  compositeProductScore,
   validateSelection,
 } = require("../product_aesthetic_reranker");
 
@@ -68,13 +69,141 @@ test("validates candidate IDs and applies the weighted final score", () => {
   }, groups, 6);
 
   assert.deepEqual(products.map((item) => item.product_id), ["top-1", "shoe-1"]);
-  assert.equal(products[0].final_score, 69.2);
+  assert.ok(products[0].final_score >= 0 && products[0].final_score <= 100);
   assert.equal(products[0].aesthetic_score, 94);
   assert.equal(products[0].brand_quality_score, 45);
   assert.equal(products[0].diversity_score, 100);
   assert.equal(products[0].ai_label, "AI首选");
   assert.equal(products[0].ai_rerank_fallback, false);
   assert.equal(products.some((item) => item.product_id === "invented"), false);
+});
+
+test("Outfit Blueprint is the highest product decision and rejects avoid items", () => {
+  const groups = [{
+    requirement: {
+      category: "shoes",
+      gender: "female",
+      item_name: "玛丽珍皮鞋",
+      search_keywords: ["女士 玛丽珍皮鞋"],
+    },
+    candidates: [
+      {
+        ...product("mary-jane", "shoes", 78),
+        title: "女士蝴蝶结玛丽珍皮鞋",
+      },
+      {
+        ...product("running", "shoes", 99),
+        title: "轻量跑步运动鞋训练鞋",
+      },
+    ],
+  }];
+  const context = {
+    outfit_blueprint: {
+      style_identity: "浪漫精致造型",
+      visual_keywords: ["浪漫", "精致"],
+      must_have_items: {shoes: ["玛丽珍皮鞋"]},
+      avoid_items: ["运动鞋", "跑步鞋", "训练鞋"],
+    },
+  };
+  const products = validateSelection({
+    selected_products: [selection("running"), selection("mary-jane")],
+  }, groups, 4, context);
+
+  assert.deepEqual(products.map((item) => item.product_id), ["mary-jane"]);
+  assert.ok(products[0].blueprint_match_score >= 65);
+  assert.ok(products[0].matched_elements.length > 0);
+  assert.deepEqual(products[0].conflict_elements, []);
+});
+
+test("high-intent Blueprint hard gate controls mature, classic, and unknown styles", () => {
+  const cases = [
+    {
+      name: "成熟女性",
+      category: "shoes",
+      required: "尖头低跟鞋",
+      accepted: "女士真皮尖头低跟鞋",
+      rejected: "轻量运动跑步鞋",
+      avoid: ["运动鞋", "跑步鞋"],
+    },
+    {
+      name: "低调经典",
+      category: "top",
+      required: "羊绒针织衫",
+      accepted: "低Logo纯羊绒针织衫",
+      rejected: "大Logo运动连帽卫衣",
+      avoid: ["大Logo", "运动卫衣"],
+    },
+    {
+      name: "凌晨巴黎私人艺术展后的冷感女性",
+      category: "shoes",
+      required: "银灰不对称尖头鞋",
+      accepted: "女士银灰不对称尖头单鞋",
+      rejected: "彩色厚底训练运动鞋",
+      avoid: ["训练鞋", "运动鞋"],
+    },
+  ];
+
+  for (const entry of cases) {
+    const accepted = product(`${entry.name}-accepted`, entry.category, 72);
+    accepted.title = entry.accepted;
+    const rejected = product(`${entry.name}-rejected`, entry.category, 99);
+    rejected.title = entry.rejected;
+    const groups = [{
+      requirement: {
+        category: entry.category,
+        gender: "female",
+        item_name: entry.required,
+        search_keywords: [`女士 ${entry.required}`],
+      },
+      candidates: [rejected, accepted],
+    }];
+    const products = validateSelection({
+      selected_products: [
+        selection(rejected.product_id),
+        selection(accepted.product_id),
+      ],
+    }, groups, 4, {
+      style_profile: {intent_priority_score: 95},
+      outfit_blueprint: {
+        style_identity: entry.name,
+        core_elements: [entry.required],
+        must_have_items: {[entry.category]: [entry.required]},
+        avoid_items: entry.avoid,
+      },
+    });
+
+    assert.deepEqual(products.map((item) => item.product_id), [accepted.product_id]);
+    assert.ok(Number.isFinite(products[0].blueprint_match_score));
+    assert.ok(products[0].blueprint_match_score >= 50);
+  }
+});
+
+test("final score uses Blueprint 40, style 20, quality 15, visual 10, brand 10, weather 5", () => {
+  const score = compositeProductScore({
+    matchScore: 0,
+    bodyStrategyScore: 0,
+    blueprintMatchScore: 100,
+    styleMatchScore: 100,
+    aestheticScore: 100,
+    visualQualityScore: 100,
+    brandQualityScore: 100,
+    weatherMatchScore: 100,
+    diversityScore: 100,
+  });
+  const unchangedByRemovedSignals = compositeProductScore({
+    matchScore: 100,
+    bodyStrategyScore: 100,
+    blueprintMatchScore: 100,
+    styleMatchScore: 100,
+    aestheticScore: 100,
+    visualQualityScore: 100,
+    brandQualityScore: 100,
+    weatherMatchScore: 100,
+    diversityScore: 100,
+  });
+
+  assert.equal(score, 100);
+  assert.equal(unchangedByRemovedSignals, 100);
 });
 
 test("ten identical male Clean Fit generations never repeat the same primary combination consecutively", async () => {

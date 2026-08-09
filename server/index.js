@@ -46,6 +46,15 @@ const {
   normalizeProductRequirement,
 } = require("./product_relevance");
 const {ProductAestheticReranker} = require("./product_aesthetic_reranker");
+const {
+  applyBlueprintToRequirement,
+  blueprintHasCoreItems,
+  enrichBlueprintFromLooks,
+  normalizeOutfitBlueprint,
+} = require("./outfit_blueprint");
+const {
+  translateBlueprintSearchRequirement,
+} = require("./blueprint_search_translator");
 const {TaobaoService} = require("./taobao_service");
 const {
   assertContextGender,
@@ -1065,6 +1074,25 @@ function normalizeAiOutfitPayload(payload) {
   if (payload.style != null) {
     normalized.style = localizedStyleText(payload.style);
   }
+  const rawBlueprint = payload.outfit_blueprint || payload.outfitBlueprint;
+  if (rawBlueprint && typeof rawBlueprint === "object" &&
+      !Array.isArray(rawBlueprint)) {
+    normalized.outfit_blueprint = {
+      ...rawBlueprint,
+      style_identity: localizedStyleText(
+        rawBlueprint.style_identity || rawBlueprint.styleIdentity,
+        normalized.style,
+      ),
+      character_impression: userFacingChineseText(
+        rawBlueprint.character_impression || rawBlueprint.characterImpression,
+        "造型气质与用户本次风格要求保持一致",
+      ),
+      occasion_strategy: userFacingChineseText(
+        rawBlueprint.occasion_strategy || rawBlueprint.occasionStrategy,
+        "在不改变核心风格的前提下适配本次场景",
+      ),
+    };
+  }
   if (payload.recommendations &&
       typeof payload.recommendations === "object" &&
       !Array.isArray(payload.recommendations)) {
@@ -1170,6 +1198,31 @@ function isSupportedAiGender(value) {
     /^(?:男性|男士|男生|男|女性|女士|女生|女|中性|男女同款)$/.test(normalized);
 }
 
+function finalizeBlueprintSearchRequirement(
+  requirement,
+  outfitBlueprint,
+  variantIndex = 0,
+  {preserveExistingKeywords = false} = {},
+) {
+  const translated = translateBlueprintSearchRequirement(
+    applyBlueprintToRequirement(requirement, outfitBlueprint, variantIndex),
+    outfitBlueprint,
+    {variantIndex},
+  );
+  const normalized = normalizeProductRequirement(translated);
+  return {
+    ...normalized,
+    ...(requirement.accessory_type
+      ? {accessory_type: requirement.accessory_type}
+      : {}),
+    search_keywords: translated.query_reason
+      ? normalized.search_keywords
+      : (preserveExistingKeywords && normalized.search_keywords.length > 0
+        ? normalized.search_keywords
+        : buildSearchKeywords(normalized)),
+  };
+}
+
 function parseOutfitAnalysis(content, context = {}) {
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("AI 返回内容为空");
@@ -1231,6 +1284,11 @@ function parseOutfitAnalysis(content, context = {}) {
       context.styleExpression,
     styleProfile,
   });
+  const outfitBlueprint = normalizeOutfitBlueprint(
+    context.outfitBlueprint || context.outfit_blueprint ||
+      parsed.outfit_blueprint || parsed.outfitBlueprint,
+    {styleProfile, styleSemantics},
+  );
 
   const stylingStrategy = normalizeStylingStrategy(
     parsed.styling_strategy || parsed.stylingStrategy,
@@ -1293,7 +1351,7 @@ function parseOutfitAnalysis(content, context = {}) {
       throw new Error(`AI 返回 products[${index}] 必须是对象`);
     }
     try {
-      const requirement = normalizeProductRequirement({
+      const initialRequirement = normalizeProductRequirement({
         ...product,
         look_id: look.look_id,
         gender: Object.prototype.hasOwnProperty.call(product, "gender")
@@ -1307,13 +1365,17 @@ function parseOutfitAnalysis(content, context = {}) {
           product.negativeKeywords ||
         [],
       });
+      const requirement = finalizeBlueprintSearchRequirement(
+        initialRequirement,
+        outfitBlueprint,
+        index,
+      );
       if (look.gender !== "unisex" && requirement.gender !== look.gender) {
         throw new Error("单品 gender 与所属 Look gender 不一致");
       }
       return {
         ...requirement,
         accessory_type: accessoryTypeForItem(product),
-        search_keywords: buildSearchKeywords(requirement),
       };
     } catch (error) {
       throw new Error(`AI 返回 products[${index}] 结构无效：${error.message}`);
@@ -1371,6 +1433,7 @@ function parseOutfitAnalysis(content, context = {}) {
     styleExpression,
   });
   const products = looks.flatMap((look) => look.items);
+  const finalOutfitBlueprint = enrichBlueprintFromLooks(outfitBlueprint, looks);
   const finalRecommendations = intentAlignedRecommendations(
     recommendations,
     looks,
@@ -1383,6 +1446,7 @@ function parseOutfitAnalysis(content, context = {}) {
     style_expression: styleExpression,
     style_semantics: styleSemantics,
     style_profile: styleProfile,
+    outfit_blueprint: finalOutfitBlueprint,
     bodyProfile: bodyProfile.trim(),
     style: parsed.style.trim(),
     style_upgrade_level: styleUpgradeLevel,
@@ -2471,6 +2535,64 @@ function parseAiPayloadBestEffort(content) {
   }
 }
 
+function semanticFallbackBlueprint(
+  value,
+  requestedStyle,
+  {styleProfile = {}, styleSemantics = {}} = {},
+) {
+  const source = value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
+  const normalized = normalizeOutfitBlueprint({
+    ...source,
+    blueprint_source: "semantic_fallback",
+  }, {
+    styleProfile,
+    styleSemantics,
+    defaultSource: "semantic_fallback",
+  });
+  const mustHaveItems = Object.fromEntries(Object.entries(
+    normalized.must_have_items,
+  ).map(([category, items]) => [category, [...items]]));
+
+  for (const itemName of Array.isArray(styleProfile.preferred_items)
+    ? styleProfile.preferred_items
+    : []) {
+    const category = normalizeProductCategory(itemName);
+    if (!Object.prototype.hasOwnProperty.call(mustHaveItems, category)) continue;
+    if (!mustHaveItems[category].includes(itemName)) {
+      mustHaveItems[category].push(itemName);
+    }
+  }
+
+  return normalizeOutfitBlueprint({
+    ...normalized,
+    blueprint_source: "semantic_fallback",
+    style_identity: normalized.style_identity || requestedStyle,
+    must_have_items: mustHaveItems,
+  }, {
+    styleProfile,
+    styleSemantics,
+    defaultSource: "semantic_fallback",
+  });
+}
+
+function hasConcreteSemanticFallback(styleInterpretation, requestedStyle = "") {
+  if (!styleInterpretation || typeof styleInterpretation !== "object") return false;
+  const styleProfile = normalizeStyleProfile(styleInterpretation.style_profile, {
+    sourceText: requestedStyle,
+  });
+  const styleSemantics = normalizeStyleSemantics(
+    styleInterpretation.style_semantics,
+  );
+  const blueprint = semanticFallbackBlueprint(
+    styleInterpretation.outfit_blueprint,
+    requestedStyle,
+    {styleProfile, styleSemantics},
+  );
+  return blueprintHasCoreItems(blueprint);
+}
+
 function createBasicFallbackOutfitAnalysis(
   outfitRequest,
   reason = "AI_OUTPUT_INVALID",
@@ -2491,6 +2613,15 @@ function createBasicFallbackOutfitAnalysis(
     rawStyleProfile.mustHave || rawStyleProfile.positive_keywords || [];
   const existingPositive = rawStyleProfile.positive_keywords ||
     rawStyleProfile.positiveKeywords || existingMustHave;
+  const existingPreferredItems = rawStyleProfile.preferred_items ||
+    rawStyleProfile.preferredItems || [];
+  const existingMustAvoid = rawStyleProfile.must_avoid ||
+    rawStyleProfile.mustAvoid || rawStyleProfile.negative_keywords || [];
+  const sourceAnchoredCoreItems = [
+    `${requestedStyle}风格上衣`,
+    `${requestedStyle}风格下装`,
+    `${requestedStyle}风格鞋履`,
+  ];
   const rawIntentPriority = Number(
     rawStyleProfile.intent_priority_score ||
     rawStyleProfile.intentPriorityScore,
@@ -2510,6 +2641,17 @@ function createBasicFallbackOutfitAnalysis(
     positive_keywords: Array.isArray(existingPositive) && existingPositive.length > 0
       ? existingPositive
       : [requestedStyle],
+    preferred_items: Array.isArray(existingPreferredItems) &&
+      existingPreferredItems.length > 0
+      ? existingPreferredItems
+      : sourceAnchoredCoreItems,
+    must_avoid: Array.isArray(existingMustAvoid) && existingMustAvoid.length > 0
+      ? existingMustAvoid
+      : [`与“${requestedStyle}”明显冲突的单品`],
+    negative_keywords: Array.isArray(existingMustAvoid) &&
+      existingMustAvoid.length > 0
+      ? existingMustAvoid
+      : [`与“${requestedStyle}”明显冲突的单品`],
   }, {sourceText: requestedStyle});
   const styleSemantics = normalizeStyleSemantics({
     ...rawStyleSemantics,
@@ -2518,6 +2660,12 @@ function createBasicFallbackOutfitAnalysis(
       ? rawStyleSemantics.must_express
       : [requestedStyle],
   });
+  const outfitBlueprint = semanticFallbackBlueprint(
+    styleInterpretation?.outfit_blueprint ||
+      normalizedPayload.outfit_blueprint || normalizedPayload.outfitBlueprint,
+    requestedStyle,
+    {styleProfile, styleSemantics},
+  );
   let stylingStrategy;
   try {
     stylingStrategy = normalizeStylingStrategy(
@@ -2544,7 +2692,10 @@ function createBasicFallbackOutfitAnalysis(
     };
   }
   const normalizeFallbackItem = (product, index, look) => {
-    const requirement = normalizeProductRequirement({
+    const lookNumber = Number(/(\d+)$/.exec(String(look.look_id || ""))?.[1]);
+    const blueprintVariantIndex = index +
+      (Number.isFinite(lookNumber) ? Math.max(0, lookNumber - 1) : 0);
+    const initialRequirement = normalizeProductRequirement({
       ...product,
       look_id: look.look_id,
       gender: look.gender,
@@ -2555,11 +2706,16 @@ function createBasicFallbackOutfitAnalysis(
       negative_keywords: product.negative_keywords ||
         product.negativeKeywords || [],
     });
+    const requirement = finalizeBlueprintSearchRequirement(
+      initialRequirement,
+      outfitBlueprint,
+      blueprintVariantIndex,
+    );
     return {
       ...requirement,
       accessory_type: accessoryTypeForItem(product),
       search_keywords: ensureStyleAnchoredSearchKeywords(
-        buildSearchKeywords(requirement),
+        requirement.search_keywords,
         styleProfile,
         styleSemantics,
       ),
@@ -2594,6 +2750,14 @@ function createBasicFallbackOutfitAnalysis(
     style_expression: resolveStyleExpression({styleProfile}),
     style_semantics: styleSemantics,
     style_profile: styleProfile,
+    outfit_blueprint: normalizeOutfitBlueprint({
+      ...enrichBlueprintFromLooks(outfitBlueprint, looks),
+      blueprint_source: "semantic_fallback",
+    }, {
+      styleProfile,
+      styleSemantics,
+      defaultSource: "semantic_fallback",
+    }),
     bodyProfile: readOptionalString(normalizedPayload.bodyProfile) ||
       "AI 视觉分析暂未完整返回；用户风格意图已保留并优先用于生成搭配。",
     style: styleProfile.primary_style || requestedStyle,
@@ -2613,6 +2777,7 @@ function createBasicFallbackOutfitAnalysis(
         ? normalizedPayload.looks.length
         : 0,
       fallback_used: true,
+      blueprint_source: "semantic_fallback",
     },
     analysisMode: "rule_fallback",
     fallbackReason: reason,
@@ -2620,6 +2785,13 @@ function createBasicFallbackOutfitAnalysis(
 }
 
 function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex") {
+  const outfitBlueprint = normalizeOutfitBlueprint(
+    analysis.outfit_blueprint || analysis.outfitBlueprint,
+    {
+      styleProfile: analysis.style_profile,
+      styleSemantics: analysis.style_semantics,
+    },
+  );
   const sourceLooks = Array.isArray(analysis.looks) && analysis.looks.length > 0
     ? analysis.looks
     : [{
@@ -2648,8 +2820,8 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
       look.accessories_decision || look.accessoriesDecision,
       lookIndex,
     );
-    const normalizedItems = (Array.isArray(look.items) ? look.items : []).map((product) => {
-      const requirement = normalizeProductRequirement({
+    const normalizedItems = (Array.isArray(look.items) ? look.items : []).map((product, itemIndex) => {
+      const initialRequirement = normalizeProductRequirement({
         ...product,
         look_id: lookId,
         gender: lookGender,
@@ -2658,15 +2830,31 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
         scene: look.scene || outfitRequest.scene,
         style: look.style || analysis.style,
       });
+      const requirement = finalizeBlueprintSearchRequirement(
+        initialRequirement,
+        outfitBlueprint,
+        lookIndex + itemIndex,
+      );
       return {
         ...requirement,
         accessory_type: accessoryTypeForItem(product),
-        search_keywords: buildSearchKeywords(requirement),
       };
     });
-    const items = hasAccessoryDecision
+    const itemsWithDecisions = hasAccessoryDecision
       ? applyAccessoryDecisions(normalizedItems, accessoriesDecision, lookIndex)
       : normalizedItems;
+    const items = itemsWithDecisions.map((item, itemIndex) => ({
+      ...finalizeBlueprintSearchRequirement(
+        normalizeProductRequirement(item, {
+          gender: lookGender,
+          scene: look.scene || outfitRequest.scene,
+          style: look.style || analysis.style,
+        }),
+        outfitBlueprint,
+        lookIndex + itemIndex,
+      ),
+      accessory_type: item.accessory_type || accessoryTypeForItem(item),
+    }));
     return {
       request_id: readOptionalString(look.request_id || look.requestId || outfitRequest.requestId),
       look_id: lookId,
@@ -2724,6 +2912,7 @@ async function buildOutfitApiResponse(
     styleExpression: analysis.style_expression,
     styleSemantics: analysis.style_semantics,
     styleProfile: analysis.style_profile,
+    outfitBlueprint: analysis.outfit_blueprint,
     bodyProfile: {
       height: outfitRequest.height,
       weight: outfitRequest.weight,
@@ -2749,6 +2938,7 @@ async function buildOutfitApiResponse(
       style_expression: recommendationContext.style_expression,
       style_semantics: recommendationContext.style_semantics,
       style_profile: recommendationContext.style_profile,
+      outfit_blueprint: recommendationContext.outfit_blueprint,
       recommendation_context: recommendationContext,
       budget: preferredItemBudget,
       item_budget: outfitRequest.itemBudget,
@@ -2767,6 +2957,7 @@ async function buildOutfitApiResponse(
         style: analysis.style,
         style_semantics: recommendationContext.style_semantics,
         style_profile: recommendationContext.style_profile,
+        outfit_blueprint: recommendationContext.outfit_blueprint,
         budget: preferredItemBudget,
         item_budget: outfitRequest.itemBudget,
         outfit_budget: outfitRequest.outfitBudget,
@@ -2774,6 +2965,7 @@ async function buildOutfitApiResponse(
       outfit_plan: {
         style_semantics: recommendationContext.style_semantics,
         style_profile: recommendationContext.style_profile,
+        outfit_blueprint: recommendationContext.outfit_blueprint,
         styling_strategy: analysis.styling_strategy,
         looks,
         top: analysis.recommendations.top,
@@ -3314,6 +3506,7 @@ async function handleProductRecommendations(req, res, next) {
       styleExpression: filters.style_expression,
       styleSemantics: filters.style_semantics,
       styleProfile: filters.style_profile,
+      outfitBlueprint: filters.outfit_blueprint,
       bodyProfile: filters.user_profile,
       weather: filters.user_requirements?.weather,
       budget: {
@@ -3327,6 +3520,7 @@ async function handleProductRecommendations(req, res, next) {
     filters.style_expression = recommendationContext.style_expression;
     filters.style_semantics = recommendationContext.style_semantics;
     filters.style_profile = recommendationContext.style_profile;
+    filters.outfit_blueprint = recommendationContext.outfit_blueprint;
     filters.recommendation_context = recommendationContext;
     logRecommendationStage(console, "product_request", recommendationContext, {
       requirement_count: items.length,
@@ -3340,6 +3534,8 @@ async function handleProductRecommendations(req, res, next) {
         search_keywords: item.search_keywords,
         category: item.category,
         item_name: item.item_name,
+        query_reason: item.query_reason || undefined,
+        source_elements: item.source_elements,
       })),
     });
     const products = items.length > 0
@@ -3405,6 +3601,7 @@ function productRecommendationFilters(input = {}, requestId = "") {
     style_expression: input?.style_expression ?? input?.styleExpression,
     style_semantics: input?.style_semantics ?? input?.styleSemantics,
     style_profile: input?.style_profile ?? input?.styleProfile,
+    outfit_blueprint: input?.outfit_blueprint ?? input?.outfitBlueprint,
     color: input?.color,
     bodyType: input?.bodyType,
     scene: input?.scene,
@@ -3432,6 +3629,11 @@ function productRecommendationFilters(input = {}, requestId = "") {
 
 function productRecommendationRequest(input = {}, requestId = "") {
   const filters = productRecommendationFilters(input, requestId);
+  const outfitBlueprint = normalizeOutfitBlueprint(filters.outfit_blueprint, {
+    styleProfile: filters.style_profile,
+    styleSemantics: filters.style_semantics,
+  });
+  filters.outfit_blueprint = outfitBlueprint;
   const rawLooks = input?.looks;
   if (rawLooks != null) {
     if (!Array.isArray(rawLooks) || rawLooks.length === 0 || rawLooks.length > 3) {
@@ -3469,7 +3671,7 @@ function productRecommendationRequest(input = {}, requestId = "") {
         if (!item || typeof item !== "object" || Array.isArray(item)) {
           throw new TypeError(`looks[${lookIndex}].items[${itemIndex}] must be an object`);
         }
-        const requirement = normalizeProductRequirement({
+        const initialRequirement = normalizeProductRequirement({
           ...item,
           look_id: lookId,
           gender: Object.prototype.hasOwnProperty.call(item, "gender")
@@ -3481,6 +3683,12 @@ function productRecommendationRequest(input = {}, requestId = "") {
           scene: look.scene || filters.scene,
           style: look.style || filters.style,
         });
+        const requirement = finalizeBlueprintSearchRequirement(
+          initialRequirement,
+          outfitBlueprint,
+          lookIndex + itemIndex,
+          {preserveExistingKeywords: true},
+        );
         if (lookGender !== "unisex" && requirement.gender !== lookGender) {
           throw new TypeError(
             `looks[${lookIndex}].items[${itemIndex}].gender conflicts with Look gender`,
@@ -3488,9 +3696,23 @@ function productRecommendationRequest(input = {}, requestId = "") {
         }
         return {...requirement, accessory_type: accessoryTypeForItem(item)};
       });
-      const items = hasAccessoryDecision
+      const itemsWithDecisions = hasAccessoryDecision
         ? applyAccessoryDecisions(normalizedItems, accessoriesDecision, lookIndex)
         : normalizedItems;
+      const items = itemsWithDecisions.map((item, itemIndex) => ({
+        ...finalizeBlueprintSearchRequirement(
+          normalizeProductRequirement(item, {
+            ...filters,
+            gender: lookGender,
+            scene: look.scene || filters.scene,
+            style: look.style || filters.style,
+          }),
+          outfitBlueprint,
+          lookIndex + itemIndex,
+          {preserveExistingKeywords: true},
+        ),
+        accessory_type: item.accessory_type || accessoryTypeForItem(item),
+      }));
       return {
         look_id: lookId,
         gender: lookGender,
@@ -3528,7 +3750,12 @@ function productRecommendationRequest(input = {}, requestId = "") {
     if (!item || typeof item !== "object" || Array.isArray(item)) {
       throw new TypeError(`items[${index}] must be an object`);
     }
-    const requirement = normalizeProductRequirement(item, filters);
+    const requirement = finalizeBlueprintSearchRequirement(
+      normalizeProductRequirement(item, filters),
+      outfitBlueprint,
+      index,
+      {preserveExistingKeywords: true},
+    );
     const requestGender = normalizeGender(filters.gender);
     if (requestGender !== "unisex" && requirement.gender !== requestGender) {
       throw new TypeError(`items[${index}].gender conflicts with request gender`);
@@ -3592,6 +3819,98 @@ function parseStyleRepairPatch(content) {
   return parsed;
 }
 
+async function generateSemanticFallbackInterpretation({
+  outfitRequest,
+  sourceText,
+  client = aiClient,
+  timeoutMs = Math.min(config.aiTimeoutMs, 12_000),
+}) {
+  const semanticTimeoutMs = Math.min(Math.max(Number(timeoutMs) || 0, 1_000), 12_000);
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => abortController.abort(), semanticTimeoutMs);
+  timeout.unref();
+  const startedAt = Date.now();
+  try {
+    const response = await client.chat.completions.create(
+      {
+        model: config.model,
+        ...structuredJsonRequestOptions(),
+        messages: [
+          {
+            role: "system",
+            content: `${buildStyleInterpreterPrompt()}
+The visual outfit request failed, so create a low-cost semantic fallback without images. Infer meaning from the complete raw requested_style; do not use a style-name dictionary, whitelist, neutral template, or generic casual defaults.
+Return Simplified-Chinese user-facing text and exactly one JSON object with style_semantics, style_profile, and outfit_blueprint. outfit_blueprint must contain concrete purchasable core items (top + bottom + shoes, or dress + shoes), preserve the original intent, and set blueprint_source to semantic_fallback. Never add sports/casual items unless the interpreted style positively supports them.`,
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              requested_style: sourceText,
+              original_user_description: outfitRequest.request,
+              gender: outfitRequest.gender,
+              scene: outfitRequest.scene,
+              body_information: {
+                height: outfitRequest.height,
+                weight: outfitRequest.weight,
+              },
+              budget: {
+                item: outfitRequest.itemBudget,
+                outfit: outfitRequest.outfitBudget,
+              },
+            }),
+          },
+        ],
+      },
+      {
+        signal: abortController.signal,
+        timeout: semanticTimeoutMs,
+        maxRetries: 0,
+      },
+    );
+    const parsed = parseStyleRepairPatch(extractAiText(response));
+    const validated = assertValidStyleInterpretation(parsed, {sourceText});
+    const outfitBlueprint = semanticFallbackBlueprint(
+      parsed.outfit_blueprint || parsed.outfitBlueprint,
+      sourceText,
+      {
+        styleProfile: validated.style_profile,
+        styleSemantics: validated.style_semantics,
+      },
+    );
+    if (!blueprintHasCoreItems(outfitBlueprint)) {
+      throw new Error("Semantic fallback Blueprint 缺少具体核心单品");
+    }
+    console.info("Blueprint semantic fallback ready", {
+      requestId: outfitRequest.requestId,
+      requestedStyle: sourceText,
+      blueprint_source: outfitBlueprint.blueprint_source,
+      durationMs: Date.now() - startedAt,
+    });
+    return Object.freeze({
+      ...validated,
+      outfit_blueprint: outfitBlueprint,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function ensureSemanticFallbackInterpretation({
+  styleInterpretation,
+  outfitRequest,
+  sourceText,
+  client = aiClient,
+}) {
+  if (hasConcreteSemanticFallback(styleInterpretation, sourceText)) {
+    return styleInterpretation;
+  }
+  return generateSemanticFallbackInterpretation({
+    outfitRequest,
+    sourceText,
+    client,
+  });
+}
+
 async function repairStyleInterpretationAndLooks({
   analysis,
   outfitRequest,
@@ -3615,8 +3934,8 @@ async function repairStyleInterpretationAndLooks({
           {
             role: "system",
             content: `${buildStyleInterpreterPrompt()}
-This is the single text-only Style Semantic Repair and Look replanning pass. Never request or analyze images. Repair style_semantics and style_profile, then replan styling_strategy, recommendations, and exactly three Looks from the repaired canonical style data and the completed body analysis.
-All user-facing natural-language values MUST be Simplified Chinese. Preserve gender, core item structure, unique look_id values, and existing schemas. Return one JSON object containing style_semantics, style_profile, style, style_expression, styling_strategy, recommendations, and looks.`,
+This is the single text-only Style Semantic Repair and Look replanning pass. Never request or analyze images. Repair style_semantics and style_profile, create outfit_blueprint, then replan styling_strategy, recommendations, and exactly three Looks from that immutable blueprint and the completed body analysis.
+All user-facing natural-language values MUST be Simplified Chinese. Preserve gender, core item structure, unique look_id values, and existing schemas. Return one JSON object containing style_semantics, style_profile, outfit_blueprint, style, style_expression, styling_strategy, recommendations, and looks.`,
           },
           {
             role: "user",
@@ -3636,6 +3955,7 @@ All user-facing natural-language values MUST be Simplified Chinese. Preserve gen
               invalid_reasons: issues,
               previous_style_semantics: analysis.style_semantics,
               previous_style_profile: analysis.style_profile,
+              previous_outfit_blueprint: analysis.outfit_blueprint,
               previous_styling_strategy: analysis.styling_strategy,
               previous_looks: analysis.looks,
             }),
@@ -3678,6 +3998,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
   let outfitRequest;
   let aiRequestStartedAt;
   let fallbackStyleInterpretation;
+  let styleCacheContext;
   const requestStartedAt = Date.now();
   const deferProducts = req.get("x-defer-products") === "true";
 
@@ -3686,7 +4007,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
       ...validateOutfitRequest(req.body),
       requestId: res.locals.requestId,
     };
-    const styleCacheContext = {
+    styleCacheContext = {
       requested_style: outfitRequest.request,
       scene: outfitRequest.scene,
       gender: outfitRequest.gender,
@@ -3837,7 +4158,7 @@ app.post("/outfit", outfitRateLimiter, async (req, res) => {
 
 请根据用户的身高、体重、使用场景、穿搭需求，以及按正面、侧面、背面标注的全身照片，分析身体比例并提供可执行的穿搭建议。
 ${partialViewSafetyInstruction}
-Stylist V2 workflow (mandatory): analyze visual proportions first, then output styling_strategy, then design three Looks from that strategy. Never infer proportion from height alone.
+Stylist V2 workflow (mandatory): understand the user's language, create one concrete outfit_blueprint, then analyze visual proportions, output styling_strategy, and design three Looks from that blueprint and strategy. Never infer proportion from height alone.
 All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.
 ${buildStyleInterpreterPrompt()}
 Before emitting the one final JSON response, self-audit style_semantics and style_profile in the same model call: confidence must be at least 0.6, must_express and must_avoid must both be non-empty, all 11 dimensions must be present and meaningfully differentiated, and constraints must not contradict each other. Correct only the style interpretation and Look plan internally before returning; never trigger another image analysis.
@@ -3848,6 +4169,9 @@ The immutable request context gender is ${requestContext.gender} and style_expre
 When style_profile.intent_priority_score >= 80, recommendations and all three Looks must be recognizably driven by the canonical style intent. recommendations must name the concrete garment, silhouette, shoe, material, color, and detail choices that express must_have; generic balanced advice is invalid.
 Each core Look item must be supported by preferred_items or by at least one concrete must_have/positive trait. Generic T-shirts, generic casual trousers, and generic sneakers are not safe defaults and must not be used unless the canonical StyleProfile explicitly supports them.
 Before returning, audit the whole Look against must_have and must_avoid. Replace any conflicting or stylistically neutral filler item in this same response; do not defer that correction to product search or product reranking.
+outfit_blueprint is the highest-level decision about what the user should wear. It must contain style_identity, character_impression, visual_keywords[], core_elements[], silhouette_strategy[], color_palette[], material_direction[], must_have_items{}, avoid_items[], and occasion_strategy. Generate it from the user's unrestricted natural-language intent; never require a predefined style name or keyword whitelist.
+must_have_items must name concrete wearable item types for the relevant categories before any product search. Looks and search_keywords must derive from those concrete items. The downstream marketplace only supplies matching inventory and must never decide the outfit concept.
+Each Look must explain why its complete combination expresses outfit_blueprint. Clothing, shoes, and any included socks, bag, or accessory must form one coherent outfit; optional items are included only when the blueprint calls for them.
 styling_strategy must contain body_strengths[], proportion_issues[], visual_goals[], waistline_strategy, top_length_strategy, bottom_strategy, shoe_strategy, color_strategy, silhouette_strategy, skin_exposure_strategy, accessory_strategy, and weather_strategy.
 Use height, weight, photographed shoulder/waist/leg proportions, current clothing, scene, weather, comfort, and requested style together. Valid visual_goals include elongate_legs, raise_visual_waistline, shorten_visual_torso, emphasize_waist, balance_shoulders, create_vertical_line, reduce_lower_body_bulk, enhance_body_curve, create_lightness, and create_structure.
 Every Look must add styling_goal, proportion_strategy, and why_this_changes_the_body_proportion. The three Looks must differ materially in silhouette, waistline, garment length, shoe shape, skin exposure, or color continuity—not merely color.
@@ -3920,6 +4244,33 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
     "must_avoid": [],
     "positive_keywords": [],
     "negative_keywords": []
+  },
+  "outfit_blueprint": {
+    "style_identity": "",
+    "character_impression": "",
+    "visual_keywords": [],
+    "core_elements": [],
+    "silhouette_strategy": [],
+    "color_palette": [],
+    "material_direction": [],
+    "must_have_items": {
+      "top": [],
+      "bottom": [],
+      "dress": [],
+      "shoes": [],
+      "outerwear": [],
+      "socks": [],
+      "bag": [],
+      "hat": [],
+      "jewelry": [],
+      "belt": [],
+      "scarf": [],
+      "glasses": [],
+      "watch": [],
+      "accessory": []
+    },
+    "avoid_items": [],
+    "occasion_strategy": ""
   },
   "style_upgrade_level": "upgrade",
   "styling_strategy": {
@@ -4026,6 +4377,35 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
         errorMessage: error.message,
         requestedStyle: styleCacheContext.requested_style,
       });
+      const partialPayload = parseAiPayloadBestEffort(aiText);
+      const partialStyleInterpretation = partialPayload &&
+        typeof partialPayload === "object" && !Array.isArray(partialPayload)
+        ? {
+          style_semantics: partialPayload.style_semantics ||
+            partialPayload.styleSemantics,
+          style_profile: partialPayload.style_profile || partialPayload.styleProfile,
+          outfit_blueprint: partialPayload.outfit_blueprint ||
+            partialPayload.outfitBlueprint,
+        }
+        : null;
+      try {
+        fallbackStyleInterpretation = await ensureSemanticFallbackInterpretation({
+          styleInterpretation: fallbackStyleInterpretation || partialStyleInterpretation,
+          outfitRequest,
+          sourceText: styleCacheContext.requested_style,
+        });
+        styleInterpretationCache.set(
+          styleCacheContext,
+          fallbackStyleInterpretation,
+        );
+      } catch (fallbackError) {
+        console.warn("Blueprint semantic fallback unavailable", {
+          requestId: res.locals.requestId,
+          requestedStyle: styleCacheContext.requested_style,
+          errorName: fallbackError?.name,
+          errorMessage: sanitizeAiErrorMessage(fallbackError),
+        });
+      }
       analysis = createBasicFallbackOutfitAnalysis(
         outfitRequest,
         "AI_OUTPUT_INVALID",
@@ -4042,6 +4422,17 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       repaired_looks: 0,
       removed_looks: 0,
       fallback_used: false,
+    });
+    console.info("outfit_blueprint_summary", {
+      request_id: res.locals.requestId,
+      blueprint_source: analysis.outfit_blueprint?.blueprint_source ||
+        (analysis.analysisMode === "rule_fallback"
+          ? "semantic_fallback"
+          : "ai_generated"),
+      requested_style: styleCacheContext.requested_style,
+      core_item_count: Object.values(
+        analysis.outfit_blueprint?.must_have_items || {},
+      ).reduce((sum, items) => sum + (Array.isArray(items) ? items.length : 0), 0),
     });
     let validatedStyleInterpretation;
     if (analysis.analysisMode !== "rule_fallback") {
@@ -4202,6 +4593,28 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
     });
 
     if (fallbackReason === "AI_TIMEOUT" && outfitRequest) {
+      try {
+        fallbackStyleInterpretation = await ensureSemanticFallbackInterpretation({
+          styleInterpretation: fallbackStyleInterpretation,
+          outfitRequest,
+          sourceText: styleCacheContext?.requested_style ||
+            compactRequestedStyle(outfitRequest.request),
+        });
+        if (styleCacheContext) {
+          styleInterpretationCache.set(
+            styleCacheContext,
+            fallbackStyleInterpretation,
+          );
+        }
+      } catch (fallbackError) {
+        console.warn("Blueprint semantic fallback unavailable", {
+          requestId: res.locals.requestId,
+          requestedStyle: styleCacheContext?.requested_style ||
+            compactRequestedStyle(outfitRequest.request),
+          errorName: fallbackError?.name,
+          errorMessage: sanitizeAiErrorMessage(fallbackError),
+        });
+      }
       const fallbackAnalysis = createBasicFallbackOutfitAnalysis(
         outfitRequest,
         "AI_TIMEOUT",
@@ -4214,6 +4627,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
         repaired_looks: 1,
         removed_looks: 0,
         fallback_used: true,
+        blueprint_source: fallbackAnalysis.outfit_blueprint.blueprint_source,
       });
       const responsePayload = await buildOutfitResponseForRequest(
         fallbackAnalysis,
@@ -4443,6 +4857,8 @@ module.exports = {
   productClickStore,
   config,
   createBasicFallbackOutfitAnalysis,
+  generateSemanticFallbackInterpretation,
+  hasConcreteSemanticFallback,
   createMockOutfitAnalysis,
   assertStyleExpressionConsistency,
   buildOutfitApiResponse,

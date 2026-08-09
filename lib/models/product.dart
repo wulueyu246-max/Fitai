@@ -181,6 +181,9 @@ class Product {
     this.recommendationReason = '',
     this.matchExplanation = '',
     this.relevanceScore = 0,
+    this.blueprintMatchScore = 0,
+    this.matchedElements = const [],
+    this.conflictElements = const [],
     this.aestheticScore = 0,
     this.brandQualityScore = 0,
     this.diversityScore = 0,
@@ -334,6 +337,18 @@ class Product {
         json,
         ['relevanceScore', 'relevance_score'],
       ),
+      blueprintMatchScore: _readOptionalDouble(
+        json,
+        ['blueprintMatchScore', 'blueprint_match_score'],
+      ),
+      matchedElements: _readOptionalStringList(
+        json,
+        ['matchedElements', 'matched_elements'],
+      ),
+      conflictElements: _readOptionalStringList(
+        json,
+        ['conflictElements', 'conflict_elements'],
+      ),
       aestheticScore: _readOptionalDouble(
         json,
         ['aestheticScore', 'aesthetic_score'],
@@ -468,6 +483,9 @@ class Product {
   final String recommendationReason;
   final String matchExplanation;
   final double relevanceScore;
+  final double blueprintMatchScore;
+  final List<String> matchedElements;
+  final List<String> conflictElements;
   final double aestheticScore;
   final double brandQualityScore;
   final double diversityScore;
@@ -577,6 +595,9 @@ class Product {
     String? recommendationReason,
     String? matchExplanation,
     double? relevanceScore,
+    double? blueprintMatchScore,
+    List<String>? matchedElements,
+    List<String>? conflictElements,
     double? aestheticScore,
     double? brandQualityScore,
     double? diversityScore,
@@ -626,6 +647,9 @@ class Product {
       recommendationReason: recommendationReason ?? this.recommendationReason,
       matchExplanation: matchExplanation ?? this.matchExplanation,
       relevanceScore: relevanceScore ?? this.relevanceScore,
+      blueprintMatchScore: blueprintMatchScore ?? this.blueprintMatchScore,
+      matchedElements: matchedElements ?? this.matchedElements,
+      conflictElements: conflictElements ?? this.conflictElements,
       aestheticScore: aestheticScore ?? this.aestheticScore,
       brandQualityScore: brandQualityScore ?? this.brandQualityScore,
       diversityScore: diversityScore ?? this.diversityScore,
@@ -673,6 +697,9 @@ class Product {
       'recommendationReason': recommendationReason,
       'matchExplanation': matchExplanation,
       'relevanceScore': relevanceScore,
+      'blueprintMatchScore': blueprintMatchScore,
+      'matchedElements': matchedElements,
+      'conflictElements': conflictElements,
       'aestheticScore': aestheticScore,
       'brandQualityScore': brandQualityScore,
       'diversityScore': diversityScore,
@@ -838,5 +865,22 @@ class Product {
       }
     }
     return fallback;
+  }
+
+  static List<String> _readOptionalStringList(
+    Map<String, dynamic> json,
+    List<String> keys,
+  ) {
+    for (final key in keys) {
+      final value = json[key];
+      if (value is List) {
+        return List<String>.unmodifiable(
+          value.whereType<String>().map((item) => item.trim()).where(
+                (item) => item.isNotEmpty,
+              ),
+        );
+      }
+    }
+    return const [];
   }
 }

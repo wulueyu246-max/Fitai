@@ -9,11 +9,14 @@ const {
   evaluateStyleGate,
   hasActionableStyleConstraints,
   intentDebugSummary,
-  productIntentScore,
   resolveIntentPriorityScore,
   shouldRejectForStyle,
   styleMatchScore,
 } = require("./intent_priority");
+const {
+  blueprintMatchAssessment,
+  blueprintMatchPassesHardGate,
+} = require("./outfit_blueprint");
 
 const DEFAULT_SELECTION_LIMIT = 6;
 const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000;
@@ -23,6 +26,14 @@ const MAX_CANDIDATES_PER_LOOK = 16;
 const MAX_PRODUCT_AI_MS = 20_000;
 const MAX_VISUAL_IMAGES_PER_REQUEST = 40;
 const HIGH_QUALITY_BRAND_SCORE = 65;
+const BLUEPRINT_PRODUCT_WEIGHTS = Object.freeze({
+  blueprint: 40,
+  style: 20,
+  quality: 15,
+  visual: 10,
+  brand: 10,
+  weather: 5,
+});
 
 const BRAND_TIERS = Object.freeze({
   S: Object.freeze([
@@ -407,9 +418,12 @@ class ProductAestheticReranker {
 
 function buildMessages(groups, context) {
   const styleProfile = contextStyleProfile(context);
+  const outfitBlueprint = contextOutfitBlueprint(context);
   const payload = {
     intent_priority_score: resolveIntentPriorityScore(styleProfile),
     product_intent_weights: PRODUCT_INTENT_WEIGHTS,
+    blueprint_product_weights: BLUEPRINT_PRODUCT_WEIGHTS,
+    outfit_blueprint: outfitBlueprint,
     user_profile: compactProfile(context.user_profile || context.userProfile || {
       gender: context.gender,
       body_profile: context.bodyType,
@@ -432,7 +446,7 @@ function buildMessages(groups, context) {
     ]),
     outfit_plan: pickFields(context.outfit_plan || context.outfitPlan || {}, [
       "style_semantics", "styleSemantics", "style_profile", "styleProfile", "styling_strategy", "stylingStrategy", "looks", "top", "bottom", "dress",
-      "shoes", "outerwear", "bag", "accessories", "summary",
+      "outfit_blueprint", "outfitBlueprint", "shoes", "outerwear", "bag", "accessories", "summary",
     ]),
     product_groups: groups.map((group, index) => ({
       requirement_index: index,
@@ -462,6 +476,9 @@ function buildMessages(groups, context) {
         brand_quality_score: product.brand_quality_score,
         brand_tier: product.brand_tier,
         brand_fallback: product.brand_fallback,
+        blueprint_match_score: product.blueprint_match_score,
+        matched_elements: product.matched_elements,
+        conflict_elements: product.conflict_elements,
         style_match_score: product.style_match_score,
         budget_preference_score: product.budget_preference_score,
         budget_note: product.budget_note,
@@ -475,7 +492,7 @@ function buildMessages(groups, context) {
       content: [
         "Each selected_products entry must include the source requirement_index and product_id.",
         "All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.",
-        "Never select underwear, bras, socks, hosiery, sleepwear, homewear, adult products, shapewear, or swimwear unless explicit_user_search is true.",
+        "Never select underwear, bras, sleepwear, homewear, adult products, shapewear, or swimwear unless explicit_user_search is true. Socks or hosiery are allowed only when the concrete outfit_blueprint requires them.",
         "Prioritize top, bottom, shoes, outerwear, dress, and bag over accessory, underwear, and homewear.",
         "Prioritize brand tiers S, A, and credible original/designer B over ordinary or unbranded C products. Use brand_quality_score as an independent ranking signal.",
         "Never select titles containing manufacturer/wholesale/clearance/viral bargain/street stall/student budget/copy/replica/high replica marketing terms. Only use brand_fallback products when stronger branded candidates are insufficient.",
@@ -483,7 +500,9 @@ function buildMessages(groups, context) {
         "A slightly over-budget product may be selected when its quality or outfit fit justifies it, but the reason must clearly explain that tradeoff.",
         "Use styling_strategy plus every Look's styling_goal and proportion_strategy as the source of truth for body-proportion fit.",
         "Use style_semantics and style_profile as the sole source of truth for style_match. Do not reinterpret raw user wording.",
-        "The supplied intent_priority_score and product_intent_weights are immutable. Rank style_match at 75%, body_match at 8%, quality at 7%, brand at 5%, and weather at 5%.",
+        "Treat outfit_blueprint as the highest-priority source of truth for what the outfit contains. Marketplace inventory only supplies the concrete items already decided by the blueprint.",
+        "Never select an avoid_items conflict. blueprint_match_score has the highest final ranking weight; image quality, sales, brand, or variety cannot override a poor blueprint match.",
+        "For final product selection, use blueprint_product_weights exactly: blueprint_match is the highest signal, followed by relevance and quality; diversity is only a light penalty.",
         "Weather is a weak functional constraint only. It may affect waterproofing, breathability, sole, or material, but must never replace the requested style.",
         "Every selected product must include style_match_score and weather_match_score from 0 to 100. If intent_priority_score is above 80, never select a product with style_match_score below 50.",
         "A strong conflict with must_express, must_avoid, silhouette, preferred materials, or continuous style dimensions is disqualifying; brand or image quality cannot override it.",
@@ -714,6 +733,14 @@ function contextStyleProfile(context = {}) {
     context.outfitPlan?.styleProfile || {};
 }
 
+function contextOutfitBlueprint(context = {}) {
+  return context.outfit_blueprint || context.outfitBlueprint ||
+    context.user_requirements?.outfit_blueprint ||
+    context.userRequirements?.outfitBlueprint ||
+    context.outfit_plan?.outfit_blueprint ||
+    context.outfitPlan?.outfitBlueprint || {};
+}
+
 function contextStyleSemantics(context = {}) {
   return context.style_semantics || context.styleSemantics ||
     context.user_requirements?.style_semantics ||
@@ -740,6 +767,7 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
   const safeGroups = normalizeGroups(groups, selectionLimit, context);
   const styleProfile = contextStyleProfile(context);
   const styleSemantics = contextStyleSemantics(context);
+  const outfitBlueprint = contextOutfitBlueprint(context);
   const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
   const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
   const candidates = new Map();
@@ -770,6 +798,12 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
       styleProfile,
       intentPriorityScore,
     ).allowed) continue;
+    const blueprintMatch = blueprintMatchAssessment(
+      match.product,
+      safeGroups[match.groupIndex]?.requirement,
+      outfitBlueprint,
+    );
+    if (!blueprintMatchPassesHardGate(blueprintMatch, intentPriorityScore)) continue;
     const catalogAesthetic = boundedScore(match.product.catalog_aesthetic_score ?? 50);
     const brandQuality = boundedScore(match.product.brand_quality_score ?? BRAND_SCORE.C);
     const aiAesthetic = score(item.aesthetic_score ?? item.ai_taste_score);
@@ -813,6 +847,7 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
     );
     const finalScore = compositeProductScore({
       matchScore,
+      blueprintMatchScore: blueprintMatch.score,
       styleMatchScore: selectedStyleMatch,
       aestheticScore: values.aesthetic_score,
       visualQualityScore: visualQuality,
@@ -825,6 +860,9 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
       ...match.product,
       ...values,
       match_score: matchScore,
+      blueprint_match_score: blueprintMatch.score,
+      matched_elements: blueprintMatch.matched_elements,
+      conflict_elements: blueprintMatch.conflict_elements,
       style_match_score: selectedStyleMatch,
       weather_match_score: weatherMatch,
       catalog_aesthetic_score: catalogAesthetic,
@@ -916,6 +954,7 @@ function applyDiversityScores(products, groups, {
           0,
           compositeProductScore({
             matchScore: relevance,
+            blueprintMatchScore: product.blueprint_match_score ?? styleMatch,
             styleMatchScore: styleMatch,
             aestheticScore: aesthetic,
             visualQualityScore: visualQuality,
@@ -1037,6 +1076,7 @@ function boundedScore(value) {
 function compositeProductScore({
   matchScore,
   styleMatchScore = matchScore,
+  blueprintMatchScore = styleMatchScore,
   aestheticScore,
   visualQualityScore = aestheticScore,
   bodyStrategyScore = matchScore,
@@ -1044,16 +1084,14 @@ function compositeProductScore({
   weatherMatchScore = 70,
   diversityScore = 100,
 }) {
-  const qualityScore = boundedScore(aestheticScore) * 0.6 +
-    boundedScore(visualQualityScore) * 0.4;
-  return productIntentScore({
-    styleMatch: styleMatchScore,
-    bodyMatch: bodyStrategyScore,
-    quality: qualityScore,
-    brand: brandQualityScore,
-    weather: weatherMatchScore,
-    diversityScore,
-  });
+  const weighted = boundedScore(blueprintMatchScore) * 0.4 +
+    boundedScore(styleMatchScore) * 0.2 +
+    boundedScore(aestheticScore) * 0.15 +
+    boundedScore(visualQualityScore) * 0.1 +
+    boundedScore(brandQualityScore) * 0.1 +
+    boundedScore(weatherMatchScore) * 0.05;
+  const diversityPenalty = (100 - boundedScore(diversityScore)) * 0.05;
+  return roundScore(weighted - diversityPenalty);
 }
 
 function ruleFallback(groups, selectionLimit, context = {}) {
@@ -1061,7 +1099,16 @@ function ruleFallback(groups, selectionLimit, context = {}) {
   const styleSemantics = contextStyleSemantics(context);
   const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
   const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
+  const outfitBlueprint = contextOutfitBlueprint(context);
   return groups.flatMap((group) => group.candidates.slice(0, selectionLimit).map((product) => {
+    const blueprintMatch = blueprintMatchAssessment(
+      product,
+      group.requirement,
+      outfitBlueprint,
+    );
+    if (!blueprintMatchPassesHardGate(blueprintMatch, intentPriorityScore)) {
+      return null;
+    }
     const matchScore = budgetAdjustedMatchScore(product);
     const aestheticScore = boundedScore(
       product.catalog_aesthetic_score ?? matchScore,
@@ -1092,6 +1139,7 @@ function ruleFallback(groups, selectionLimit, context = {}) {
     const diversity = 100;
     const finalScore = compositeProductScore({
       matchScore,
+      blueprintMatchScore: blueprintMatch.score,
       styleMatchScore: styleMatch,
       aestheticScore,
       visualQualityScore,
@@ -1103,6 +1151,9 @@ function ruleFallback(groups, selectionLimit, context = {}) {
     return {
       ...product,
       match_score: matchScore,
+      blueprint_match_score: blueprintMatch.score,
+      matched_elements: blueprintMatch.matched_elements,
+      conflict_elements: blueprintMatch.conflict_elements,
       style_match_score: styleMatch,
       weather_match_score: weatherMatch,
       aesthetic_score: aestheticScore,
@@ -1150,6 +1201,7 @@ function normalizeGroups(groups, selectionLimit, context = {}) {
   const limit = Math.min(positiveInteger(selectionLimit, DEFAULT_SELECTION_LIMIT), 4);
   const styleProfile = contextStyleProfile(context);
   const styleSemantics = contextStyleSemantics(context);
+  const outfitBlueprint = contextOutfitBlueprint(context);
   const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
   const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
   return (Array.isArray(groups) ? groups : []).map((group) => {
@@ -1157,6 +1209,22 @@ function normalizeGroups(groups, selectionLimit, context = {}) {
     const assessedCandidates = Array.isArray(group?.candidates)
       ? group.candidates
         .filter((product) => semanticCategoryMatch(product, requirement))
+        .flatMap((product) => {
+          const assessment = blueprintMatchAssessment(
+            product,
+            requirement,
+            outfitBlueprint,
+          );
+          return blueprintMatchPassesHardGate(
+            assessment,
+            intentPriorityScore,
+          ) ? [{
+            ...product,
+            blueprint_match_score: assessment.score,
+            matched_elements: assessment.matched_elements,
+            conflict_elements: assessment.conflict_elements,
+          }] : [];
+        })
         .filter((product) => evaluateStyleGate(
           product,
           styleProfile,
@@ -1228,13 +1296,15 @@ function remainingBudgetMs(deadlineAt) {
 }
 
 function candidateQualityPrior(product) {
-  return productIntentScore({
-    styleMatch: product.style_match_score ?? product.relevance_score,
-    bodyMatch: product.body_strategy_match_score ?? product.fit_score ?? 60,
-    quality: boundedScore(product.aesthetic_score ?? product.catalog_aesthetic_score) * 0.6 +
-      boundedScore(product.commerce_visual_score ?? product.visual_quality_score) * 0.4,
-    brand: product.brand_quality_score,
-    weather: product.weather_match_score ?? 70,
+  return compositeProductScore({
+    matchScore: product.relevance_score,
+    blueprintMatchScore: product.blueprint_match_score ?? product.style_match_score,
+    styleMatchScore: product.style_match_score ?? product.relevance_score,
+    bodyStrategyScore: product.body_strategy_match_score ?? product.fit_score ?? 60,
+    aestheticScore: product.aesthetic_score ?? product.catalog_aesthetic_score,
+    visualQualityScore: product.commerce_visual_score ?? product.visual_quality_score,
+    brandQualityScore: product.brand_quality_score,
+    weatherMatchScore: product.weather_match_score ?? 70,
   });
 }
 

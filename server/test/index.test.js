@@ -15,6 +15,7 @@ const {
   createDiagnosticFetch,
   createAiErrorDetails,
   createBasicFallbackOutfitAnalysis,
+  generateSemanticFallbackInterpretation,
   createMockOutfitAnalysis,
   buildOutfitApiResponse,
   configureProxyEnvironment,
@@ -897,6 +898,46 @@ function validAiOutfitPayloadForNormalization() {
   };
 }
 
+test("Outfit Blueprint is preserved and drives concrete Look requirements", () => {
+  const payload = validAiOutfitPayloadForNormalization();
+  payload.outfit_blueprint = {
+    style_identity: "精致晚间造型",
+    character_impression: "克制而有艺术感",
+    visual_keywords: ["精致", "艺术感"],
+    core_elements: ["立体剪裁"],
+    silhouette_strategy: ["清晰纵向轮廓"],
+    color_palette: ["墨绿色"],
+    material_direction: ["真丝", "精纺羊毛"],
+    must_have_items: {
+      top: ["真丝立领衬衫"],
+      bottom: ["高腰精纺长裤"],
+      shoes: ["尖头皮质乐福鞋"],
+    },
+    avoid_items: ["普通运动套装"],
+    occasion_strategy: "适合晚间文化活动",
+  };
+
+  const analysis = parseOutfitAnalysis(JSON.stringify(payload), {
+    requestId: "blueprint-integration",
+    gender: "male",
+    scene: "晚间活动",
+    userInput: "未来的自然语言风格描述",
+  });
+
+  assert.equal(analysis.outfit_blueprint.style_identity, "精致晚间造型");
+  assert.equal(analysis.looks[0].items[0].item_name, "真丝立领衬衫");
+  assert.ok(analysis.looks[0].items[0].search_keywords[0].includes("真丝立领衬衫"));
+  assert.match(analysis.looks[0].items[0].query_reason, /穿搭蓝图/u);
+  assert.ok(analysis.looks[0].items[0].source_elements.includes("真丝立领衬衫"));
+  assert.ok(analysis.looks[0].items[0].translated_queries.length >= 1);
+  assert.ok(analysis.looks[0].items[0].search_keywords.every(
+    (query) => !query.includes(analysis.outfit_blueprint.style_identity),
+  ));
+  assert.ok(analysis.products
+    .filter((item) => ["top", "bottom", "shoes"].includes(item.category))
+    .every((item) => item.blueprint_required === true));
+});
+
 test("high-priority style intent replaces generic casual Looks and advice", () => {
   const payload = validAiOutfitPayloadForNormalization();
   payload.gender = "female";
@@ -1048,6 +1089,7 @@ test("invalid AI Look output keeps the requested style instead of generic casual
 
   assert.equal(analysis.analysisMode, "rule_fallback");
   assert.equal(analysis.style_profile.source_text, "甜美穿搭");
+  assert.equal(analysis.outfit_blueprint.blueprint_source, "semantic_fallback");
   assert.equal(analysis.style_profile.intent_priority_score, 95);
   assert.equal(analysis.looks.length, 3);
   assert.ok(analysis.recommendations.summary.includes("甜美穿搭"));
@@ -1081,6 +1123,141 @@ test("AI timeout fallback keeps weather context out of product search keywords",
   assert.ok(keywords.every((keyword) => !keyword.includes("穿搭方案必须遵循")));
   assert.ok(keywords.some((keyword) => keyword.includes("甜美穿搭")));
   assert.equal(itemNames.some((name) => /甜美穿搭(?:上衣|下装|鞋履)/u.test(name)), false);
+});
+
+test("semantic Blueprint fallback preserves mature intent without casual sports", () => {
+  const analysis = createBasicFallbackOutfitAnalysis({
+    requestId: "mature-semantic-fallback",
+    request: "成熟利落、有气场的女性约会穿搭",
+    gender: "female",
+    scene: "约会",
+  }, "AI_TIMEOUT", {
+    styleInterpretation: {
+      style_semantics: {
+        must_express: ["成熟气场", "结构感", "利落线条"],
+        must_avoid: ["休闲运动", "跑步鞋", "训练服"],
+        style_atoms: ["收束腰线", "垂坠材质", "尖头鞋"],
+        confidence: 0.91,
+        interpretation_summary: "强调成熟、结构和女性气场。",
+      },
+      style_profile: {
+        source_text: "成熟利落、有气场的女性约会穿搭",
+        intent_priority_score: 94,
+        interpretation: "以修身结构和成熟材质塑造利落女性气场。",
+        primary_style: "成熟结构感",
+        preferred_items: ["垂坠真丝衬衫", "高腰修身西裤", "尖头低跟鞋"],
+        preferred_colors: ["黑色", "酒红色"],
+        preferred_materials: ["真丝", "精纺羊毛"],
+        must_have: ["结构感", "成熟材质", "修身轮廓"],
+        must_avoid: ["休闲运动", "跑步鞋", "训练服"],
+        positive_keywords: ["利落", "成熟", "有气场"],
+        negative_keywords: ["运动鞋", "训练外套"],
+      },
+      outfit_blueprint: {
+        style_identity: "成熟结构感",
+        core_elements: ["结构感", "成熟材质", "修身轮廓"],
+        must_have_items: {
+          top: ["垂坠真丝衬衫"],
+          bottom: ["高腰修身西裤"],
+          shoes: ["尖头低跟鞋"],
+        },
+        avoid_items: ["休闲运动", "跑步鞋", "训练服"],
+      },
+    },
+  });
+
+  const itemNames = analysis.looks.flatMap((look) =>
+    look.items.map((item) => item.item_name));
+  const selectedItemText = analysis.looks.flatMap((look) => look.items)
+    .map((item) => [item.item_name, item.style, ...item.search_keywords].join(" "))
+    .join(" ");
+
+  assert.equal(analysis.outfit_blueprint.blueprint_source, "semantic_fallback");
+  assert.ok(itemNames.some((name) => name.includes("真丝衬衫")));
+  assert.ok(itemNames.some((name) => name.includes("修身西裤")));
+  assert.ok(itemNames.some((name) => name.includes("尖头低跟鞋")));
+  assert.doesNotMatch(selectedItemText, /跑步鞋|训练服|休闲运动/u);
+  assert.doesNotMatch(
+    selectedItemText,
+    /简洁合身上衣|中高腰直筒下装|简洁浅口鞋/u,
+  );
+});
+
+test("AI failure uses one text-only semantic fallback with concrete Blueprint items", async () => {
+  const payload = validAiOutfitPayloadForNormalization();
+  payload.style_semantics = {
+    identity_impression: ["轻盈", "精致"],
+    emotional_tone: ["浪漫"],
+    visual_personality: ["柔和"],
+    social_signal: ["约会氛围"],
+    must_express: ["浪漫细节", "轻盈轮廓"],
+    must_avoid: ["运动鞋", "工装裤"],
+    style_atoms: ["蝴蝶结", "轻盈裙摆"],
+    confidence: 0.92,
+    interpretation_summary: "以轻盈精致的浪漫细节完成约会造型。",
+  };
+  payload.style_profile = {
+    source_text: "像糖霜花园一样轻盈精致的约会穿搭",
+    intent_priority_score: 95,
+    interpretation: "轻盈浪漫并带有精致细节。",
+    primary_style: "轻盈浪漫造型",
+    secondary_styles: [],
+    blend_rationale: "保持单一而清晰的浪漫方向。",
+    dimensions: {
+      maturity: 45, femininity: 92, masculinity: 8, structure: 38,
+      minimalism: 35, romantic: 94, sportiness: 4, sexiness: 30,
+      youthfulness: 82, luxury: 55, casualness: 28,
+    },
+    silhouette: "收腰并保持轻盈裙摆",
+    preferred_items: ["蝴蝶结上衣", "高腰百褶裙", "圆头玛丽珍鞋"],
+    preferred_colors: ["奶油白", "浅粉色"],
+    preferred_materials: ["蕾丝", "轻盈雪纺"],
+    must_have: ["浪漫细节", "轻盈轮廓"],
+    must_avoid: ["运动鞋", "工装裤"],
+    positive_keywords: ["浪漫", "轻盈"],
+    negative_keywords: ["运动", "工装"],
+  };
+  payload.outfit_blueprint = {
+    style_identity: "轻盈浪漫造型",
+    core_elements: ["蝴蝶结", "轻盈裙摆"],
+    must_have_items: {
+      top: ["蝴蝶结上衣"],
+      bottom: ["高腰百褶裙"],
+      shoes: ["圆头玛丽珍鞋"],
+    },
+    avoid_items: ["运动鞋", "工装裤"],
+  };
+  let callCount = 0;
+  const client = {
+    chat: {
+      completions: {
+        create: async () => {
+          callCount += 1;
+          return {choices: [{message: {content: JSON.stringify(payload)}}]};
+        },
+      },
+    },
+  };
+
+  const result = await generateSemanticFallbackInterpretation({
+    outfitRequest: {
+      requestId: "semantic-ai-fallback",
+      request: "像糖霜花园一样轻盈精致的约会穿搭",
+      gender: "female",
+      scene: "约会",
+    },
+    sourceText: "像糖霜花园一样轻盈精致的约会穿搭",
+    client,
+    timeoutMs: 1_000,
+  });
+
+  assert.equal(callCount, 1);
+  assert.equal(result.outfit_blueprint.blueprint_source, "semantic_fallback");
+  assert.deepEqual(result.outfit_blueprint.must_have_items.shoes, [
+    "圆头玛丽珍鞋",
+  ]);
+  assert.equal(result.style_profile.source_text,
+    "像糖霜花园一样轻盈精致的约会穿搭");
 });
 
 test("AI Style Interpreter preserves an unknown blended style through Look parsing", () => {

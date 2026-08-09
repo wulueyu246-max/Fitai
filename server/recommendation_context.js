@@ -9,6 +9,10 @@ const {
   PRODUCT_INTENT_WEIGHTS,
   resolveIntentPriorityScore,
 } = require("./intent_priority");
+const {
+  blueprintHasCoreItems,
+  normalizeOutfitBlueprint,
+} = require("./outfit_blueprint");
 
 const STYLE_EXPRESSIONS = new Set(["feminine", "neutral", "masculine", "auto"]);
 
@@ -28,6 +32,7 @@ function createRecommendationContext({
   styleExpression,
   styleSemantics,
   styleProfile,
+  outfitBlueprint,
   bodyProfile,
   weather,
   budget,
@@ -47,6 +52,10 @@ function createRecommendationContext({
     }),
     style_semantics: normalizeStyleSemantics(styleSemantics),
     style_profile: normalizedStyleProfile,
+    outfit_blueprint: normalizeOutfitBlueprint(outfitBlueprint, {
+      styleProfile: normalizedStyleProfile,
+      styleSemantics: normalizeStyleSemantics(styleSemantics),
+    }),
     intent_priority_score: resolveIntentPriorityScore(normalizedStyleProfile),
     intent_weights: Object.freeze({
       look: LOOK_INTENT_WEIGHTS,
@@ -79,6 +88,9 @@ function logRecommendationStage(logger, stage, context, details = {}) {
     style_profile_configured: Boolean(context?.style_profile?.source_text),
     style_semantics_configured: Boolean(
       context?.style_semantics?.interpretation_summary,
+    ),
+    outfit_blueprint_configured: Boolean(
+      blueprintHasCoreItems(context?.outfit_blueprint),
     ),
     requested_style: context?.style_profile?.source_text || undefined,
     intent_priority_score: context?.intent_priority_score,

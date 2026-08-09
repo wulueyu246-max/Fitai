@@ -12,6 +12,10 @@ class ProductSearchRequirement {
     required this.scene,
     required this.searchKeywords,
     required this.negativeKeywords,
+    this.blueprintRequired = false,
+    this.queryReason = '',
+    this.sourceElements = const [],
+    this.translatedQueries = const [],
   });
 
   factory ProductSearchRequirement.fromJson(
@@ -49,6 +53,19 @@ class ProductSearchRequirement {
         json['negative_keywords'] ?? json['negativeKeywords'] ?? const [],
         'negative_keywords',
       ),
+      blueprintRequired: json['blueprint_required'] == true ||
+          json['blueprintRequired'] == true,
+      queryReason: _optionalString(
+            json['query_reason'] ?? json['queryReason'],
+          ) ??
+          '',
+      sourceElements: _stringList(
+        json['source_elements'] ?? json['sourceElements'] ?? const [],
+        'source_elements',
+      ),
+      translatedQueries: _translatedQueries(
+        json['translated_queries'] ?? json['translatedQueries'],
+      ),
     );
   }
 
@@ -64,6 +81,10 @@ class ProductSearchRequirement {
   final String scene;
   final List<String> searchKeywords;
   final List<String> negativeKeywords;
+  final bool blueprintRequired;
+  final String queryReason;
+  final List<String> sourceElements;
+  final List<ProductSearchTranslation> translatedQueries;
 
   Map<String, dynamic> toJson() => {
         'look_id': lookId,
@@ -78,6 +99,12 @@ class ProductSearchRequirement {
         'scene': scene,
         'search_keywords': searchKeywords,
         'negative_keywords': negativeKeywords,
+        'blueprint_required': blueprintRequired,
+        'query_reason': queryReason,
+        'source_elements': sourceElements,
+        'translated_queries': translatedQueries
+            .map((translation) => translation.toJson())
+            .toList(growable: false),
       };
 
   static String _requiredString(Object? value, String field) {
@@ -114,4 +141,59 @@ class ProductSearchRequirement {
     }
     return values;
   }
+
+  static List<ProductSearchTranslation> _translatedQueries(Object? value) {
+    if (value == null) return const [];
+    if (value is! List) {
+      throw const FormatException('translated_queries must be an array');
+    }
+    return List<ProductSearchTranslation>.unmodifiable(
+      value.map((entry) {
+        if (entry is! Map<String, dynamic>) {
+          throw const FormatException(
+            'translated_queries entries must be objects',
+          );
+        }
+        return ProductSearchTranslation.fromJson(entry);
+      }),
+    );
+  }
+}
+
+class ProductSearchTranslation {
+  const ProductSearchTranslation({
+    required this.category,
+    required this.query,
+    required this.sourceElements,
+    required this.queryReason,
+  });
+
+  factory ProductSearchTranslation.fromJson(Map<String, dynamic> json) {
+    return ProductSearchTranslation(
+      category:
+          json['category'] is String ? (json['category'] as String).trim() : '',
+      query: json['query'] is String ? (json['query'] as String).trim() : '',
+      sourceElements: ProductSearchRequirement._stringList(
+        json['source_elements'] ?? json['sourceElements'] ?? const [],
+        'translated_queries.source_elements',
+      ),
+      queryReason: json['query_reason'] is String
+          ? (json['query_reason'] as String).trim()
+          : json['queryReason'] is String
+              ? (json['queryReason'] as String).trim()
+              : '',
+    );
+  }
+
+  final String category;
+  final String query;
+  final List<String> sourceElements;
+  final String queryReason;
+
+  Map<String, dynamic> toJson() => {
+        'category': category,
+        'query': query,
+        'source_elements': sourceElements,
+        'query_reason': queryReason,
+      };
 }

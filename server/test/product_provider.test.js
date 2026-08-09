@@ -795,6 +795,71 @@ test("timeout fallback style profile cannot clear valid Taobao products", async 
   assert.equal(products[0].is_mock, false);
 });
 
+test("final provider output exposes Blueprint score and hard-rejects conflicts", async () => {
+  const logs = [];
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client: {
+      call: async (method) => response(method, [
+        taobaoItem({
+          item_basic_info: {
+            item_id: "blueprint-mary-jane",
+            title: "女士蝴蝶结圆头玛丽珍皮鞋",
+            category_name: "女鞋",
+            pict_url: "//img.example.com/blueprint-mary-jane.jpg",
+          },
+          publish_info: {click_url: "//s.click.taobao.com/blueprint-mary-jane"},
+        }),
+        taobaoItem({
+          item_basic_info: {
+            item_id: "blueprint-running-shoe",
+            title: "361轻量跑步训练运动鞋",
+            category_name: "运动鞋",
+            pict_url: "//img.example.com/blueprint-running-shoe.jpg",
+          },
+          publish_info: {click_url: "//s.click.taobao.com/blueprint-running-shoe"},
+        }),
+      ]),
+    },
+    reranker: null,
+    logger: {
+      info: (...args) => logs.push(args),
+      warn() {},
+    },
+  });
+
+  const products = await provider.recommendForQueries([{
+    look_id: "sweet-look-1",
+    category: "shoes",
+    gender: "female",
+    item_name: "圆头玛丽珍皮鞋",
+    search_keywords: ["女士 圆头 玛丽珍皮鞋"],
+  }], {
+    requestId: "blueprint-api-output",
+    style_profile: {intent_priority_score: 95},
+    outfit_blueprint: {
+      style_identity: "轻盈浪漫造型",
+      core_elements: ["蝴蝶结", "女性化", "复古甜美"],
+      must_have_items: {shoes: ["圆头玛丽珍皮鞋"]},
+      avoid_items: ["跑步鞋", "训练鞋", "运动鞋"],
+    },
+  });
+
+  assert.deepEqual(products.map((product) => product.product_id), [
+    "blueprint-mary-jane",
+  ]);
+  assert.ok(Number.isFinite(products[0].blueprint_match_score));
+  assert.ok(products[0].blueprint_match_score >= 50);
+  assert.ok(Array.isArray(products[0].matched_elements));
+  assert.deepEqual(products[0].conflict_elements, []);
+  const summary = logs.find(([name]) => name === "product_blueprint_summary");
+  assert.equal(summary[1].request_id, "blueprint-api-output");
+  assert.equal(summary[1].product_title, "女士蝴蝶结圆头玛丽珍皮鞋");
+  assert.ok(Number.isFinite(summary[1].blueprint_score));
+  assert.equal(summary[1].final_rank, 1);
+});
+
 test("recommendation cache reuses request, look, category and keyword results", async () => {
   let calls = 0;
   const provider = new TaobaoProductProvider({
