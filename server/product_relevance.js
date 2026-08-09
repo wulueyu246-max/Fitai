@@ -225,7 +225,7 @@ function normalizeProductCategory(value) {
       /(^|[^a-z])(shoe|shoes|sneaker|sneakers|loafer|loafers|boots?)([^a-z]|$)/.test(normalized)) {
     return "shoes";
   }
-  if (/裤|下装|半身裙|裙裤/.test(normalized) ||
+  if (/裤|下装|半身裙|裙裤|裙/.test(normalized) ||
       /(^|[^a-z])(pants|trousers|trouser|skirt|bottom)([^a-z]|$)/.test(normalized)) {
     return "bottom";
   }

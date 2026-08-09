@@ -4070,8 +4070,9 @@ function parseBlueprintPhase(content, context = {}) {
       imageResubmitted: false,
     });
   }
-  const outfitBlueprint = normalizeOutfitBlueprint(
-    parsed.outfit_blueprint || parsed.outfitBlueprint,
+  const rawOutfitBlueprint = parsed.outfit_blueprint || parsed.outfitBlueprint;
+  let outfitBlueprint = normalizeOutfitBlueprint(
+    rawOutfitBlueprint,
     {
       styleProfile,
       styleSemantics,
@@ -4079,6 +4080,66 @@ function parseBlueprintPhase(content, context = {}) {
     },
   );
   if (!blueprintHasCoreItems(outfitBlueprint)) {
+    const collected = Object.fromEntries(Object.entries(
+      outfitBlueprint.must_have_items,
+    ).map(([category, items]) => [category, [...items]]));
+    const evidence = [];
+    const collectEvidence = (value) => {
+      if (typeof value === "string") {
+        const text = value.trim();
+        if (text) evidence.push(text);
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach(collectEvidence);
+        return;
+      }
+      if (!value || typeof value !== "object") return;
+      for (const [key, nested] of Object.entries(value)) {
+        if (["category", "type", "item_category", "itemCategory"].includes(key)) {
+          continue;
+        }
+        collectEvidence(nested);
+      }
+    };
+    collectEvidence(rawOutfitBlueprint?.must_have_items ||
+      rawOutfitBlueprint?.mustHaveItems);
+    collectEvidence(rawOutfitBlueprint?.preferred_items ||
+      rawOutfitBlueprint?.preferredItems);
+    collectEvidence(rawOutfitBlueprint?.core_elements ||
+      rawOutfitBlueprint?.coreElements);
+    collectEvidence(styleProfile.preferred_items);
+    for (const itemName of [...new Set(evidence)]) {
+      const category = normalizeProductCategory(itemName);
+      if (!Object.prototype.hasOwnProperty.call(collected, category)) continue;
+      if (!collected[category].includes(itemName)) {
+        collected[category].push(itemName);
+      }
+    }
+    outfitBlueprint = normalizeOutfitBlueprint({
+      ...outfitBlueprint,
+      must_have_items: collected,
+    }, {
+      styleProfile,
+      styleSemantics,
+      defaultSource: "ai_generated",
+    });
+  }
+  if (!blueprintHasCoreItems(outfitBlueprint)) {
+    console.warn("ai_blueprint_validation", {
+      requestId: context.requestId,
+      blueprintSource: outfitBlueprint.blueprint_source,
+      rawMustHaveType: Array.isArray(rawOutfitBlueprint?.must_have_items ||
+        rawOutfitBlueprint?.mustHaveItems) ? "array" : typeof (
+        rawOutfitBlueprint?.must_have_items || rawOutfitBlueprint?.mustHaveItems
+      ),
+      itemCounts: Object.fromEntries(Object.entries(
+        outfitBlueprint.must_have_items,
+      ).map(([category, items]) => [category, items.length])),
+      preferredItemCount: Array.isArray(styleProfile.preferred_items)
+        ? styleProfile.preferred_items.length
+        : 0,
+    });
     throw new Error("AI Blueprint 缺少可执行的核心单品");
   }
   const stylingStrategy = normalizeStylingStrategy(

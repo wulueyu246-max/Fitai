@@ -72,8 +72,15 @@ function normalizeMustHaveItems(value) {
       const key = normalizeBlueprintItemKey(
         entry.category || entry.type || entry.item_category || entry.itemCategory,
       );
-      if (!key) continue;
-      collected[key].push(...blueprintItemNames(entry));
+      if (key) {
+        collected[key].push(...blueprintItemNames(entry));
+        continue;
+      }
+      for (const [rawKey, nestedValue] of Object.entries(entry)) {
+        const nestedKey = normalizeBlueprintItemKey(rawKey);
+        if (!nestedKey) continue;
+        collected[nestedKey].push(...blueprintItemNames(nestedValue));
+      }
     }
   } else if (value && typeof value === "object") {
     for (const [rawKey, entry] of Object.entries(value)) {

@@ -51,6 +51,7 @@ const {
   structuredJsonRequestOptions,
 } = require("../index");
 const {AnalyticsStore} = require("../analytics_store");
+const {blueprintHasCoreItems} = require("../outfit_blueprint");
 
 const imageDataUrl = "data:image/jpeg;base64,AA==";
 
@@ -2024,6 +2025,33 @@ test("parses the AI Blueprint independently before Look generation", () => {
     result.outfit_blueprint.must_have_items.shoes,
     ["玛丽珍鞋"],
   );
+});
+
+test("recovers AI Blueprint core categories from its own flat item evidence", () => {
+  const fixture = phasedBlueprintFixture();
+  fixture.outfit_blueprint.must_have_items = [
+    "蕾丝蝴蝶结上衣",
+    "高腰百褶裙",
+    "圆头低跟玛丽珍鞋",
+  ];
+  const result = parseBlueprintPhase(JSON.stringify(fixture), {
+    gender: "female",
+    scene: "日常约会",
+    requestId: "phase-flat-blueprint",
+    userInput: "甜美穿搭",
+  });
+
+  assert.equal(blueprintHasCoreItems(result.outfit_blueprint), true);
+  assert.ok(result.outfit_blueprint.must_have_items.top.includes(
+    "蕾丝蝴蝶结上衣",
+  ));
+  assert.ok(result.outfit_blueprint.must_have_items.bottom.includes(
+    "高腰百褶裙",
+  ));
+  assert.ok(result.outfit_blueprint.must_have_items.shoes.includes(
+    "圆头低跟玛丽珍鞋",
+  ));
+  assert.equal(result.outfit_blueprint.blueprint_source, "ai_generated");
 });
 
 test("keeps a valid AI Blueprint when StyleProfile needs text-only repair", () => {
