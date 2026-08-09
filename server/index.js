@@ -113,6 +113,8 @@ const DEFAULT_AI_MODEL = "qwen3.7-plus";
 const DEFAULT_AI_TIMEOUT_MS = 60_000;
 const DEFAULT_BLUEPRINT_TIMEOUT_MS = 120_000;
 const DEFAULT_LOOK_TIMEOUT_MS = 60_000;
+const BLUEPRINT_PHASE_MAX_TOKENS = 2_000;
+const LOOK_PHASE_MAX_TOKENS = 2_600;
 // Manual rollback only: set AI_MODEL=qwen-vl-plus in the environment.
 // The server never switches to this legacy model automatically.
 const LEGACY_AI_MODEL = "qwen-vl-plus";
@@ -4224,6 +4226,7 @@ async function requestStructuredAiPhase({
   client = aiClient,
   messages,
   timeoutMs,
+  maxTokens,
   requestId,
 }) {
   const abortController = new AbortController();
@@ -4236,6 +4239,9 @@ async function requestStructuredAiPhase({
       {
         model: config.model,
         ...structuredJsonRequestOptions(),
+        ...(Number.isInteger(maxTokens) && maxTokens > 0
+          ? {max_tokens: maxTokens}
+          : {}),
         messages,
       },
       {
@@ -4321,7 +4327,7 @@ Do not reinterpret the raw requested style. Do not change gender, style_profile,
 styling_strategy must contain body_strengths[], proportion_issues[], visual_goals[], waistline_strategy, top_length_strategy, bottom_strategy, shoe_strategy, color_strategy, silhouette_strategy, skin_exposure_strategy, accessory_strategy, and weather_strategy.
 Each Look must visibly express the Blueprint and differ materially in silhouette, waistline, garment length, shoe shape, skin exposure, or color continuity—not merely color. A complete Look is top+bottom+shoes, dress+shoes, or outerwear+bottom+shoes; accessories may be empty.
 Each Look must contain unique look_id, gender, style, style_direction, styling_goal, proportion_strategy, why_this_changes_the_body_proportion, scene, accessories_decision[], and items[].
-Each item must contain category, gender, item_name, color, fit, material, style, season, scene, search_keywords[2-3], and negative_keywords[]. Product search requirements must describe the concrete item already chosen by the Blueprint; the marketplace must not decide the outfit.
+Each item must contain only category, gender, item_name, color, fit, material, style, season, and scene. Do not generate search_keywords or negative_keywords in this phase; Phase 3 derives marketplace search requirements from the completed Look and immutable Blueprint.
 recommendations must contain top, bottom, shoes, accessories, and summary, naming the concrete garments, silhouettes, materials, shoe shapes, and details that express the Blueprint. Never use an item that conflicts with style_profile.must_avoid or outfit_blueprint.avoid_items.
 Return exactly one JSON object with only these top-level keys: styling_strategy, recommendations, looks, style_upgrade_level.`;
 }
@@ -4341,6 +4347,7 @@ async function generatePhasedOutfitAnalysis({
     phase: "blueprint",
     client,
     timeoutMs: blueprintTimeoutMs,
+    maxTokens: BLUEPRINT_PHASE_MAX_TOKENS,
     requestId: outfitRequest.requestId,
     messages: [
       {
@@ -4369,6 +4376,7 @@ async function generatePhasedOutfitAnalysis({
       phase: "look",
       client,
       timeoutMs: lookTimeoutMs,
+      maxTokens: LOOK_PHASE_MAX_TOKENS,
       requestId: outfitRequest.requestId,
       messages: [
         {role: "system", content: phasedLookSystemPrompt()},
