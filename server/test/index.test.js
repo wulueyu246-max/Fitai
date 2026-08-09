@@ -1104,48 +1104,88 @@ test("English internal enums remain valid while user-facing AI text becomes Chin
     look.accessories_decision.every((decision) => containsChinese(decision.reason))));
 });
 
-test("AI outfit normalization keeps core Look fields strict", () => {
-  const cases = [
-    {
-      mutate(payload) {
-        delete payload.looks[0].items;
-      },
-      error: /items/,
-    },
-    {
-      mutate(payload) {
-        delete payload.looks[0].look_id;
-      },
-      error: /look_id/,
-    },
-    {
-      mutate(payload) {
-        payload.looks[0].gender = "unknown-gender";
-      },
-      error: /gender/,
-    },
-    {
-      mutate(payload) {
-        payload.looks[0].items = [payload.looks[0].items[0]];
-      },
-      error: /完整穿搭/,
-    },
-    {
-      mutate(payload) {
-        payload.styling_strategy.visual_goals = [];
-      },
-      error: /visual_goals/,
-    },
-  ];
-
-  for (const entry of cases) {
+test("invalid core Look identifiers remove only that Look", () => {
+  for (const mutate of [
+    (payload) => delete payload.looks[0].items,
+    (payload) => delete payload.looks[0].look_id,
+    (payload) => { payload.looks[0].gender = "unknown-gender"; },
+  ]) {
     const payload = validAiOutfitPayloadForNormalization();
-    entry.mutate(payload);
-    assert.throws(
-      () => parseOutfitAnalysis(JSON.stringify(payload), {gender: "male"}),
-      entry.error,
-    );
+    mutate(payload);
+    const analysis = parseOutfitAnalysis(JSON.stringify(payload), {gender: "male"});
+    assert.equal(analysis.looks.length, 2);
+    assert.equal(analysis.look_validation_summary.removed_looks, 1);
+    assert.equal(analysis.look_validation_summary.fallback_used, false);
   }
+});
+
+test("a Look missing shoes is repaired without discarding valid siblings", () => {
+  const payload = validAiOutfitPayloadForNormalization();
+  payload.looks[1].items = payload.looks[1].items.filter(
+    (item) => item.category !== "shoes",
+  );
+
+  const analysis = parseOutfitAnalysis(JSON.stringify(payload), {
+    gender: "male",
+    requestId: "repair-shoes-request",
+  });
+
+  assert.equal(analysis.looks.length, 3);
+  assert.ok(analysis.looks[1].items.some((item) => item.category === "shoes"));
+  assert.equal(analysis.look_validation_summary.valid_looks, 2);
+  assert.equal(analysis.look_validation_summary.repaired_looks, 1);
+  assert.equal(analysis.look_validation_summary.fallback_used, false);
+});
+
+test("an invalid item category is removed and the Look core is repaired", () => {
+  const payload = validAiOutfitPayloadForNormalization();
+  payload.looks[1].items = payload.looks[1].items.map((item) => ({...item}));
+  payload.looks[1].items.find((item) => item.category === "shoes").category = "food";
+
+  const analysis = parseOutfitAnalysis(JSON.stringify(payload), {gender: "male"});
+
+  assert.equal(analysis.looks.length, 3);
+  assert.ok(analysis.looks[1].items.some((item) => item.category === "shoes"));
+  assert.ok(analysis.looks[1].items.every((item) => item.category !== "food"));
+  assert.equal(analysis.look_validation_summary.repaired_looks, 1);
+});
+
+test("one complete Look succeeds when the other Looks are invalid", () => {
+  const payload = validAiOutfitPayloadForNormalization();
+  delete payload.looks[1].items;
+  delete payload.looks[2].look_id;
+
+  const analysis = parseOutfitAnalysis(JSON.stringify(payload), {gender: "male"});
+
+  assert.equal(analysis.looks.length, 1);
+  assert.equal(analysis.look_validation_summary.valid_looks, 1);
+  assert.equal(analysis.look_validation_summary.removed_looks, 2);
+  assert.equal(analysis.look_validation_summary.fallback_used, false);
+});
+
+test("all invalid Looks produce one strict core fallback Look", () => {
+  const payload = validAiOutfitPayloadForNormalization();
+  payload.looks.forEach((look) => delete look.items);
+
+  const analysis = parseOutfitAnalysis(JSON.stringify(payload), {gender: "male"});
+
+  assert.equal(analysis.looks.length, 1);
+  assert.equal(analysis.looks[0].look_id, "fallback-look-1");
+  assert.deepEqual(
+    new Set(analysis.looks[0].items.map((item) => item.category)),
+    new Set(["top", "bottom", "shoes"]),
+  );
+  assert.equal(analysis.look_validation_summary.removed_looks, 3);
+  assert.equal(analysis.look_validation_summary.fallback_used, true);
+});
+
+test("top-level styling strategy structure remains strict", () => {
+  const payload = validAiOutfitPayloadForNormalization();
+  payload.styling_strategy.visual_goals = [];
+  assert.throws(
+    () => parseOutfitAnalysis(JSON.stringify(payload), {gender: "male"}),
+    /visual_goals/,
+  );
 });
 
 test("included jewelry, hat and bag decisions create product requirements without failing", () => {
@@ -1496,9 +1536,10 @@ test("selects DashScope defaults for a DashScope API key", () => {
 
 test("uses qwen3.7-plus by default and keeps legacy rollback explicit", () => {
   assert.equal(DEFAULT_AI_MODEL, "qwen3.7-plus");
-  assert.equal(DEFAULT_AI_TIMEOUT_MS, 90_000);
-  assert.equal(resolveAiTimeoutMs("60000"), 90_000);
-  assert.equal(resolveAiTimeoutMs("120000"), 120_000);
+  assert.equal(DEFAULT_AI_TIMEOUT_MS, 60_000);
+  assert.equal(resolveAiTimeoutMs("45000"), 45_000);
+  assert.equal(resolveAiTimeoutMs("60000"), 60_000);
+  assert.equal(resolveAiTimeoutMs("120000"), 60_000);
   assert.equal(LEGACY_AI_MODEL, "qwen-vl-plus");
   assert.equal(resolveAiConfig({
     DASHSCOPE_API_KEY: "dashscope-test-key",

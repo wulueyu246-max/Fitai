@@ -210,6 +210,36 @@ void main() {
     viewModel.dispose();
   });
 
+  test('a later outfit request failure does not clear the visible Look',
+      () async {
+    final repository = _SequenceOutfitRepository([
+      const OutfitAnalysis(
+        bodyAnalysis: '身体分析',
+        style: '极简',
+        top: '上衣',
+        bottom: '下装',
+        shoes: '鞋履',
+        accessories: '配饰',
+        suggestion: '总结',
+        requestId: 'stable-look-request',
+      ),
+      const AIServiceException(
+        'AI 服务响应较慢',
+        statusCode: 504,
+        requestId: 'failed-look-request',
+      ),
+    ]);
+    final viewModel = OutfitViewModel(repository: repository);
+
+    expect(await viewModel.generateOutfit(request), isTrue);
+    final visibleLook = viewModel.analysis;
+    expect(await viewModel.generateOutfit(request), isFalse);
+
+    expect(viewModel.analysis, same(visibleLook));
+    expect(viewModel.errorMessage, 'AI 服务响应较慢');
+    viewModel.dispose();
+  });
+
   for (final gender in const ['male', 'female']) {
     test('$gender Look only attaches to the current request and gender',
         () async {
@@ -338,4 +368,21 @@ class _FakeOutfitRepository implements OutfitRepository {
   void close() {
     closed = true;
   }
+}
+
+class _SequenceOutfitRepository implements OutfitRepository {
+  _SequenceOutfitRepository(this.results);
+
+  final List<Object> results;
+  var _index = 0;
+
+  @override
+  Future<OutfitAnalysis> generateOutfit(OutfitRequest request) async {
+    final result = results[_index++];
+    if (result is OutfitAnalysis) return result;
+    throw result;
+  }
+
+  @override
+  void close() {}
 }

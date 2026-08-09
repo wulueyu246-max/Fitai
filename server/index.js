@@ -89,14 +89,14 @@ function readBoolean(value, fallback = false) {
 }
 
 const DEFAULT_AI_MODEL = "qwen3.7-plus";
-const DEFAULT_AI_TIMEOUT_MS = 90_000;
+const DEFAULT_AI_TIMEOUT_MS = 60_000;
 // Manual rollback only: set AI_MODEL=qwen-vl-plus in the environment.
 // The server never switches to this legacy model automatically.
 const LEGACY_AI_MODEL = "qwen-vl-plus";
 const styleInterpretationCache = new StyleInterpretationCache();
 
 function resolveAiTimeoutMs(value) {
-  return Math.max(
+  return Math.min(
     readPositiveInteger(value, DEFAULT_AI_TIMEOUT_MS),
     DEFAULT_AI_TIMEOUT_MS,
   );
@@ -1313,78 +1313,19 @@ function parseOutfitAnalysis(content, context = {}) {
     parsed.style_upgrade_level || parsed.styleUpgradeLevel,
   );
   const usedStyleDirections = new Set();
-  const looks = parsedLooks
-    ? parsedLooks.map((look, lookIndex) => {
-      if (!look || typeof look !== "object" || Array.isArray(look)) {
-        throw new Error(`AI 返回 looks[${lookIndex}] 必须是对象`);
-      }
-      const explicitLookGender = Object.prototype.hasOwnProperty.call(look, "gender");
-      if (explicitLookGender && !isSupportedAiGender(look.gender)) {
-        throw new Error(`AI 返回 looks[${lookIndex}].gender 非法`);
-      }
-      const returnedLookGender = explicitLookGender
-        ? normalizeGender(look.gender)
-        : analysisGender;
-      const lookGender = analysisGender === "unisex"
-        ? returnedLookGender
-        : assertContextGender(context, returnedLookGender, `looks[${lookIndex}]`);
-      const rawItems = look.items;
-      if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > 10) {
-        throw new Error(`AI 返回 looks[${lookIndex}].items 必须包含 1 到 10 个单品`);
-      }
-      const lookId = readOptionalString(look.look_id || look.lookId);
-      if (!lookId) {
-        throw new Error(`AI 返回 looks[${lookIndex}].look_id 不能为空`);
-      }
-      const normalizedLook = {
-        request_id: readOptionalString(context.requestId),
-        look_id: lookId,
-        gender: lookGender,
-        scene: readOptionalString(look.scene) || readOptionalString(context.scene),
-        style: readOptionalString(look.style) || parsed.style.trim(),
-        style_direction: uniqueStyleDirection(
-          look.style_direction || look.styleDirection,
-          lookIndex,
-          usedStyleDirections,
-        ),
-        styling_goal: readOptionalString(
-          look.styling_goal || look.stylingGoal,
-        ) || stylingStrategy.visual_goals.join(", ") || "优化整体视觉比例",
-        proportion_strategy: readOptionalString(
-          look.proportion_strategy || look.proportionStrategy,
-        ) || stylingStrategy.silhouette_strategy || stylingStrategy.waistline_strategy,
-        why_this_changes_the_body_proportion: readOptionalString(
-          look.why_this_changes_the_body_proportion ||
-          look.whyThisChangesTheBodyProportion,
-        ) || "通过协调轮廓、腰线、衣长与鞋型改善整体视觉比例",
-      };
-      const hasAccessoryDecision = Object.prototype.hasOwnProperty.call(
-        look,
-        "accessories_decision",
-      ) || Object.prototype.hasOwnProperty.call(look, "accessoriesDecision");
-      const accessoriesDecision = normalizeAccessoriesDecision(
-        look.accessories_decision || look.accessoriesDecision,
-        lookIndex,
-      );
-      const normalizedItems = rawItems.map((item, itemIndex) =>
-        normalizeItem(item, itemIndex, normalizedLook));
-      const items = hasAccessoryDecision
-        ? applyAccessoryDecisions(normalizedItems, accessoriesDecision, lookIndex)
-        : normalizedItems;
-      const categories = new Set(items.map((item) => item.category));
-      if (!isValidLookComposition(categories, lookGender)) {
-        throw new Error(
-          `AI 返回 looks[${lookIndex}] 缺少完整穿搭组合`,
-        );
-      }
-      return {
-        ...normalizedLook,
-        ...(hasAccessoryDecision
-          ? {accessories_decision: accessoriesDecision}
-          : {}),
-        items,
-      };
+  const lookRepairResult = parsedLooks
+    ? repairAndValidateAiLooks({
+      parsedLooks,
+      analysisGender,
+      context,
+      parsedStyle: parsed.style.trim(),
+      stylingStrategy,
+      usedStyleDirections,
+      normalizeItem,
     })
+    : null;
+  const looks = lookRepairResult
+    ? lookRepairResult.looks
     : [{
       request_id: readOptionalString(context.requestId),
       look_id: "look-1",
@@ -1393,23 +1334,24 @@ function parseOutfitAnalysis(content, context = {}) {
       style: parsed.style.trim(),
       style_direction: uniqueStyleDirection("", 0, usedStyleDirections),
       styling_goal: stylingStrategy.visual_goals.join(", ") || "优化整体视觉比例",
-      proportion_strategy: stylingStrategy.silhouette_strategy || stylingStrategy.waistline_strategy,
+      proportion_strategy: stylingStrategy.silhouette_strategy ||
+        stylingStrategy.waistline_strategy,
       why_this_changes_the_body_proportion:
         "通过协调轮廓、腰线、衣长与鞋型改善整体视觉比例",
+      accessories_decision: [],
       items: parsed.products.map((product, index) => normalizeItem(product, index, {
         look_id: "look-1",
         gender: analysisGender,
       })),
     }];
 
-  if (parsedLooks && looks.length !== 3) {
-    throw new Error("AI 返回 looks 必须包含 3 套完整 Look");
+  if (!lookRepairResult?.summary.fallback_used) {
+    assertStyleUpgrade(
+      looks,
+      context.userInput || context.request || "",
+      styleUpgradeLevel,
+    );
   }
-  assertStyleUpgrade(
-    looks,
-    context.userInput || context.request || "",
-    styleUpgradeLevel,
-  );
   assertStyleExpressionConsistency(looks, {
     gender: analysisGender,
     styleExpression,
@@ -1428,6 +1370,14 @@ function parseOutfitAnalysis(content, context = {}) {
     recommendations,
     looks,
     products,
+    look_validation_summary: lookRepairResult?.summary || {
+      request_id: readOptionalString(context.requestId),
+      total_looks: 1,
+      valid_looks: 1,
+      repaired_looks: 0,
+      removed_looks: 0,
+      fallback_used: false,
+    },
   };
 }
 
@@ -1475,6 +1425,234 @@ function normalizeStylingStrategy(value, context = {}) {
       "weatherStrategy",
       readOptionalString(context.scene),
     ),
+  };
+}
+
+const LOOK_REPAIR_ITEM_DEFAULTS = Object.freeze({
+  top: Object.freeze({male: "简洁合身上衣", female: "简洁合身上衣", unisex: "简洁合身上衣"}),
+  bottom: Object.freeze({male: "中高腰直筒裤", female: "中高腰直筒下装", unisex: "中高腰直筒裤"}),
+  shoes: Object.freeze({male: "简洁低帮鞋", female: "简洁浅口鞋", unisex: "简洁低帮鞋"}),
+});
+
+function buildRepairedCoreItem(category, look, itemIndex, normalizeItem) {
+  const gender = normalizeGender(look.gender);
+  const audience = gender === "male" ? "男士" : gender === "female" ? "女士" : "中性";
+  const itemName = LOOK_REPAIR_ITEM_DEFAULTS[category]?.[gender] ||
+    LOOK_REPAIR_ITEM_DEFAULTS[category]?.unisex;
+  const genderNegatives = gender === "male"
+    ? ["女士", "女装", "吊带", "文胸", "连衣裙", "半身裙"]
+    : gender === "female"
+      ? ["男士", "男装", "男款", "商务男鞋"]
+      : [];
+  return normalizeItem({
+    category,
+    gender,
+    item_name: itemName,
+    style: look.style,
+    scene: look.scene,
+    search_keywords: [
+      [audience, look.style, itemName].filter(Boolean).join(" "),
+      [audience, itemName].filter(Boolean).join(" "),
+    ],
+    negative_keywords: genderNegatives,
+  }, itemIndex, look);
+}
+
+function repairCoreLookItems(items, look, normalizeItem) {
+  const categories = new Set(items.map((item) => item.category));
+  const completeWithShoes = isValidLookComposition(categories, look.gender) &&
+    categories.has("shoes");
+  if (completeWithShoes) return {items, repaired: false};
+
+  const hasClothingCore = ["top", "bottom", "dress", "outerwear"]
+    .some((category) => categories.has(category));
+  if (!hasClothingCore) return null;
+
+  const missing = [];
+  if (look.gender === "female" && categories.has("dress")) {
+    if (!categories.has("shoes")) missing.push("shoes");
+  } else if (categories.has("outerwear") && categories.has("bottom")) {
+    if (!categories.has("shoes")) missing.push("shoes");
+  } else {
+    for (const category of ["top", "bottom", "shoes"]) {
+      if (!categories.has(category)) missing.push(category);
+    }
+  }
+
+  const repairedItems = [...items];
+  for (const category of missing) {
+    repairedItems.push(buildRepairedCoreItem(
+      category,
+      look,
+      repairedItems.length,
+      normalizeItem,
+    ));
+  }
+  const repairedCategories = new Set(repairedItems.map((item) => item.category));
+  return isValidLookComposition(repairedCategories, look.gender)
+    ? {items: repairedItems, repaired: missing.length > 0}
+    : null;
+}
+
+function createRepairedFallbackLook({
+  lookIndex,
+  gender,
+  context,
+  style,
+  stylingStrategy,
+  usedStyleDirections,
+  normalizeItem,
+}) {
+  const look = {
+    request_id: readOptionalString(context.requestId),
+    look_id: `fallback-look-${lookIndex + 1}`,
+    gender: normalizeGender(gender),
+    scene: readOptionalString(context.scene),
+    style: readOptionalString(style) || "简洁实穿",
+    style_direction: uniqueStyleDirection("基础稳定搭配", lookIndex, usedStyleDirections),
+    styling_goal: stylingStrategy.visual_goals.join(", ") || "保持整体比例协调",
+    proportion_strategy: stylingStrategy.silhouette_strategy ||
+      stylingStrategy.waistline_strategy || "通过清晰腰线和顺直轮廓优化比例",
+    why_this_changes_the_body_proportion:
+      "通过协调上衣长度、下装腰线和鞋型保持整体视觉平衡",
+    accessories_decision: [],
+  };
+  look.items = ["top", "bottom", "shoes"].map((category, itemIndex) =>
+    buildRepairedCoreItem(category, look, itemIndex, normalizeItem));
+  return look;
+}
+
+function repairAndValidateAiLooks({
+  parsedLooks,
+  analysisGender,
+  context,
+  parsedStyle,
+  stylingStrategy,
+  usedStyleDirections,
+  normalizeItem,
+}) {
+  const looks = [];
+  let validLooks = 0;
+  let repairedLooks = 0;
+  let removedLooks = 0;
+
+  parsedLooks.forEach((rawLook, lookIndex) => {
+    try {
+      if (!rawLook || typeof rawLook !== "object" || Array.isArray(rawLook)) {
+        throw new Error("Look 必须是对象");
+      }
+      const lookId = readOptionalString(rawLook.look_id || rawLook.lookId);
+      if (!lookId) throw new Error("look_id 不能为空");
+      const explicitGender = Object.prototype.hasOwnProperty.call(rawLook, "gender");
+      if (explicitGender && !isSupportedAiGender(rawLook.gender)) {
+        throw new Error("gender 非法");
+      }
+      const returnedGender = explicitGender
+        ? normalizeGender(rawLook.gender)
+        : analysisGender;
+      const lookGender = analysisGender === "unisex"
+        ? returnedGender
+        : assertContextGender(context, returnedGender, `looks[${lookIndex}]`);
+      if (!Array.isArray(rawLook.items) || rawLook.items.length === 0 ||
+          rawLook.items.length > 10) {
+        throw new Error("items 必须包含 1 到 10 个单品");
+      }
+
+      const look = {
+        request_id: readOptionalString(context.requestId),
+        look_id: lookId,
+        gender: lookGender,
+        scene: readOptionalString(rawLook.scene) || readOptionalString(context.scene),
+        style: readOptionalString(rawLook.style) || parsedStyle,
+        style_direction: uniqueStyleDirection(
+          rawLook.style_direction || rawLook.styleDirection,
+          lookIndex,
+          usedStyleDirections,
+        ),
+        styling_goal: readOptionalString(rawLook.styling_goal || rawLook.stylingGoal) ||
+          stylingStrategy.visual_goals.join(", ") || "优化整体视觉比例",
+        proportion_strategy: readOptionalString(
+          rawLook.proportion_strategy || rawLook.proportionStrategy,
+        ) || stylingStrategy.silhouette_strategy || stylingStrategy.waistline_strategy,
+        why_this_changes_the_body_proportion: readOptionalString(
+          rawLook.why_this_changes_the_body_proportion ||
+          rawLook.whyThisChangesTheBodyProportion,
+        ) || "通过协调轮廓、腰线、衣长与鞋型改善整体视觉比例",
+      };
+
+      let repaired = false;
+      const items = [];
+      rawLook.items.forEach((item, itemIndex) => {
+        try {
+          items.push(normalizeItem(item, itemIndex, look));
+        } catch {
+          repaired = true;
+        }
+      });
+
+      let decisions = [];
+      const hasDecisions = Object.prototype.hasOwnProperty.call(
+        rawLook,
+        "accessories_decision",
+      ) || Object.prototype.hasOwnProperty.call(rawLook, "accessoriesDecision");
+      if (hasDecisions) {
+        try {
+          decisions = normalizeAccessoriesDecision(
+            rawLook.accessories_decision || rawLook.accessoriesDecision,
+            lookIndex,
+          );
+        } catch {
+          decisions = [];
+          repaired = true;
+        }
+      }
+
+      let decisionItems = items;
+      if (decisions.length > 0) {
+        try {
+          decisionItems = applyAccessoryDecisions(items, decisions, lookIndex);
+        } catch {
+          decisions = [];
+          decisionItems = items.filter((item) => !item.accessory_type);
+          repaired = true;
+        }
+      }
+      const coreRepair = repairCoreLookItems(decisionItems, look, normalizeItem);
+      if (!coreRepair) throw new Error("缺少可修复的核心穿搭单品");
+      repaired ||= coreRepair.repaired;
+      looks.push({...look, accessories_decision: decisions, items: coreRepair.items});
+      if (repaired) repairedLooks += 1;
+      else validLooks += 1;
+    } catch {
+      removedLooks += 1;
+    }
+  });
+
+  let fallbackUsed = false;
+  if (looks.length === 0) {
+    looks.push(createRepairedFallbackLook({
+      lookIndex: 0,
+      gender: analysisGender,
+      context,
+      style: parsedStyle,
+      stylingStrategy,
+      usedStyleDirections,
+      normalizeItem,
+    }));
+    repairedLooks += 1;
+    fallbackUsed = true;
+  }
+
+  return {
+    looks,
+    summary: {
+      request_id: readOptionalString(context.requestId),
+      total_looks: parsedLooks.length,
+      valid_looks: validLooks,
+      repaired_looks: repairedLooks,
+      removed_looks: removedLooks,
+      fallback_used: fallbackUsed,
+    },
   };
 }
 
@@ -1772,6 +1950,40 @@ function createMockOutfitAnalysis(outfitRequest) {
       },
     ],
     analysisMode: "mock",
+  };
+}
+
+function createBasicFallbackOutfitAnalysis(outfitRequest, reason = "AI_OUTPUT_INVALID") {
+  const analysis = createMockOutfitAnalysis(outfitRequest);
+  const gender = normalizeGender(outfitRequest.gender);
+  const look = {
+    request_id: readOptionalString(outfitRequest.requestId),
+    look_id: "fallback-look-1",
+    gender,
+    scene: readOptionalString(outfitRequest.scene),
+    style: "简洁实穿",
+    style_direction: "基础稳定搭配",
+    styling_goal: "保持核心穿搭完整并兼顾整体比例",
+    proportion_strategy: "使用清晰腰线和顺直轮廓保持视觉平衡",
+    why_this_changes_the_body_proportion:
+      "通过协调上衣长度、下装腰线和鞋型保持整体视觉平衡",
+    accessories_decision: [],
+    items: analysis.products,
+  };
+  return {
+    ...analysis,
+    bodyProfile: "AI 视觉分析暂未完整返回，已先生成一套可继续使用的基础搭配。",
+    style: "简洁实穿，以清晰比例和协调配色为主。",
+    recommendations: {
+      top: "选择肩线清晰、长度适中的上衣。",
+      bottom: "选择中高腰、线条顺直的下装。",
+      shoes: "选择与下装颜色协调、适合当前场景的鞋型。",
+      accessories: "配饰可以留空，优先保证核心穿搭完整。",
+      summary: "AI 输出未完整通过校验，已保留一套基础穿搭供继续使用。",
+    },
+    looks: [look],
+    analysisMode: "rule_fallback",
+    fallbackReason: reason,
   };
 }
 
@@ -3156,41 +3368,65 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       finishReason: response?.choices?.[0]?.finish_reason ?? null,
       contentLength: aiText.length,
     });
-    let analysis = parseOutfitAnalysis(aiText, {
-      gender: requestContext.gender,
-      scene: outfitRequest.scene,
-      requestId: res.locals.requestId,
-      userInput: styleCacheContext.requested_style,
-      style_expression: requestContext.style_expression,
-      styleSemantics: cachedStyleInterpretation?.style_semantics,
-      styleProfile: cachedStyleInterpretation?.style_profile,
+    let analysis;
+    try {
+      analysis = parseOutfitAnalysis(aiText, {
+        gender: requestContext.gender,
+        scene: outfitRequest.scene,
+        requestId: res.locals.requestId,
+        userInput: styleCacheContext.requested_style,
+        style_expression: requestContext.style_expression,
+        styleSemantics: cachedStyleInterpretation?.style_semantics,
+        styleProfile: cachedStyleInterpretation?.style_profile,
+      });
+    } catch (error) {
+      if (!/^AI 返回/.test(String(error?.message || ""))) throw error;
+      analysis = createBasicFallbackOutfitAnalysis(outfitRequest, "AI_OUTPUT_INVALID");
+      analysis.look_validation_summary = {
+        request_id: res.locals.requestId,
+        total_looks: 0,
+        valid_looks: 0,
+        repaired_looks: 1,
+        removed_looks: 0,
+        fallback_used: true,
+      };
+    }
+    console.info("look_validation_summary", analysis.look_validation_summary || {
+      request_id: res.locals.requestId,
+      total_looks: analysis.looks?.length || 0,
+      valid_looks: analysis.looks?.length || 0,
+      repaired_looks: 0,
+      removed_looks: 0,
+      fallback_used: false,
     });
     let validatedStyleInterpretation;
-    try {
-      validatedStyleInterpretation = assertValidStyleInterpretation(
-        analysis,
-        {sourceText: styleCacheContext.requested_style},
-      );
-    } catch (error) {
-      if (!(error instanceof StyleProfileInvalidError)) throw error;
-      console.warn("Style Semantic Repair required", {
-        requestId: res.locals.requestId,
-        issues: error.issues,
-        imageResubmitted: false,
-      });
-      analysis = await repairStyleInterpretationAndLooks({
-        analysis,
-        outfitRequest,
-        requestContext,
-        sourceText: styleCacheContext.requested_style,
-        issues: error.issues,
-      });
-      validatedStyleInterpretation = assertValidStyleInterpretation(
-        analysis,
-        {sourceText: styleCacheContext.requested_style},
-      );
+    if (analysis.analysisMode !== "rule_fallback") {
+      try {
+        validatedStyleInterpretation = assertValidStyleInterpretation(
+          analysis,
+          {sourceText: styleCacheContext.requested_style},
+        );
+      } catch (error) {
+        if (!(error instanceof StyleProfileInvalidError)) throw error;
+        console.warn("Style Semantic Repair required", {
+          requestId: res.locals.requestId,
+          issues: error.issues,
+          imageResubmitted: false,
+        });
+        analysis = await repairStyleInterpretationAndLooks({
+          analysis,
+          outfitRequest,
+          requestContext,
+          sourceText: styleCacheContext.requested_style,
+          issues: error.issues,
+        });
+        validatedStyleInterpretation = assertValidStyleInterpretation(
+          analysis,
+          {sourceText: styleCacheContext.requested_style},
+        );
+      }
+      styleInterpretationCache.set(styleCacheContext, validatedStyleInterpretation);
     }
-    styleInterpretationCache.set(styleCacheContext, validatedStyleInterpretation);
     const parseDurationMs = Date.now() - parseStartedAt;
 
     console.info("AI 穿搭响应字段校验通过", {
@@ -3304,6 +3540,35 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       proxyUrl: errorDetails.proxy_url,
       model: errorDetails.model,
     });
+
+    if (fallbackReason === "AI_TIMEOUT" && outfitRequest) {
+      const fallbackAnalysis = createBasicFallbackOutfitAnalysis(
+        outfitRequest,
+        "AI_TIMEOUT",
+      );
+      console.info("look_validation_summary", {
+        request_id: res.locals.requestId,
+        total_looks: 0,
+        valid_looks: 0,
+        repaired_looks: 1,
+        removed_looks: 0,
+        fallback_used: true,
+      });
+      const responsePayload = await buildOutfitResponseForRequest(
+        fallbackAnalysis,
+        outfitRequest,
+        {deferProducts: true},
+      );
+      setServerTiming(res, {
+        dashscope: elapsedMs,
+        total: Date.now() - requestStartedAt,
+      });
+      return res.json({
+        ...responsePayload,
+        analysisMode: "rule_fallback",
+        fallbackReason: "AI_TIMEOUT",
+      });
+    }
 
     if (config.allowMockContent && config.fallbackOnAiError && outfitRequest) {
       const responsePayload = await buildOutfitResponseForRequest(
@@ -3516,12 +3781,14 @@ module.exports = {
   taobaoService,
   productClickStore,
   config,
+  createBasicFallbackOutfitAnalysis,
   createMockOutfitAnalysis,
   assertStyleExpressionConsistency,
   buildOutfitApiResponse,
   extractAiText,
   normalizeAiOutfitPayload,
   parseOutfitAnalysis,
+  repairAndValidateAiLooks,
   parseStyleRepairPatch,
   repairStyleInterpretationAndLooks,
   buildAiRequestUrl,
