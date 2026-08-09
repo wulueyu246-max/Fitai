@@ -4322,13 +4322,13 @@ The Blueprint must contain concrete purchasable core items for top+bottom+shoes 
 }
 
 function phasedLookSystemPrompt() {
-  return `You are a senior personal stylist. This is Phase 2 only. Use the immutable BodyAnalysis, canonical StyleProfile, and Outfit Blueprint supplied by the user message to create styling_strategy and three complete Looks.
-Do not reinterpret the raw requested style. Do not change gender, style_profile, or outfit_blueprint. All user-facing natural-language values MUST be Simplified Chinese; English is allowed only for enum values and identifiers.
+  return `You are a senior personal stylist. This is Phase 2 only. Execute the immutable Outfit Blueprint using the supplied BodyAnalysis, scene, and budget to create styling_strategy and three complete Looks.
+The Outfit Blueprint is the one and only aesthetic source. Do not infer, reinterpret, expand, or debate what the user's original requested style means. Do not invent a second style direction outside the Blueprint. All user-facing natural-language values MUST be Simplified Chinese; English is allowed only for enum values and identifiers.
 styling_strategy must contain body_strengths[], proportion_issues[], visual_goals[], waistline_strategy, top_length_strategy, bottom_strategy, shoe_strategy, color_strategy, silhouette_strategy, skin_exposure_strategy, accessory_strategy, and weather_strategy.
 Each Look must visibly express the Blueprint and differ materially in silhouette, waistline, garment length, shoe shape, skin exposure, or color continuity—not merely color. A complete Look is top+bottom+shoes, dress+shoes, or outerwear+bottom+shoes; accessories may be empty.
 Each Look must contain unique look_id, gender, style, style_direction, styling_goal, proportion_strategy, why_this_changes_the_body_proportion, scene, accessories_decision[], and items[].
 Each item must contain only category, gender, item_name, color, fit, material, style, season, and scene. Do not generate search_keywords or negative_keywords in this phase; Phase 3 derives marketplace search requirements from the completed Look and immutable Blueprint.
-recommendations must contain top, bottom, shoes, accessories, and summary, naming the concrete garments, silhouettes, materials, shoe shapes, and details that express the Blueprint. Never use an item that conflicts with style_profile.must_avoid or outfit_blueprint.avoid_items.
+recommendations must contain top, bottom, shoes, accessories, and summary, naming the concrete garments, silhouettes, materials, shoe shapes, and details that express the Blueprint. Never use an item that conflicts with outfit_blueprint.avoid_items.
 Return exactly one JSON object with only these top-level keys: styling_strategy, recommendations, looks, style_upgrade_level.`;
 }
 
@@ -4369,6 +4369,19 @@ async function generatePhasedOutfitAnalysis({
   const blueprintDurationMs = Date.now() - blueprintStartedAt;
 
   const lookStartedAt = Date.now();
+  const lookInput = {
+    outfit_blueprint: blueprintPhase.outfit_blueprint,
+    body_analysis: {
+      summary: blueprintPhase.bodyProfile,
+      gender: blueprintPhase.gender,
+    },
+    scene: outfitRequest.scene,
+    budget: {
+      item: outfitRequest.itemBudget,
+      outfit: outfitRequest.outfitBudget,
+    },
+  };
+  const lookInputJson = JSON.stringify(lookInput);
   let lookResponse;
   let analysis;
   try {
@@ -4382,22 +4395,7 @@ async function generatePhasedOutfitAnalysis({
         {role: "system", content: phasedLookSystemPrompt()},
         {
           role: "user",
-          content: JSON.stringify({
-            request_id: outfitRequest.requestId,
-            requested_style: sourceText,
-            scene: outfitRequest.scene,
-            budget: {
-              item: outfitRequest.itemBudget,
-              outfit: outfitRequest.outfitBudget,
-            },
-            body_analysis: blueprintPhase.bodyProfile,
-            gender: blueprintPhase.gender,
-            style: blueprintPhase.style,
-            style_expression: blueprintPhase.style_expression,
-            style_semantics: blueprintPhase.style_semantics,
-            style_profile: blueprintPhase.style_profile,
-            outfit_blueprint: blueprintPhase.outfit_blueprint,
-          }),
+          content: lookInputJson,
         },
       ],
     });
@@ -4425,6 +4423,13 @@ async function generatePhasedOutfitAnalysis({
     );
   }
   const lookDurationMs = Date.now() - lookStartedAt;
+  console.info("ai_outfit_phase_summary", {
+    requestId: outfitRequest.requestId,
+    blueprint_duration: blueprintDurationMs,
+    look_duration: lookDurationMs,
+    look_input_size: Buffer.byteLength(lookInputJson, "utf8"),
+    requested_style_sent: false,
+  });
 
   const productRequirementStartedAt = Date.now();
   analysis.products = analysis.looks.flatMap((look) => look.items);

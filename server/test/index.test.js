@@ -2186,6 +2186,10 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
     /styling_strategy must contain/,
   );
   assert.match(requests[1].messages[0].content, /Phase 2 only/);
+  assert.match(
+    requests[1].messages[0].content,
+    /one and only aesthetic source/,
+  );
   assert.equal(requests[1].max_tokens, 2600);
   assert.match(
     requests[1].messages[0].content,
@@ -2196,7 +2200,17 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
     /Do not generate search_keywords or negative_keywords/,
   );
   const lookInput = JSON.parse(requests[1].messages[1].content);
+  assert.deepEqual(Object.keys(lookInput).sort(), [
+    "body_analysis",
+    "budget",
+    "outfit_blueprint",
+    "scene",
+  ]);
   assert.equal(lookInput.outfit_blueprint.blueprint_source, "ai_generated");
+  assert.equal(lookInput.body_analysis.gender, "female");
+  assert.equal(Object.hasOwn(lookInput, "requested_style"), false);
+  assert.equal(Object.hasOwn(lookInput, "style_profile"), false);
+  assert.equal(Object.hasOwn(lookInput, "style_semantics"), false);
   assert.equal(Object.hasOwn(lookInput, "styling_strategy"), false);
 });
 
