@@ -109,6 +109,32 @@ test("preserves the semantic fallback source marker", () => {
   assert.equal(blueprint.blueprint_source, "semantic_fallback");
 });
 
+test("normalizes AI must-have item objects without replacing Blueprint intent", () => {
+  const arrayBlueprint = normalizeOutfitBlueprint({
+    style_identity: "AI 生成风格",
+    must_have_items: [
+      {category: "top", item_name: "蕾丝蝴蝶结上衣"},
+      {category: "bottom", items: ["高腰百褶裙"]},
+      {category: "shoes", description: "圆头低跟玛丽珍鞋"},
+    ],
+  });
+  assert.equal(blueprintHasCoreItems(arrayBlueprint), true);
+  assert.deepEqual(arrayBlueprint.must_have_items.top, ["蕾丝蝴蝶结上衣"]);
+  assert.deepEqual(arrayBlueprint.must_have_items.bottom, ["高腰百褶裙"]);
+  assert.deepEqual(arrayBlueprint.must_have_items.shoes, ["圆头低跟玛丽珍鞋"]);
+
+  const objectBlueprint = normalizeOutfitBlueprint({
+    style_identity: "AI 生成裙装",
+    must_have_items: {
+      dress: {item_name: "蕾丝收腰连衣裙"},
+      shoes: {options: ["无效未声明字段"], itemName: "玛丽珍鞋"},
+    },
+  });
+  assert.equal(blueprintHasCoreItems(objectBlueprint), true);
+  assert.deepEqual(objectBlueprint.must_have_items.dress, ["蕾丝收腰连衣裙"]);
+  assert.deepEqual(objectBlueprint.must_have_items.shoes, ["玛丽珍鞋"]);
+});
+
 test("a concrete Blueprint creates item-first Taobao search keywords", () => {
   const blueprint = normalizeOutfitBlueprint(examples[0].blueprint);
   const generic = normalizeProductRequirement({

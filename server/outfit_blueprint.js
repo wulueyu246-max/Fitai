@@ -33,13 +33,59 @@ function cleanList(value, limit = 16) {
   return [...new Set(values.map(cleanText).filter(Boolean))].slice(0, limit);
 }
 
+function normalizeBlueprintItemKey(value) {
+  const key = cleanText(value).toLowerCase();
+  if (BLUEPRINT_ITEM_KEYS.includes(key)) return key;
+  if (key === "cap") return "hat";
+  if (key === "accessories") return "accessory";
+  if (key === "jewel" || key === "jewellery") return "jewelry";
+  return "";
+}
+
+function blueprintItemNames(value) {
+  if (typeof value === "string") return cleanList(value, 8);
+  if (Array.isArray(value)) {
+    return [...new Set(value.flatMap(blueprintItemNames))].slice(0, 8);
+  }
+  if (!value || typeof value !== "object") return [];
+  const candidates = [
+    value.items,
+    value.item_names,
+    value.itemNames,
+    value.item_name,
+    value.itemName,
+    value.name,
+    value.requirement,
+    value.description,
+  ];
+  return [...new Set(candidates.flatMap(blueprintItemNames))].slice(0, 8);
+}
+
 function normalizeMustHaveItems(value) {
-  const source = value && typeof value === "object" && !Array.isArray(value)
-    ? value
-    : {};
+  const collected = Object.fromEntries(BLUEPRINT_ITEM_KEYS.map((key) => [
+    key,
+    [],
+  ]));
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const key = normalizeBlueprintItemKey(
+        entry.category || entry.type || entry.item_category || entry.itemCategory,
+      );
+      if (!key) continue;
+      collected[key].push(...blueprintItemNames(entry));
+    }
+  } else if (value && typeof value === "object") {
+    for (const [rawKey, entry] of Object.entries(value)) {
+      const key = normalizeBlueprintItemKey(rawKey);
+      if (!key) continue;
+      collected[key].push(...blueprintItemNames(entry));
+    }
+  }
   return Object.freeze(Object.fromEntries(BLUEPRINT_ITEM_KEYS.map((key) => [
     key,
-    Object.freeze(cleanList(source[key], 8)),
+    Object.freeze([...new Set(collected[key].map(cleanText).filter(Boolean))]
+      .slice(0, 8)),
   ])));
 }
 
