@@ -4046,17 +4046,35 @@ function parseBlueprintPhase(content, context = {}) {
   const gender = contextGender === "unisex"
     ? returnedGender
     : assertContextGender(context, returnedGender, "blueprint_phase");
-  const validatedStyle = assertValidStyleInterpretation({
-    style_semantics: context.styleSemantics || context.style_semantics ||
+  const styleSemantics = normalizeStyleSemantics(
+    context.styleSemantics || context.style_semantics ||
       parsed.style_semantics || parsed.styleSemantics,
-    style_profile: context.styleProfile || context.style_profile ||
+  );
+  const styleProfile = normalizeStyleProfile(
+    context.styleProfile || context.style_profile ||
       parsed.style_profile || parsed.styleProfile,
-  }, {sourceText: context.userInput || style});
+    {sourceText: context.userInput || style},
+  );
+  let styleValidationPending = false;
+  try {
+    assertValidStyleInterpretation({
+      style_semantics: styleSemantics,
+      style_profile: styleProfile,
+    }, {sourceText: context.userInput || style});
+  } catch (error) {
+    if (!(error instanceof StyleProfileInvalidError)) throw error;
+    styleValidationPending = true;
+    console.warn("AI Blueprint style profile requires text-only repair", {
+      requestId: context.requestId,
+      issues: error.issues,
+      imageResubmitted: false,
+    });
+  }
   const outfitBlueprint = normalizeOutfitBlueprint(
     parsed.outfit_blueprint || parsed.outfitBlueprint,
     {
-      styleProfile: validatedStyle.style_profile,
-      styleSemantics: validatedStyle.style_semantics,
+      styleProfile,
+      styleSemantics,
       defaultSource: "ai_generated",
     },
   );
@@ -4074,9 +4092,11 @@ function parseBlueprintPhase(content, context = {}) {
     style_expression: resolveStyleExpression({
       explicit: parsed.style_expression || parsed.styleExpression ||
         context.style_expression || context.styleExpression,
-      styleProfile: validatedStyle.style_profile,
+      styleProfile,
     }),
-    ...validatedStyle,
+    style_semantics: styleSemantics,
+    style_profile: styleProfile,
+    style_validation_pending: styleValidationPending,
     outfit_blueprint: outfitBlueprint,
     styling_strategy: stylingStrategy,
   });

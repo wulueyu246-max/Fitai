@@ -2026,6 +2026,25 @@ test("parses the AI Blueprint independently before Look generation", () => {
   );
 });
 
+test("keeps a valid AI Blueprint when StyleProfile needs text-only repair", () => {
+  const payload = phasedBlueprintFixture();
+  payload.style_semantics.confidence = 0.4;
+  payload.style_profile.dimensions = Object.fromEntries(
+    Object.keys(payload.style_profile.dimensions).map((key) => [key, 50]),
+  );
+
+  const result = parseBlueprintPhase(JSON.stringify(payload), {
+    gender: "female",
+    scene: "约会",
+    requestId: "phase-style-repair",
+    userInput: "甜妹穿搭",
+  });
+
+  assert.equal(result.style_validation_pending, true);
+  assert.equal(result.outfit_blueprint.blueprint_source, "ai_generated");
+  assert.deepEqual(result.outfit_blueprint.must_have_items.shoes, ["玛丽珍鞋"]);
+});
+
 test("merges a text-only Look phase into the immutable AI Blueprint", () => {
   const blueprint = parseBlueprintPhase(JSON.stringify(phasedBlueprintFixture()), {
     gender: "female",
