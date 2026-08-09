@@ -1467,6 +1467,30 @@ function styleIntentAnchors(styleProfile = {}, styleSemantics = {}) {
   ].map(readOptionalString).filter(Boolean))];
 }
 
+function compactRequestedStyle(value, fallback = "用户指定风格") {
+  const raw = readOptionalString(value);
+  if (!raw) return fallback;
+  const styleOnly = raw.split(
+    /\s*(?:用户地区|当前实时天气|场景|穿搭方案必须遵循)\s*[：:]/u,
+    1,
+  )[0].trim();
+  return (styleOnly || raw).slice(0, 64).trim() || fallback;
+}
+
+function boundedSearchKeyword(parts, maxLength = 160) {
+  const values = [...new Set((Array.isArray(parts) ? parts : [parts])
+    .map(readOptionalString)
+    .filter(Boolean))];
+  if (values.length === 0) return "";
+  const core = values.pop().slice(0, maxLength).trim();
+  let result = core;
+  for (const value of values.reverse()) {
+    const candidate = `${value} ${result}`.trim();
+    if (candidate.length <= maxLength) result = candidate;
+  }
+  return result.slice(0, maxLength).trim();
+}
+
 function shouldEnforceCanonicalStyle(styleProfile = {}, styleSemantics = {}) {
   return resolveIntentPriorityScore(styleProfile) >= 80 && (
     styleIntentAnchors(styleProfile, styleSemantics).length > 0 ||
@@ -1492,8 +1516,8 @@ function ensureStyleAnchoredSearchKeywords(
     const value = readOptionalString(keyword);
     const normalizedValue = value.toLowerCase().replace(/\s+/g, "");
     return normalizedValue.includes(normalizedAnchor)
-      ? value
-      : `${anchor} ${value}`.trim();
+      ? boundedSearchKeyword([value])
+      : boundedSearchKeyword([anchor, value]);
   });
 }
 
@@ -1654,10 +1678,8 @@ function buildRepairedCoreItem(
     style: readOptionalString(styleProfile.primary_style) || look.style,
     scene: look.scene,
     search_keywords: [
-      [audience, look.style, anchors[0], color, itemName]
-        .filter(Boolean).join(" "),
-      [audience, anchors[1], material, itemName]
-        .filter(Boolean).join(" "),
+      boundedSearchKeyword([audience, look.style, anchors[0], color, itemName]),
+      boundedSearchKeyword([audience, anchors[1], material, itemName]),
     ],
     negative_keywords: [
       ...genderNegatives,
@@ -1741,10 +1763,12 @@ function repairLookStyleIntent(
       material,
       style: canonicalStyle || item.style,
       search_keywords: [
-        [audience, canonicalStyle, canonicalKeywords[1], color, anchoredItemName]
-          .filter(Boolean).join(" "),
-        [audience, canonicalKeywords[2], material, anchoredItemName]
-          .filter(Boolean).join(" "),
+        boundedSearchKeyword([
+          audience, canonicalStyle, canonicalKeywords[1], color, anchoredItemName,
+        ]),
+        boundedSearchKeyword([
+          audience, canonicalKeywords[2], material, anchoredItemName,
+        ]),
       ].filter(Boolean).slice(0, 3),
       negative_keywords: [
         ...(item.negative_keywords || []),
@@ -2451,8 +2475,7 @@ function createBasicFallbackOutfitAnalysis(
   {aiContent = "", styleInterpretation = null} = {},
 ) {
   const gender = normalizeGender(outfitRequest.gender);
-  const requestedStyle = readOptionalString(outfitRequest.request) ||
-    "用户指定风格";
+  const requestedStyle = compactRequestedStyle(outfitRequest.request);
   const parsedPayload = parseAiPayloadBestEffort(aiContent);
   const normalizedPayload = parsedPayload && typeof parsedPayload === "object" &&
     !Array.isArray(parsedPayload)

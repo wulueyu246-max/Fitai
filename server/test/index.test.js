@@ -1058,6 +1058,27 @@ test("invalid AI Look output keeps the requested style instead of generic casual
   assert.ok(analysis.looks.every((look) => look.style_match_score >= 60));
 });
 
+test("AI timeout fallback keeps weather context out of product search keywords", () => {
+  const analysis = createBasicFallbackOutfitAnalysis({
+    requestId: "timeout-fallback-request",
+    request: "甜美穿搭 用户地区：中国 绍兴；当前实时天气：绍兴，31℃，多云；场景：约会。穿搭方案必须遵循：高温时优先透气材质。",
+    gender: "female",
+    scene: "约会",
+  }, "AI_TIMEOUT");
+
+  const keywords = analysis.looks.flatMap((look) =>
+    look.items.flatMap((item) => item.search_keywords));
+
+  assert.equal(analysis.analysisMode, "rule_fallback");
+  assert.equal(analysis.fallbackReason, "AI_TIMEOUT");
+  assert.equal(analysis.style_profile.source_text, "甜美穿搭");
+  assert.equal(analysis.looks.length, 3);
+  assert.ok(keywords.length > 0);
+  assert.ok(keywords.every((keyword) => keyword.length <= 160));
+  assert.ok(keywords.every((keyword) => !keyword.includes("当前实时天气")));
+  assert.ok(keywords.every((keyword) => !keyword.includes("穿搭方案必须遵循")));
+});
+
 test("AI Style Interpreter preserves an unknown blended style through Look parsing", () => {
   const payload = validAiOutfitPayloadForNormalization();
   payload.style = "韩系Clean Fit学长感";
