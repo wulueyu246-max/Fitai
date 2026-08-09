@@ -2179,7 +2179,7 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
   assert.equal(result.analysis.look_validation_summary.blueprint_preserved, true);
   assert.equal(result.analysis.look_validation_summary.fallback_used, false);
   assert.match(requests[0].messages[0].content, /Phase 1 only/);
-  assert.equal(requests[0].max_tokens, 2000);
+  assert.equal(requests[0].max_tokens, 3200);
   assert.match(requests[0].messages[0].content, /Do not generate Looks/);
   assert.doesNotMatch(
     requests[0].messages[0].content,

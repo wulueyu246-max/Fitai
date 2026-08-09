@@ -113,7 +113,7 @@ const DEFAULT_AI_MODEL = "qwen3.7-plus";
 const DEFAULT_AI_TIMEOUT_MS = 60_000;
 const DEFAULT_BLUEPRINT_TIMEOUT_MS = 120_000;
 const DEFAULT_LOOK_TIMEOUT_MS = 60_000;
-const BLUEPRINT_PHASE_MAX_TOKENS = 2_000;
+const BLUEPRINT_PHASE_MAX_TOKENS = 3_200;
 const LOOK_PHASE_MAX_TOKENS = 2_600;
 // Manual rollback only: set AI_MODEL=qwen-vl-plus in the environment.
 // The server never switches to this legacy model automatically.
