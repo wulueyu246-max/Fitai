@@ -2136,11 +2136,13 @@ test("merges a text-only Look phase into the immutable AI Blueprint", () => {
 
 test("preserves a successful Blueprint when the Look phase times out", async () => {
   let callCount = 0;
+  const requests = [];
   const client = {
     chat: {
       completions: {
-        create: async () => {
+        create: async (request) => {
           callCount += 1;
+          requests.push(request);
           if (callCount === 1) {
             return {choices: [{message: {content: JSON.stringify(
               phasedBlueprintFixture(),
@@ -2176,6 +2178,20 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
   assert.equal(result.analysis.outfit_blueprint.blueprint_source, "ai_generated");
   assert.equal(result.analysis.look_validation_summary.blueprint_preserved, true);
   assert.equal(result.analysis.look_validation_summary.fallback_used, false);
+  assert.match(requests[0].messages[0].content, /Phase 1 only/);
+  assert.match(requests[0].messages[0].content, /Do not generate Looks/);
+  assert.doesNotMatch(
+    requests[0].messages[0].content,
+    /styling_strategy must contain/,
+  );
+  assert.match(requests[1].messages[0].content, /Phase 2 only/);
+  assert.match(
+    requests[1].messages[0].content,
+    /styling_strategy must contain/,
+  );
+  const lookInput = JSON.parse(requests[1].messages[1].content);
+  assert.equal(lookInput.outfit_blueprint.blueprint_source, "ai_generated");
+  assert.equal(Object.hasOwn(lookInput, "styling_strategy"), false);
 });
 
 test("respects explicit compatible API configuration", () => {

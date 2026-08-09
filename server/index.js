@@ -4297,6 +4297,35 @@ recommendations 必须包含 top、bottom、shoes、accessories、summary，且�
 只返回一个 JSON 对象，字段仅为 recommendations、looks、style_upgrade_level。`;
 }
 
+// Keep Phase 1 intentionally compact: image/body understanding and the immutable
+// Blueprint belong here; proportion tactics and concrete Looks belong to Phase 2.
+function compactBlueprintPhaseSystemPrompt(cachedStyleInterpretation) {
+  return `You are a senior personal stylist and visual-proportion analyst.
+This is Phase 1 only. Analyze the supplied body photos and the user's intent, then create the immutable Outfit Blueprint. Do not generate Looks, products, search keywords, recommendations, or styling_strategy in this phase.
+${partialViewSafetyInstruction}
+All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.
+The raw requested style is the highest-priority constraint. Interpret unrestricted natural language directly; never use a style-name whitelist, never replace an unfamiliar aesthetic with generic casual clothing, and never let weather or scene overwrite the requested aesthetic.
+${cachedStyleInterpretation
+    ? "The user message includes validated style_semantics and style_profile. Preserve them as immutable canonical facts without reinterpreting the raw wording."
+    : "Interpret the raw requested style once and return compact canonical style_semantics and style_profile together with the Blueprint."}
+Return exactly one JSON object with only these top-level keys: gender, bodyProfile, style, style_expression, style_semantics, style_profile, outfit_blueprint.
+style_semantics must include identity_impression[], emotional_tone[], visual_personality[], social_signal[], must_express[], must_avoid[], style_atoms[], confidence (0-1), and interpretation_summary.
+style_profile must include source_text, intent_priority_score (explicit user style >=85), interpretation, primary_style, secondary_styles[], blend_rationale, all 11 numeric dimensions (maturity, femininity, masculinity, structure, minimalism, romantic, sportiness, sexiness, youthfulness, luxury, casualness), silhouette, preferred_items[], preferred_colors[], preferred_materials[], must_have[], must_avoid[], positive_keywords[], and negative_keywords[]. Values must be meaningfully differentiated rather than all near 50.
+outfit_blueprint must include blueprint_source="ai_generated", style_identity, character_impression, visual_keywords[], core_elements[], silhouette_strategy[], color_palette[], material_direction[], must_have_items{}, avoid_items[], and occasion_strategy.
+The Blueprint must contain concrete purchasable core items for top+bottom+shoes or dress+shoes. It decides what the user should wear before any marketplace search. Base it on the photos, body proportions, height, weight, scene, budget, and raw request without mechanically inferring proportions from height alone.`;
+}
+
+function phasedLookSystemPrompt() {
+  return `You are a senior personal stylist. This is Phase 2 only. Use the immutable BodyAnalysis, canonical StyleProfile, and Outfit Blueprint supplied by the user message to create styling_strategy and three complete Looks.
+Do not reinterpret the raw requested style. Do not change gender, style_profile, or outfit_blueprint. All user-facing natural-language values MUST be Simplified Chinese; English is allowed only for enum values and identifiers.
+styling_strategy must contain body_strengths[], proportion_issues[], visual_goals[], waistline_strategy, top_length_strategy, bottom_strategy, shoe_strategy, color_strategy, silhouette_strategy, skin_exposure_strategy, accessory_strategy, and weather_strategy.
+Each Look must visibly express the Blueprint and differ materially in silhouette, waistline, garment length, shoe shape, skin exposure, or color continuity—not merely color. A complete Look is top+bottom+shoes, dress+shoes, or outerwear+bottom+shoes; accessories may be empty.
+Each Look must contain unique look_id, gender, style, style_direction, styling_goal, proportion_strategy, why_this_changes_the_body_proportion, scene, accessories_decision[], and items[].
+Each item must contain category, gender, item_name, color, fit, material, style, season, scene, search_keywords[2-3], and negative_keywords[]. Product search requirements must describe the concrete item already chosen by the Blueprint; the marketplace must not decide the outfit.
+recommendations must contain top, bottom, shoes, accessories, and summary, naming the concrete garments, silhouettes, materials, shoe shapes, and details that express the Blueprint. Never use an item that conflicts with style_profile.must_avoid or outfit_blueprint.avoid_items.
+Return exactly one JSON object with only these top-level keys: styling_strategy, recommendations, looks, style_upgrade_level.`;
+}
+
 async function generatePhasedOutfitAnalysis({
   outfitRequest,
   requestContext,
@@ -4314,7 +4343,10 @@ async function generatePhasedOutfitAnalysis({
     timeoutMs: blueprintTimeoutMs,
     requestId: outfitRequest.requestId,
     messages: [
-      {role: "system", content: blueprintPhaseSystemPrompt(cachedStyleInterpretation)},
+      {
+        role: "system",
+        content: compactBlueprintPhaseSystemPrompt(cachedStyleInterpretation),
+      },
       {role: "user", content: userContent},
     ],
   });
@@ -4339,7 +4371,7 @@ async function generatePhasedOutfitAnalysis({
       timeoutMs: lookTimeoutMs,
       requestId: outfitRequest.requestId,
       messages: [
-        {role: "system", content: lookPhaseSystemPrompt()},
+        {role: "system", content: phasedLookSystemPrompt()},
         {
           role: "user",
           content: JSON.stringify({
@@ -4357,7 +4389,6 @@ async function generatePhasedOutfitAnalysis({
             style_semantics: blueprintPhase.style_semantics,
             style_profile: blueprintPhase.style_profile,
             outfit_blueprint: blueprintPhase.outfit_blueprint,
-            styling_strategy: blueprintPhase.styling_strategy,
           }),
         },
       ],
