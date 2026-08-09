@@ -389,7 +389,7 @@ test("model failure falls back to relevance ordering without throwing", async ()
   assert.equal(warnings[0][1].errorCode, "ETIMEDOUT");
 });
 
-test("product AI is capped at 35 seconds and timeout returns real fallback products", async () => {
+test("product AI is capped at 20 seconds and timeout returns real fallback products", async () => {
   let observedTimeout = 0;
   const reranker = new ProductAestheticReranker({
     visualEvaluationEnabled: false,
@@ -409,7 +409,7 @@ test("product AI is capped at 35 seconds and timeout returns real fallback produ
     context: {gender: "female", style_expression: "feminine"},
   });
 
-  assert.ok(observedTimeout > 0 && observedTimeout <= 35_000);
+  assert.ok(observedTimeout > 0 && observedTimeout <= 20_000);
   assert.equal(products.length, 4);
   assert.ok(products.every((item) => item.source === "taobao"));
   assert.ok(products.every((item) => item.ai_rerank_fallback === true));

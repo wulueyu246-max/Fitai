@@ -171,6 +171,45 @@ void main() {
     viewModel.dispose();
   });
 
+  test('real products remain visible when AI rerank uses rule fallback',
+      () async {
+    final viewModel = OutfitViewModel(
+      repository: _FakeOutfitRepository(
+        response: const OutfitAnalysis(
+          bodyAnalysis: '身体分析',
+          style: '轻熟',
+          top: '上衣',
+          bottom: '下装',
+          shoes: '鞋履',
+          accessories: '配饰',
+          suggestion: '总结',
+          gender: 'female',
+          requestId: 'request-fallback-1',
+        ),
+      ),
+    );
+    expect(await viewModel.generateOutfit(request), isTrue);
+    final fallbackProduct = MockProductDatabase.products.first.copyWith(
+      requestId: 'request-fallback-1',
+      sourceProvider: 'taobao',
+      isMock: false,
+      aiRerankFallback: true,
+    );
+
+    expect(
+      viewModel.attachRecommendations(
+        [fallbackProduct],
+        expectedRequestId: 'request-fallback-1',
+        expectedGender: 'female',
+      ),
+      isTrue,
+    );
+    expect(viewModel.productState, ProductLoadingState.fallback);
+    expect(viewModel.analysis?.recommendedProducts, [fallbackProduct]);
+    expect(viewModel.productErrorMessage, isNull);
+    viewModel.dispose();
+  });
+
   for (final gender in const ['male', 'female']) {
     test('$gender Look only attaches to the current request and gender',
         () async {

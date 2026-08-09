@@ -52,7 +52,7 @@ class OutfitRecommendationCard extends StatelessWidget {
         : products;
     final effectiveError = errorMessage ??
         (products.isNotEmpty && visibleProducts.isEmpty
-            ? '商品暂时加载失败，请重新生成'
+            ? '智能精选暂时不可用，点击重新匹配'
             : null);
     return Container(
       padding: const EdgeInsets.all(20),

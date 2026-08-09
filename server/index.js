@@ -195,8 +195,8 @@ const config = Object.freeze({
   aiMaxRetries: readNonNegativeInteger(process.env.AI_MAX_RETRIES, 0),
   productRerankModel: aiConfig.model,
   productRerankTimeoutMs: Math.min(
-    readPositiveInteger(process.env.PRODUCT_RERANK_TIMEOUT_MS, 35_000),
-    35_000,
+    readPositiveInteger(process.env.PRODUCT_RERANK_TIMEOUT_MS, 20_000),
+    20_000,
   ),
   productRerankCacheTtlMs: readPositiveInteger(
     process.env.PRODUCT_RERANK_CACHE_TTL_MS,
@@ -2510,6 +2510,8 @@ async function handleProductRecommendations(req, res, next) {
       ...product,
       request_id: res.locals.requestId,
     }));
+    const rerankFallback = responseProducts.some((product) =>
+      product.ai_rerank_fallback === true);
     console.info("商品推荐完成", {
       requestId: res.locals.requestId,
       statusCode: 200,
@@ -2520,8 +2522,12 @@ async function handleProductRecommendations(req, res, next) {
     });
     return res.json({
       request_id: res.locals.requestId,
-      rerank_fallback: responseProducts.some((product) =>
-        product.ai_rerank_fallback === true),
+      rerank_status: responseProducts.length === 0
+        ? "empty"
+        : rerankFallback
+          ? "fallback"
+          : "success",
+      rerank_fallback: rerankFallback,
       looks: looks.map((look) => ({
         ...look,
         request_id: res.locals.requestId,

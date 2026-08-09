@@ -8,7 +8,6 @@ const {
 } = require("./taobao_client");
 const {
   SUPPORTED_PRODUCT_CATEGORIES,
-  CORE_OUTFIT_CATEGORIES,
   buildTaobaoSearchPlan,
   normalizeGender,
   normalizeProductCategory,
@@ -20,6 +19,11 @@ const {
 
 const PRODUCT_CATEGORIES = SUPPORTED_PRODUCT_CATEGORIES;
 const DEFAULT_SAMPLE_MATERIAL_ID = "28029";
+const PRODUCT_PIPELINE_BUDGET_MS = 45_000;
+const TAOBAO_STAGE_BUDGET_MS = 15_000;
+const PRODUCT_RERANK_BUDGET_MS = 20_000;
+const DEFAULT_RECOMMENDATION_CACHE_TTL_MS = 7 * 60 * 1000;
+const DEFAULT_RECOMMENDATION_CACHE_ENTRIES = 150;
 
 class ProductProviderError extends Error {
   constructor(message, {status = 502, code = "PRODUCT_PROVIDER_FAILED", cause} = {}) {
@@ -99,6 +103,11 @@ class TaobaoProductProvider extends ProductProvider {
     maxRetries,
     sampleMaterialId = DEFAULT_SAMPLE_MATERIAL_ID,
     reranker = null,
+    recommendationCacheTtlMs = DEFAULT_RECOMMENDATION_CACHE_TTL_MS,
+    recommendationCacheEntries = DEFAULT_RECOMMENDATION_CACHE_ENTRIES,
+    pipelineBudgetMs = PRODUCT_PIPELINE_BUDGET_MS,
+    taobaoStageBudgetMs = TAOBAO_STAGE_BUDGET_MS,
+    rerankBudgetMs = PRODUCT_RERANK_BUDGET_MS,
     logger = console,
   }) {
     super();
@@ -109,6 +118,28 @@ class TaobaoProductProvider extends ProductProvider {
     this.sampleMaterialId = String(sampleMaterialId || DEFAULT_SAMPLE_MATERIAL_ID);
     this.reranker = reranker;
     this.logger = logger;
+    this.recommendationCacheTtlMs = positiveInteger(
+      recommendationCacheTtlMs,
+      DEFAULT_RECOMMENDATION_CACHE_TTL_MS,
+    );
+    this.recommendationCacheEntries = positiveInteger(
+      recommendationCacheEntries,
+      DEFAULT_RECOMMENDATION_CACHE_ENTRIES,
+    );
+    this.pipelineBudgetMs = Math.min(
+      positiveInteger(pipelineBudgetMs, PRODUCT_PIPELINE_BUDGET_MS),
+      PRODUCT_PIPELINE_BUDGET_MS,
+    );
+    this.taobaoStageBudgetMs = Math.min(
+      positiveInteger(taobaoStageBudgetMs, TAOBAO_STAGE_BUDGET_MS),
+      TAOBAO_STAGE_BUDGET_MS,
+    );
+    this.rerankBudgetMs = Math.min(
+      positiveInteger(rerankBudgetMs, PRODUCT_RERANK_BUDGET_MS),
+      PRODUCT_RERANK_BUDGET_MS,
+    );
+    this.recommendationCache = new Map();
+    this.inflightRecommendations = new Map();
     this.client = client || new TaobaoApiClient({
       appKey,
       appSecret,
@@ -183,51 +214,144 @@ class TaobaoProductProvider extends ProductProvider {
         code: "INVALID_PRODUCT_REQUIREMENTS",
       });
     }
-    const pipelineStartedAt = Date.now();
+    const cacheKey = recommendationCacheKey(values, context);
+    const cached = this.#readRecommendationCache(cacheKey);
+    if (cached) {
+      this.logger.info?.("product_pipeline_summary", {
+        request_id: context.requestId || undefined,
+        taobao_count: cached.length,
+        semantic_pass_count: cached.length,
+        rule_rank_count: cached.length,
+        ai_rerank_success: !cached.some((product) =>
+          product.ai_rerank_fallback === true),
+        fallback_used: cached.some((product) =>
+          product.ai_rerank_fallback === true),
+        cache_hit: true,
+        total_ms: 0,
+      });
+      return cloneProductArray(cached);
+    }
+    const inflight = this.inflightRecommendations.get(cacheKey);
+    if (inflight) return cloneProductArray(await inflight);
+
+    const work = this.#recommendForQueriesUncached(values, context);
+    this.inflightRecommendations.set(cacheKey, work);
     try {
-      const groups = await Promise.all(values.map(async (query) => {
+      const products = await work;
+      this.#writeRecommendationCache(cacheKey, products);
+      return cloneProductArray(products);
+    } finally {
+      this.inflightRecommendations.delete(cacheKey);
+    }
+  }
+
+  async #recommendForQueriesUncached(values, context) {
+    const pipelineStartedAt = Date.now();
+    const pipelineDeadline = pipelineStartedAt + this.pipelineBudgetMs;
+    try {
+      const groupOutcomes = await Promise.all(values.map(async (query) => {
         const requirement = normalizeProductRequirement({...context, ...query}, context);
-        const candidates = await this.#candidatePool({
-          ...context,
-          ...query,
-          ...requirement,
-          limit: 20,
-        });
-        return {
-          requirement,
-          prefilterCount: candidates.length,
-          candidates: candidates.slice(0, 4),
-        };
+        const metrics = {taobaoCount: 0, semanticPassCount: 0};
+        try {
+          const candidates = await withTimeBudget(
+            this.#candidatePool({
+              ...context,
+              ...query,
+              ...requirement,
+              limit: 20,
+            }, metrics),
+            Math.max(1, Math.min(
+              this.taobaoStageBudgetMs,
+              pipelineDeadline - Date.now(),
+            )),
+            "TAOBAO_STAGE_TIMEOUT",
+          );
+          return {
+            requirement,
+            prefilterCount: candidates.length,
+            candidates: candidates.slice(0, 4),
+            metrics,
+            error: null,
+          };
+        } catch (error) {
+          this.logger.warn?.("单个商品需求搜索失败，保留其他成功品类", {
+            requestId: context.requestId || undefined,
+            look_id: requirement.look_id || undefined,
+            category: requirement.category,
+            errorCode: safeProviderCode(error),
+          });
+          return {
+            requirement,
+            prefilterCount: 0,
+            candidates: [],
+            metrics,
+            error,
+          };
+        }
       }));
+      const groups = groupOutcomes.map(({error: _error, metrics: _metrics, ...group}) =>
+        group);
       const taobaoMs = Date.now() - pipelineStartedAt;
-      const productPrefilterCount = groups.reduce(
-        (total, group) => total + (group.prefilterCount ?? group.candidates.length),
+      const taobaoCount = groupOutcomes.reduce(
+        (total, group) => total + group.metrics.taobaoCount,
         0,
       );
-      const coreGroups = groups.filter((group) =>
-        CORE_OUTFIT_CATEGORIES.includes(group.requirement.category));
-      if (coreGroups.length > 0 && coreGroups.every((group) => group.candidates.length === 0)) {
-        this.logger.info?.("核心穿搭品类均无语义匹配商品", {
-          requestId: context.requestId || undefined,
-          coreCategories: [...new Set(coreGroups.map((group) => group.requirement.category))],
-          accessoryCandidatesIgnored: groups
-            .filter((group) => !CORE_OUTFIT_CATEGORIES.includes(group.requirement.category))
-            .reduce((count, group) => count + group.candidates.length, 0),
-        });
-        this.status = "taobao";
-        return [];
+      const semanticPassCount = groupOutcomes.reduce(
+        (total, group) => total + group.metrics.semanticPassCount,
+        0,
+      );
+      const ruleStartedAt = Date.now();
+      const baseProducts = uniqueProducts(sortProductsByCategoryPriority(
+        groups.flatMap((group) => group.candidates.slice(0, 4)),
+      )).slice(0, values.length * 4);
+      const ruleRankMs = Date.now() - ruleStartedAt;
+      const searchErrors = groupOutcomes
+        .map((group) => group.error)
+        .filter(Boolean);
+      if (baseProducts.length === 0 && searchErrors.length > 0) {
+        throw searchErrors[0];
       }
-      const products = this.reranker
-        ? await this.reranker.rerank({
-          groups,
-          context,
-          requestId: context.requestId || "",
-          selectionLimit: 4,
-        })
-        : groups.flatMap((group) => group.candidates.slice(0, 4));
-      const productAiMs = Math.max(0, Date.now() - pipelineStartedAt - taobaoMs);
-      const rerankFallback = products.some((product) =>
-        product.ai_rerank_fallback === true);
+
+      let products = baseProducts;
+      let aiRerankSuccess = false;
+      let fallbackUsed = baseProducts.length > 0;
+      const productAiStartedAt = Date.now();
+      if (this.reranker && baseProducts.length > 0) {
+        try {
+          const reranked = await withTimeBudget(
+            this.reranker.rerank({
+              groups,
+              context,
+              requestId: context.requestId || "",
+              selectionLimit: 4,
+            }),
+            Math.max(1, Math.min(
+              this.rerankBudgetMs,
+              pipelineDeadline - Date.now(),
+            )),
+            "AI_RERANK_TIMEOUT",
+          );
+          if (reranked.length > 0) {
+            products = reranked;
+            fallbackUsed = reranked.some((product) =>
+              product.ai_rerank_fallback === true);
+            aiRerankSuccess = !fallbackUsed;
+          } else {
+            products = markRerankFallback(baseProducts);
+            fallbackUsed = true;
+          }
+        } catch (error) {
+          products = markRerankFallback(baseProducts);
+          fallbackUsed = true;
+          this.logger.warn?.("AI 商品复选超时或失败，立即返回规则排序", {
+            requestId: context.requestId || undefined,
+            errorCode: safeProviderCode(error),
+          });
+        }
+      } else if (baseProducts.length > 0) {
+        products = markRerankFallback(baseProducts);
+      }
+      const productAiMs = Date.now() - productAiStartedAt;
       this.logger.info?.("AI最终选择", {
         requestId: context.requestId || undefined,
         provider: "taobao",
@@ -237,20 +361,18 @@ class TaobaoProductProvider extends ProductProvider {
       this.status = "taobao";
       this.logger.info?.("product_pipeline_summary", {
         request_id: context.requestId || undefined,
-        gender: context.gender || "unisex",
-        style_expression: context.style_expression || "auto",
-        outfit_ai_ms: context.outfit_ai_ms ?? null,
+        taobao_count: taobaoCount,
+        semantic_pass_count: semanticPassCount,
+        rule_rank_count: baseProducts.length,
+        ai_rerank_success: aiRerankSuccess,
+        fallback_used: fallbackUsed,
         taobao_ms: taobaoMs,
-        product_prefilter_count: productPrefilterCount,
-        ai_product_candidate_count: Math.min(
-          productPrefilterCount,
-          values.length * 4,
-        ),
-        product_ai_ms: productAiMs,
-        rerank_fallback: rerankFallback,
+        rule_rank_ms: ruleRankMs,
+        ai_rerank_ms: productAiMs,
+        cache_hit: false,
         total_ms: Date.now() - pipelineStartedAt,
         result_status: products.length > 0
-          ? (rerankFallback ? "fallback_success" : "success")
+          ? (fallbackUsed ? "fallback_success" : "success")
           : "empty",
       });
       return uniqueProducts(sortProductsByCategoryPriority(products))
@@ -261,13 +383,36 @@ class TaobaoProductProvider extends ProductProvider {
     }
   }
 
+  #readRecommendationCache(key) {
+    const entry = this.recommendationCache.get(key);
+    if (!entry) return null;
+    if (Date.now() >= entry.expiresAt) {
+      this.recommendationCache.delete(key);
+      return null;
+    }
+    this.recommendationCache.delete(key);
+    this.recommendationCache.set(key, entry);
+    return entry.products;
+  }
+
+  #writeRecommendationCache(key, products) {
+    this.recommendationCache.set(key, {
+      expiresAt: Date.now() + this.recommendationCacheTtlMs,
+      products: cloneProductArray(products),
+    });
+    while (this.recommendationCache.size > this.recommendationCacheEntries) {
+      const oldestKey = this.recommendationCache.keys().next().value;
+      this.recommendationCache.delete(oldestKey);
+    }
+  }
+
   async #recommendRequirement(filters) {
     const targetLimit = Math.min(positiveInteger(filters.limit, 3), 6);
     const products = await this.#candidatePool({...filters, limit: 20});
     return products.slice(0, targetLimit);
   }
 
-  async #candidatePool(filters) {
+  async #candidatePool(filters, metrics = null) {
     const requirement = normalizeProductRequirement(filters, filters);
     const searchPlan = buildTaobaoSearchPlan(requirement);
     this.logger.info?.("淘宝商品搜索需求", {
@@ -293,7 +438,7 @@ class TaobaoProductProvider extends ProductProvider {
         pageNo: 1,
         minimumRelevanceScore: 35,
         limit: 50,
-      });
+      }, metrics);
     }
     if (products.length === 0 && searchPlan.fallbacks.length > 0) {
       const fallbackBatches = await Promise.all(searchPlan.fallbacks.map(
@@ -306,7 +451,7 @@ class TaobaoProductProvider extends ProductProvider {
           pageNo: 1,
           minimumRelevanceScore: 35,
           limit: 50,
-        }),
+        }, metrics),
       ));
       products = uniqueProducts(fallbackBatches.flat())
         .sort((left, right) => right.relevance_score - left.relevance_score);
@@ -333,7 +478,7 @@ class TaobaoProductProvider extends ProductProvider {
     return budgetAssessed.slice(0, candidateLimit);
   }
 
-  async #search(filters) {
+  async #search(filters, metrics = null) {
     let payload;
     try {
       payload = await this.client.call(TAOBAO_MATERIAL_SEARCH_METHOD, {
@@ -385,6 +530,10 @@ class TaobaoProductProvider extends ProductProvider {
         ...details,
       });
     });
+    if (metrics) {
+      metrics.taobaoCount += Number(mappingDetails.rawCount || 0);
+      metrics.semanticPassCount += products.length;
+    }
     this.logger.info?.("淘宝商品搜索结果", {
       requestId: filters.requestId || undefined,
       provider: "taobao",
@@ -577,6 +726,10 @@ function createProductProvider({
       maxRetries: positiveInteger(environment.TAOBAO_MAX_RETRIES, 1),
       sampleMaterialId: environment.TAOBAO_SAMPLE_MATERIAL_ID || DEFAULT_SAMPLE_MATERIAL_ID,
       reranker,
+      recommendationCacheTtlMs: positiveInteger(
+        environment.PRODUCT_RECOMMENDATION_CACHE_TTL_MS,
+        DEFAULT_RECOMMENDATION_CACHE_TTL_MS,
+      ),
       logger,
     });
   } catch (error) {
@@ -997,6 +1150,53 @@ function summarizeProductsByLook(products) {
     counts[lookId] = (counts[lookId] || 0) + 1;
   }
   return counts;
+}
+
+function recommendationCacheKey(queries, context = {}) {
+  return JSON.stringify((Array.isArray(queries) ? queries : []).map((query) => ({
+    request_id: String(context.requestId || query?.request_id || "").trim(),
+    look_id: String(query?.look_id || query?.lookId || "").trim(),
+    category: String(query?.category || "").trim().toLowerCase(),
+    keyword: String(
+      query?.search_keywords?.[0] ||
+      query?.searchKeywords?.[0] ||
+      query?.keyword ||
+      query?.item_name ||
+      query?.itemName ||
+      "",
+    ).trim(),
+  })));
+}
+
+function markRerankFallback(products) {
+  return cloneProductArray(products).map((product) => ({
+    ...product,
+    ai_rerank_fallback: true,
+    rerank_status: "fallback",
+  }));
+}
+
+function cloneProductArray(products) {
+  return (Array.isArray(products) ? products : []).map((product) => ({...product}));
+}
+
+async function withTimeBudget(promise, timeoutMs, code) {
+  const budget = Math.max(1, Number(timeoutMs) || 1);
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new ProductProviderError(
+          "商品处理阶段超过时间预算",
+          {status: 504, code},
+        )), budget);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function requireConfig(value, field) {

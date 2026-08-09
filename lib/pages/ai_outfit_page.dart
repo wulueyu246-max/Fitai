@@ -900,7 +900,28 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
               scene: request.scene,
             );
       if (products.isEmpty) {
-        throw StateError('商品接口返回的 products 数组为空');
+        if (!mounted || generationId != _generationSequence) {
+          return;
+        }
+        _viewModel.attachRecommendations(
+          const [],
+          expectedRequestId: analysis.requestId ?? '',
+          expectedGender: analysis.gender,
+        );
+        setState(() {
+          _selectedProductIds = {};
+          _generationState = OutfitGenerationState.success;
+          _generationDetail = OutfitGenerationState.success.label;
+        });
+        AppLogger.instance.info(
+          'product_recommendations_empty',
+          metadata: {
+            'generationId': generationId,
+            'requestId': analysis.requestId,
+            'durationMs': productStopwatch.elapsedMilliseconds,
+          },
+        );
+        return;
       }
 
       if (!mounted || generationId != _generationSequence) {
@@ -972,7 +993,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       });
       if (existingProducts.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('商品匹配暂时失败，AI 穿搭方案已保留')),
+          const SnackBar(content: Text('智能精选暂时不可用，AI 穿搭方案已保留')),
         );
       }
       AppLogger.instance.warning(

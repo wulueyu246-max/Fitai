@@ -579,7 +579,7 @@ test("fallback products still pass the semantic hard gate and empty results are 
   assert.equal(emptyLog[1].final_count, 0);
 });
 
-test("accessory candidates never fill an outfit when all core groups are empty", async () => {
+test("valid accessory candidates remain available when core groups are empty", async () => {
   const provider = providerWithClient({
     call: async (method, params) => {
       const query = String(params.q || "");
@@ -618,7 +618,8 @@ test("accessory candidates never fill an outfit when all core groups are empty",
     },
   ]);
 
-  assert.deepEqual(products, []);
+  assert.deepEqual(products.map((product) => product.product_id), ["pearl-earring"]);
+  assert.ok(products.every((product) => product.source === "taobao"));
 });
 
 test("builds a twenty-item quality-filtered pool and sends only four to AI", async () => {
@@ -665,6 +666,126 @@ test("builds a twenty-item quality-filtered pool and sends only four to AI", asy
   assert.equal(capturedGroups[0].candidates.length, 4);
   assert.equal(products.length, 4);
   assert.ok(products.every((product) => product.source === "taobao"));
+});
+
+test("AI rerank timeout returns rule-ranked real Taobao products", async () => {
+  const logs = [];
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client: {
+      call: async (method) => response(method, Array.from(
+        {length: 50},
+        (_, index) => taobaoItem({
+          item_basic_info: {
+            item_id: `timeout-top-${index}`,
+            title: `女士法式白色衬衫${index}`,
+            category_name: "女士衬衫",
+            pict_url: `//img.example.com/timeout-top-${index}.jpg`,
+          },
+          publish_info: {
+            click_url: `//s.click.taobao.com/timeout-top-${index}`,
+          },
+        }),
+      )),
+    },
+    reranker: {rerank: async () => new Promise(() => {})},
+    rerankBudgetMs: 20,
+    logger: {
+      info: (...args) => logs.push(args),
+      warn: (...args) => logs.push(args),
+    },
+  });
+
+  const products = await provider.recommendForQueries([{
+    look_id: "look-timeout",
+    category: "top",
+    gender: "female",
+    item_name: "法式白色衬衫",
+    search_keywords: ["女士 法式 白色 衬衫"],
+  }], {requestId: "request-timeout"});
+
+  assert.equal(products.length, 4);
+  assert.ok(products.every((product) => product.source === "taobao"));
+  assert.ok(products.every((product) => product.is_mock === false));
+  assert.ok(products.every((product) => product.ai_rerank_fallback === true));
+  const summary = logs.find(([message]) => message === "product_pipeline_summary");
+  assert.ok(summary);
+  assert.equal(summary[1].ai_rerank_success, false);
+  assert.equal(summary[1].fallback_used, true);
+  assert.equal(summary[1].rule_rank_count, 4);
+});
+
+test("AI rerank error cannot clear valid Taobao products", async () => {
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client: {
+      call: async (method) => response(method, [taobaoItem({
+        item_basic_info: {
+          item_id: "error-top-1",
+          title: "女士简约白色衬衫",
+          category_name: "女士衬衫",
+          pict_url: "//img.example.com/error-top-1.jpg",
+        },
+        publish_info: {click_url: "//s.click.taobao.com/error-top-1"},
+      })]),
+    },
+    reranker: {rerank: async () => {
+      throw Object.assign(new Error("invalid model output"), {code: "AI_BAD_JSON"});
+    }},
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await provider.recommendForQueries([{
+    look_id: "look-error",
+    category: "top",
+    gender: "female",
+    item_name: "简约白色衬衫",
+    search_keywords: ["女士 简约 白色 衬衫"],
+  }], {requestId: "request-error"});
+
+  assert.deepEqual(products.map((product) => product.product_id), ["error-top-1"]);
+  assert.equal(products[0].ai_rerank_fallback, true);
+  assert.equal(products[0].rerank_status, "fallback");
+});
+
+test("recommendation cache reuses request, look, category and keyword results", async () => {
+  let calls = 0;
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client: {
+      call: async (method) => {
+        calls += 1;
+        return response(method, [taobaoItem({
+          item_basic_info: {
+            item_id: "cached-top-1",
+            title: "男士浅灰色短袖Polo",
+            category_name: "Polo上衣",
+            pict_url: "//img.example.com/cached-top-1.jpg",
+          },
+          publish_info: {click_url: "//s.click.taobao.com/cached-top-1"},
+        })]);
+      },
+    },
+    logger: {info() {}, warn() {}},
+  });
+  const queries = [{
+    look_id: "look-cache",
+    category: "top",
+    gender: "male",
+    item_name: "浅灰色短袖Polo",
+    search_keywords: ["男士 浅灰色 短袖 Polo"],
+  }];
+  const context = {requestId: "request-cache"};
+
+  const first = await provider.recommendForQueries(queries, context);
+  const second = await provider.recommendForQueries(queries, context);
+
+  assert.equal(calls, 1);
+  assert.deepEqual(second, first);
+  assert.notEqual(second, first);
 });
 
 test("extracts official simplified camelCase result containers", () => {

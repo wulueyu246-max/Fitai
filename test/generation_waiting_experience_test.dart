@@ -111,7 +111,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(find.text('测试身体分析'), findsOne);
-    expect(find.text('商品匹配暂时失败，请重新匹配商品'), findsOne);
+    expect(find.text('智能精选暂时不可用，点击重新匹配'), findsOne);
     expect(find.byKey(const Key('retry-product-recommendations')), findsOne);
     expect(find.byKey(const Key('generate-outfit')), findsOne);
     expect(repository.calls, 1);
@@ -125,6 +125,27 @@ void main() {
     expect(repository.calls, 1);
     expect(productService.calls, 2);
     expect(find.text('测试身体分析'), findsOne);
+  });
+
+  testWidgets('empty product result keeps the Look and shows no-match state', (
+    tester,
+  ) async {
+    final repository = _ImmediateOutfitRepository();
+    final productService = _EmptyProductService();
+    await _pumpPage(
+      tester,
+      repository: repository,
+      productService: productService,
+    );
+    await _selectFrontPhoto(tester);
+    await _tapGenerate(tester);
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('测试身体分析'), findsOne);
+    expect(find.byKey(const Key('product-recommendation-empty')), findsOne);
+    expect(find.byKey(const Key('product-recommendation-error')), findsNothing);
+    expect(repository.calls, 1);
+    expect(productService.calls, 1);
   });
 
   testWidgets('AI timeout stops loading and allows retry', (tester) async {
@@ -308,6 +329,19 @@ class _FailingProductService extends _BaseProductService {
   }) {
     calls += 1;
     return Future.error(StateError('product unavailable'));
+  }
+}
+
+class _EmptyProductService extends _BaseProductService {
+  int calls = 0;
+
+  @override
+  Future<List<Product>> recommendProducts({
+    required OutfitAnalysis analysis,
+    required OutfitRequest request,
+  }) async {
+    calls += 1;
+    return const [];
   }
 }
 

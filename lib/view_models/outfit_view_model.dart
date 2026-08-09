@@ -110,7 +110,9 @@ class OutfitViewModel extends ChangeNotifier {
       outfitPlan: effectivePlans.isEmpty ? outfitPlan : effectivePlans.first,
       outfitPlans: effectivePlans,
     );
-    _productState = ProductLoadingState.success;
+    _productState = products.any((product) => product.aiRerankFallback)
+        ? ProductLoadingState.fallback
+        : ProductLoadingState.success;
     _productErrorMessage = null;
     _notifyListeners();
     return true;
@@ -133,9 +135,9 @@ class OutfitViewModel extends ChangeNotifier {
     _productState = timeout
         ? ProductLoadingState.timeout
         : partial
-            ? ProductLoadingState.partial
+            ? ProductLoadingState.fallback
             : ProductLoadingState.failed;
-    _productErrorMessage = timeout ? '商品匹配响应较慢，请重新匹配商品' : '商品匹配暂时失败，请重新匹配商品';
+    _productErrorMessage = timeout ? '商品匹配响应较慢，请重新匹配商品' : '智能精选暂时不可用，点击重新匹配';
     _notifyListeners();
     return true;
   }

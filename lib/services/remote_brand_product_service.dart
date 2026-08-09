@@ -20,7 +20,7 @@ class RemoteBrandProductService implements BrandProductService {
       'AFFILIATE_CHANNEL_ID',
       defaultValue: 'fitai-commercial-test',
     ),
-    this.timeout = const Duration(seconds: 120),
+    this.timeout = const Duration(seconds: 50),
     bool? enforceProductionSafety,
   })  : enforceProductionSafety = enforceProductionSafety ??
             (kReleaseMode &&
@@ -109,7 +109,10 @@ class RemoteBrandProductService implements BrandProductService {
       );
     }
     if (products.isEmpty) {
-      throw const ProductSourceException('商品暂时加载失败，请重新生成');
+      if (parsedProducts.isNotEmpty) {
+        throw const ProductSourceException('智能精选暂时不可用，请重新匹配');
+      }
+      return const [];
     }
     return List<Product>.unmodifiable(products);
   }

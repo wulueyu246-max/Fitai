@@ -2,7 +2,7 @@ enum ProductLoadingState {
   idle,
   loading,
   success,
-  partial,
+  fallback,
   timeout,
   failed,
 }
