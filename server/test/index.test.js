@@ -896,6 +896,102 @@ function validAiOutfitPayloadForNormalization() {
   };
 }
 
+test("high-priority style intent replaces generic casual Looks and advice", () => {
+  const payload = validAiOutfitPayloadForNormalization();
+  payload.gender = "female";
+  payload.style = "普通休闲";
+  payload.style_semantics = {
+    identity_impression: ["甜美精致"],
+    emotional_tone: ["轻盈愉悦"],
+    visual_personality: ["柔和浪漫"],
+    social_signal: ["亲和但有造型感"],
+    must_express: ["甜美轮廓", "轻盈细节", "柔和配色"],
+    must_avoid: ["普通休闲", "运动鞋", "工装感"],
+    style_atoms: ["浪漫", "精致", "轻盈"],
+    confidence: 0.95,
+    interpretation_summary: "以轻盈、精致和柔和轮廓表达明确的甜美气质。",
+  };
+  payload.style_profile = {
+    source_text: "甜美穿搭",
+    intent_priority_score: 95,
+    interpretation: "用柔和色彩、精致细节和轻盈轮廓形成甜美但不幼稚的造型。",
+    primary_style: "甜美精致",
+    secondary_styles: ["轻盈浪漫"],
+    blend_rationale: "甜美为主，轻盈和精致感控制整体完成度。",
+    dimensions: {
+      maturity: 48, femininity: 92, masculinity: 8, structure: 45,
+      minimalism: 42, romantic: 90, sportiness: 5, sexiness: 35,
+      youthfulness: 78, luxury: 58, casualness: 32,
+    },
+    silhouette: "轻盈收腰并强调柔和曲线",
+    preferred_items: [
+      "蝴蝶结针织衫", "荷叶边雪纺衫", "短款柔软开衫",
+      "高腰A字半身裙", "柔粉垂坠半身裙", "高腰微喇长裤",
+      "圆头玛丽珍鞋", "缎面芭蕾鞋", "精致低跟单鞋",
+    ],
+    preferred_colors: ["柔粉色", "奶油白", "浅紫色"],
+    preferred_materials: ["细腻针织", "轻盈雪纺", "柔光缎面"],
+    must_have: ["甜美轮廓", "轻盈细节", "柔和配色"],
+    must_avoid: ["普通休闲", "运动鞋", "跑步鞋", "工装感"],
+    positive_keywords: ["甜美", "轻盈", "精致"],
+    negative_keywords: ["运动鞋", "跑步鞋", "工装"],
+  };
+  payload.recommendations = {
+    top: "穿一件普通上衣。",
+    bottom: "搭配普通裤子。",
+    shoes: "选择舒适的鞋。",
+    accessories: "可以加配饰。",
+    summary: "保持休闲舒适。",
+  };
+  payload.looks = [0, 1, 2].map((index) => ({
+    look_id: `generic-casual-${index + 1}`,
+    gender: "female",
+    scene: "日常约会",
+    style: "普通休闲",
+    style_direction: `日常休闲套装 ${index + 1}`,
+    styling_goal: "保持舒适和日常",
+    proportion_strategy: "自然宽松",
+    why_this_changes_the_body_proportion: "穿着方便",
+    accessories_decision: [],
+    items: [
+      {
+        category: "top", gender: "female", item_name: "白色T恤",
+        search_keywords: ["女士 白色 T恤"], negative_keywords: ["男装"],
+      },
+      {
+        category: "bottom", gender: "female", item_name: "休闲弯刀裤",
+        search_keywords: ["女士 休闲 弯刀裤"], negative_keywords: ["男装"],
+      },
+      {
+        category: "shoes", gender: "female", item_name: "361运动鞋",
+        search_keywords: ["女士 361 运动鞋"], negative_keywords: ["男鞋"],
+      },
+    ],
+  }));
+
+  const analysis = parseOutfitAnalysis(JSON.stringify(payload), {
+    gender: "female",
+    scene: "日常约会",
+    requestId: "sweet-style-request",
+    userInput: "甜美穿搭",
+  });
+  const allItems = analysis.looks.flatMap((look) => look.items);
+  const forbidden = /白色T恤|弯刀裤|361|运动鞋/u;
+
+  assert.equal(analysis.looks.length, 3);
+  assert.equal(allItems.some((item) => forbidden.test(item.item_name)), false);
+  assert.ok(analysis.looks.every((look) =>
+    look.style === "甜美精致" &&
+    look.style_match_score >= 60 &&
+    !/普通休闲/u.test(look.style_direction)));
+  assert.ok(allItems.every((item) => item.style_match_score >= 60));
+  assert.match(analysis.recommendations.summary, /甜美穿搭/u);
+  assert.doesNotMatch(
+    Object.values(analysis.recommendations).join(" "),
+    /保持休闲舒适|普通上衣|普通裤子/u,
+  );
+});
+
 test("AI Style Interpreter preserves an unknown blended style through Look parsing", () => {
   const payload = validAiOutfitPayloadForNormalization();
   payload.style = "韩系Clean Fit学长感";

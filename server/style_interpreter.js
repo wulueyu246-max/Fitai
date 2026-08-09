@@ -221,6 +221,10 @@ function resolveExpressionFromStyleProfile(profile) {
 
 function buildStyleInterpreterPrompt() {
   return `
+Style intent fidelity is a hard requirement, not a soft preference. When intent_priority_score >= 80, every recommendation and Look must visibly express style_profile.must_have and must_express, and must not contain style_profile.must_avoid.
+preferred_items must contain concrete, purchasable garment or shoe types covering each core Look category (top + bottom + shoes, or dress + shoes). Do not fill it with abstract adjectives only.
+Neutral basics, generic casual formulas, and sports items are not universal fallbacks. They may appear only when the canonical StyleProfile positively supports them. Never replace an unfamiliar requested aesthetic with ordinary casual clothing.
+Before returning, audit each Look item against the canonical StyleProfile. If an item cannot be justified by must_have, preferred_items, silhouette, colors, or materials, replace that item inside the same response.
 User Intent Priority System（必须执行）：
 style_profile 必须包含 intent_priority_score（0-100）。只要用户明确提出本次穿搭风格或审美愿景，该值必须不低于 85，并作为后续阶段不可覆盖的统一优先级。
 style_profile 必须同时输出 must_have[] 和 must_avoid[]，内容来自本次语义解释，必须是可用于商品标题与属性核对的具体约束；不得查询或新增任何人工风格词映射。

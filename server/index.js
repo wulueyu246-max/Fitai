@@ -42,6 +42,7 @@ const {
 const {
   buildSearchKeywords,
   normalizeGender,
+  normalizeProductCategory,
   normalizeProductRequirement,
 } = require("./product_relevance");
 const {ProductAestheticReranker} = require("./product_aesthetic_reranker");
@@ -1369,6 +1370,12 @@ function parseOutfitAnalysis(content, context = {}) {
     styleExpression,
   });
   const products = looks.flatMap((look) => look.items);
+  const finalRecommendations = intentAlignedRecommendations(
+    recommendations,
+    looks,
+    styleProfile,
+    styleSemantics,
+  );
 
   return {
     gender: analysisGender,
@@ -1379,7 +1386,7 @@ function parseOutfitAnalysis(content, context = {}) {
     style: parsed.style.trim(),
     style_upgrade_level: styleUpgradeLevel,
     styling_strategy: stylingStrategy,
-    recommendations,
+    recommendations: finalRecommendations,
     looks,
     products,
     look_validation_summary: lookRepairResult?.summary || {
@@ -1440,17 +1447,178 @@ function normalizeStylingStrategy(value, context = {}) {
   };
 }
 
+const STYLE_REPAIR_CATEGORY_LABELS = Object.freeze({
+  top: "上衣",
+  bottom: "下装",
+  dress: "连衣裙",
+  shoes: "鞋履",
+  outerwear: "外套",
+  bag: "包袋",
+  hat: "帽饰",
+  accessory: "配饰",
+});
+
+function styleIntentAnchors(styleProfile = {}, styleSemantics = {}) {
+  return [...new Set([
+    readOptionalString(styleProfile.primary_style),
+    ...(styleProfile.must_have || []),
+    ...(styleSemantics.must_express || []),
+    ...(styleProfile.positive_keywords || []),
+  ].map(readOptionalString).filter(Boolean))];
+}
+
+function shouldEnforceCanonicalStyle(styleProfile = {}, styleSemantics = {}) {
+  return resolveIntentPriorityScore(styleProfile) >= 80 && (
+    styleIntentAnchors(styleProfile, styleSemantics).length > 0 ||
+    (styleProfile.preferred_items || []).length > 0 ||
+    (styleProfile.must_avoid || []).length > 0 ||
+    (styleSemantics.must_avoid || []).length > 0
+  );
+}
+
+function preferredStyleItemForCategory(category, styleProfile = {}, usedNames) {
+  const preferredItems = Array.isArray(styleProfile.preferred_items)
+    ? styleProfile.preferred_items
+    : [];
+  return preferredItems
+    .map(readOptionalString)
+    .find((itemName) => itemName &&
+      normalizeProductCategory(itemName) === category &&
+      !usedNames?.has(itemName));
+}
+
+function buildStyleAnchoredItemName({
+  category,
+  styleProfile = {},
+  styleSemantics = {},
+  usedNames,
+}) {
+  const preferred = preferredStyleItemForCategory(
+    category,
+    styleProfile,
+    usedNames,
+  );
+  if (preferred) return preferred;
+  const anchors = styleIntentAnchors(styleProfile, styleSemantics);
+  const label = STYLE_REPAIR_CATEGORY_LABELS[category] || category;
+  return `${anchors.slice(0, 2).join(" · ") || "风格化"}${label}`;
+}
+
+function styleAlignedLookDirection(
+  value,
+  lookIndex,
+  styleProfile = {},
+  styleSemantics = {},
+) {
+  const direction = readOptionalString(value);
+  if (!shouldEnforceCanonicalStyle(styleProfile, styleSemantics)) {
+    return direction;
+  }
+  const evidence = direction;
+  const score = styleMatchScore({
+    evidence,
+    relevanceScore: direction ? 65 : 0,
+    styleProfile,
+    styleSemantics,
+  });
+  if (direction && score >= MIN_LOOK_STYLE_SCORE &&
+      !hasStyleViolation(direction, styleProfile, styleSemantics)) {
+    return direction;
+  }
+  const anchors = styleIntentAnchors(styleProfile, styleSemantics);
+  return [
+    readOptionalString(styleProfile.primary_style),
+    anchors[(lookIndex + 1) % Math.max(anchors.length, 1)],
+    `造型${lookIndex + 1}`,
+  ].filter(Boolean).join(" · ");
+}
+
+function styleAlignedLookGoal(
+  value,
+  styleProfile = {},
+  styleSemantics = {},
+) {
+  const goal = readOptionalString(value);
+  if (!shouldEnforceCanonicalStyle(styleProfile, styleSemantics)) return goal;
+  const score = styleMatchScore({
+    evidence: goal,
+    relevanceScore: goal ? 65 : 0,
+    styleProfile,
+    styleSemantics,
+  });
+  if (goal && score >= MIN_LOOK_STYLE_SCORE &&
+      !hasStyleViolation(goal, styleProfile, styleSemantics)) {
+    return goal;
+  }
+  const anchors = styleIntentAnchors(styleProfile, styleSemantics).slice(0, 3);
+  const interpretation = readOptionalString(styleProfile.interpretation) ||
+    readOptionalString(styleSemantics.interpretation_summary);
+  return `以${anchors.join("、") || "用户指定风格"}为造型核心，${interpretation || "让轮廓、单品和细节共同表达本次风格意图"}`;
+}
+
+function intentAlignedRecommendations(
+  recommendations,
+  looks,
+  styleProfile = {},
+  styleSemantics = {},
+) {
+  if (!shouldEnforceCanonicalStyle(styleProfile, styleSemantics)) {
+    return recommendations;
+  }
+  const styleName = readOptionalString(styleProfile.source_text) ||
+    readOptionalString(styleProfile.primary_style) || "用户指定风格";
+  const anchors = styleIntentAnchors(styleProfile, styleSemantics).slice(0, 3);
+  const itemNames = (category) => [...new Set(looks.flatMap((look) => look.items)
+    .filter((item) => item.category === category)
+    .map((item) => readOptionalString(item.item_name))
+    .filter(Boolean))].slice(0, 3);
+  const describe = (categories, label) => {
+    const names = categories.flatMap(itemNames);
+    return names.length > 0
+      ? `${label}优先采用${names.join("、")}，以${anchors.join("、") || styleName}落实“${styleName}”，不使用无风格指向的基础款代替。`
+      : `${label}必须围绕${anchors.join("、") || styleName}落实“${styleName}”，不使用普通休闲单品填充。`;
+  };
+  return {
+    top: describe(["top", "dress", "outerwear"], "上装"),
+    bottom: describe(["bottom", "dress"], "下装"),
+    shoes: describe(["shoes"], "鞋履"),
+    accessories: describe(["bag", "hat", "accessory"], "配饰"),
+    summary: `本次方案以“${styleName}”为第一优先级，所有 Look 均需体现${anchors.join("、") || "明确的风格特征"}，而不是退回普通休闲套装。`,
+  };
+}
+
 const LOOK_REPAIR_ITEM_DEFAULTS = Object.freeze({
   top: Object.freeze({male: "简洁合身上衣", female: "简洁合身上衣", unisex: "简洁合身上衣"}),
   bottom: Object.freeze({male: "中高腰直筒裤", female: "中高腰直筒下装", unisex: "中高腰直筒裤"}),
   shoes: Object.freeze({male: "简洁低帮鞋", female: "简洁浅口鞋", unisex: "简洁低帮鞋"}),
 });
 
-function buildRepairedCoreItem(category, look, itemIndex, normalizeItem) {
+function buildRepairedCoreItem(
+  category,
+  look,
+  itemIndex,
+  normalizeItem,
+  {styleProfile = {}, styleSemantics = {}, usedNames} = {},
+) {
   const gender = normalizeGender(look.gender);
   const audience = gender === "male" ? "男士" : gender === "female" ? "女士" : "中性";
-  const itemName = LOOK_REPAIR_ITEM_DEFAULTS[category]?.[gender] ||
-    LOOK_REPAIR_ITEM_DEFAULTS[category]?.unisex;
+  const genericItemName = LOOK_REPAIR_ITEM_DEFAULTS[category]?.[gender] ||
+    LOOK_REPAIR_ITEM_DEFAULTS[category]?.unisex ||
+    STYLE_REPAIR_CATEGORY_LABELS[category] || category;
+  const itemName = shouldEnforceCanonicalStyle(styleProfile, styleSemantics)
+    ? buildStyleAnchoredItemName({
+      category,
+      styleProfile,
+      styleSemantics,
+      usedNames,
+    })
+    : genericItemName;
+  usedNames?.add(itemName);
+  const anchors = styleIntentAnchors(styleProfile, styleSemantics);
+  const color = (styleProfile.preferred_colors || [])[itemIndex %
+    Math.max((styleProfile.preferred_colors || []).length, 1)] || "";
+  const material = (styleProfile.preferred_materials || [])[itemIndex %
+    Math.max((styleProfile.preferred_materials || []).length, 1)] || "";
   const genderNegatives = gender === "male"
     ? ["女士", "女装", "吊带", "文胸", "连衣裙", "半身裙"]
     : gender === "female"
@@ -1460,13 +1628,21 @@ function buildRepairedCoreItem(category, look, itemIndex, normalizeItem) {
     category,
     gender,
     item_name: itemName,
-    style: look.style,
+    color,
+    material,
+    style: readOptionalString(styleProfile.primary_style) || look.style,
     scene: look.scene,
     search_keywords: [
-      [audience, look.style, itemName].filter(Boolean).join(" "),
-      [audience, itemName].filter(Boolean).join(" "),
+      [audience, look.style, anchors[0], color, itemName]
+        .filter(Boolean).join(" "),
+      [audience, anchors[1], material, itemName]
+        .filter(Boolean).join(" "),
     ],
-    negative_keywords: genderNegatives,
+    negative_keywords: [
+      ...genderNegatives,
+      ...(styleProfile.must_avoid || []),
+      ...(styleSemantics.must_avoid || []),
+    ],
   }, itemIndex, look);
 }
 
@@ -1476,8 +1652,12 @@ function repairLookStyleIntent(
   normalizeItem,
   styleProfile = {},
   styleSemantics = {},
+  usedStyleItemNames = new Set(),
 ) {
-  const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
+  const enforceCanonicalStyle = shouldEnforceCanonicalStyle(
+    styleProfile,
+    styleSemantics,
+  );
   const tokens = styleIntentTokens(styleProfile, styleSemantics);
   const canonicalStyle = readOptionalString(styleProfile.primary_style) ||
     readOptionalString(look.style);
@@ -1486,6 +1666,7 @@ function repairLookStyleIntent(
     ...tokens.positive.slice(0, 3),
   ].filter(Boolean);
   const retained = [];
+  const usedNames = usedStyleItemNames;
   let repaired = false;
 
   if (tokens.positive.length === 0 && tokens.negative.length === 0) {
@@ -1505,34 +1686,44 @@ function repairLookStyleIntent(
       item.material,
       ...(item.search_keywords || []),
     ].filter(Boolean).join(" ");
-    if (intentPriorityScore > 80 &&
-        hasStyleViolation(evidence, styleProfile, styleSemantics)) {
-      repaired = true;
-      continue;
-    }
+    const hasViolation = enforceCanonicalStyle &&
+      hasStyleViolation(evidence, styleProfile, styleSemantics);
     const initialScore = styleMatchScore({
       evidence,
       relevanceScore: 65,
       styleProfile,
       styleSemantics,
     });
-    if (intentPriorityScore <= 80 || initialScore >= MIN_LOOK_STYLE_SCORE) {
+    if (!enforceCanonicalStyle ||
+        (!hasViolation && initialScore >= MIN_LOOK_STYLE_SCORE)) {
       retained.push({...item, style_match_score: initialScore});
+      usedNames.add(item.item_name);
       continue;
     }
 
     const audience = look.gender === "male"
       ? "男士"
       : look.gender === "female" ? "女士" : "中性";
+    const anchoredItemName = buildStyleAnchoredItemName({
+      category: item.category,
+      styleProfile,
+      styleSemantics,
+      usedNames,
+    });
+    const color = item.color || (styleProfile.preferred_colors || [])[0] || "";
+    const material = item.material ||
+      (styleProfile.preferred_materials || [])[0] || "";
     const anchored = normalizeItem({
       ...item,
+      item_name: anchoredItemName,
+      color,
+      material,
       style: canonicalStyle || item.style,
       search_keywords: [
-        [audience, canonicalStyle, item.color, item.item_name]
+        [audience, canonicalStyle, canonicalKeywords[1], color, anchoredItemName]
           .filter(Boolean).join(" "),
-        [audience, canonicalKeywords[1], item.item_name]
+        [audience, canonicalKeywords[2], material, anchoredItemName]
           .filter(Boolean).join(" "),
-        ...(item.search_keywords || []),
       ].filter(Boolean).slice(0, 3),
       negative_keywords: [
         ...(item.negative_keywords || []),
@@ -1541,6 +1732,7 @@ function repairLookStyleIntent(
         ...(styleSemantics.must_avoid || []),
       ],
     }, retained.length, look);
+    usedNames.add(anchored.item_name);
     const anchoredEvidence = [
       anchored.item_name,
       anchored.style,
@@ -1568,7 +1760,14 @@ function repairLookStyleIntent(
   return {items: retained, repaired, finalStyleScore};
 }
 
-function repairCoreLookItems(items, look, normalizeItem) {
+function repairCoreLookItems(
+  items,
+  look,
+  normalizeItem,
+  styleProfile = {},
+  styleSemantics = {},
+  usedStyleItemNames = new Set(),
+) {
   const categories = new Set(items.map((item) => item.category));
   const completeWithShoes = isValidLookComposition(categories, look.gender) &&
     categories.has("shoes");
@@ -1590,12 +1789,15 @@ function repairCoreLookItems(items, look, normalizeItem) {
   }
 
   const repairedItems = [...items];
+  const usedNames = usedStyleItemNames;
+  repairedItems.forEach((item) => usedNames.add(item.item_name));
   for (const category of missing) {
     repairedItems.push(buildRepairedCoreItem(
       category,
       look,
       repairedItems.length,
       normalizeItem,
+      {styleProfile, styleSemantics, usedNames},
     ));
   }
   const repairedCategories = new Set(repairedItems.map((item) => item.category));
@@ -1612,7 +1814,11 @@ function createRepairedFallbackLook({
   stylingStrategy,
   usedStyleDirections,
   normalizeItem,
+  styleProfile = {},
+  styleSemantics = {},
 }) {
+  const canonicalStyle = readOptionalString(styleProfile.primary_style) ||
+    readOptionalString(style);
   const look = {
     request_id: readOptionalString(context.requestId),
     look_id: `fallback-look-${lookIndex + 1}`,
@@ -1627,8 +1833,45 @@ function createRepairedFallbackLook({
       "通过协调上衣长度、下装腰线和鞋型保持整体视觉平衡",
     accessories_decision: [],
   };
+  if (shouldEnforceCanonicalStyle(styleProfile, styleSemantics)) {
+    look.style = canonicalStyle || look.style;
+    look.style_direction = uniqueStyleDirection(styleAlignedLookDirection(
+      "",
+      lookIndex,
+      styleProfile,
+      styleSemantics,
+    ), lookIndex, usedStyleDirections);
+    look.styling_goal = styleAlignedLookGoal(
+      "",
+      styleProfile,
+      styleSemantics,
+    );
+  }
+  const usedNames = new Set();
   look.items = ["top", "bottom", "shoes"].map((category, itemIndex) =>
-    buildRepairedCoreItem(category, look, itemIndex, normalizeItem));
+    buildRepairedCoreItem(category, look, itemIndex, normalizeItem, {
+      styleProfile,
+      styleSemantics,
+      usedNames,
+    })).map((item) => ({
+      ...item,
+      style_match_score: styleMatchScore({
+        evidence: [
+          item.item_name,
+          item.style,
+          item.color,
+          item.material,
+          ...(item.search_keywords || []),
+        ].join(" "),
+        relevanceScore: 65,
+        styleProfile,
+        styleSemantics,
+      }),
+    }));
+  look.style_match_score = look.items.reduce(
+    (sum, item) => sum + item.style_match_score,
+    0,
+  ) / look.items.length;
   return look;
 }
 
@@ -1644,6 +1887,7 @@ function repairAndValidateAiLooks({
   styleSemantics,
 }) {
   const looks = [];
+  const usedStyleItemNames = new Set();
   let validLooks = 0;
   let repairedLooks = 0;
   let removedLooks = 0;
@@ -1692,6 +1936,21 @@ function repairAndValidateAiLooks({
         ) || "通过协调轮廓、腰线、衣长与鞋型改善整体视觉比例",
       };
 
+      if (shouldEnforceCanonicalStyle(styleProfile, styleSemantics)) {
+        look.style = readOptionalString(styleProfile.primary_style) || look.style;
+        look.style_direction = uniqueStyleDirection(styleAlignedLookDirection(
+          rawLook.style_direction || rawLook.styleDirection,
+          lookIndex,
+          styleProfile,
+          styleSemantics,
+        ), lookIndex, usedStyleDirections);
+        look.styling_goal = styleAlignedLookGoal(
+          rawLook.styling_goal || rawLook.stylingGoal,
+          styleProfile,
+          styleSemantics,
+        );
+      }
+
       let repaired = false;
       const items = [];
       rawLook.items.forEach((item, itemIndex) => {
@@ -1729,7 +1988,14 @@ function repairAndValidateAiLooks({
           repaired = true;
         }
       }
-      const initialCoreRepair = repairCoreLookItems(decisionItems, look, normalizeItem);
+      const initialCoreRepair = repairCoreLookItems(
+        decisionItems,
+        look,
+        normalizeItem,
+        styleProfile,
+        styleSemantics,
+        usedStyleItemNames,
+      );
       if (!initialCoreRepair) throw new Error("缺少可修复的核心穿搭单品");
       const styleRepair = repairLookStyleIntent(
         initialCoreRepair.items,
@@ -1737,22 +2003,59 @@ function repairAndValidateAiLooks({
         normalizeItem,
         styleProfile,
         styleSemantics,
+        usedStyleItemNames,
       );
       const finalCoreRepair = repairCoreLookItems(
         styleRepair.items,
         look,
         normalizeItem,
+        styleProfile,
+        styleSemantics,
+        usedStyleItemNames,
       );
       if (!finalCoreRepair) throw new Error("缺少可修复的核心穿搭单品");
+      const finalItems = finalCoreRepair.items.map((item) => {
+        if (Number.isFinite(Number(item.style_match_score))) return item;
+        const evidence = [
+          item.item_name,
+          item.style,
+          item.color,
+          item.fit,
+          item.material,
+          ...(item.search_keywords || []),
+        ].filter(Boolean).join(" ");
+        return {
+          ...item,
+          style_match_score: styleMatchScore({
+            evidence,
+            relevanceScore: 65,
+            styleProfile,
+            styleSemantics,
+          }),
+        };
+      });
+      const finalStyleScore = finalItems.length > 0
+        ? finalItems.reduce((sum, item) => sum + item.style_match_score, 0) /
+          finalItems.length
+        : 0;
+      if (shouldEnforceCanonicalStyle(styleProfile, styleSemantics) &&
+          (finalStyleScore < MIN_LOOK_STYLE_SCORE || finalItems.some((item) =>
+            hasStyleViolation([
+              item.item_name,
+              item.style,
+              ...(item.search_keywords || []),
+            ].join(" "), styleProfile, styleSemantics)))) {
+        throw new Error("高优先级风格意图未通过 Look 硬门槛");
+      }
       repaired ||= initialCoreRepair.repaired || styleRepair.repaired ||
         finalCoreRepair.repaired;
       looks.push({
         ...look,
         accessories_decision: decisions,
-        items: finalCoreRepair.items,
-        style_match_score: styleRepair.finalStyleScore,
+        items: finalItems,
+        style_match_score: finalStyleScore,
         intent_score: lookIntentScore({
-          styleMatch: styleRepair.finalStyleScore,
+          styleMatch: finalStyleScore,
           bodyMatch: stylingStrategy.visual_goals.length > 0 ? 85 : 65,
           sceneMatch: look.scene ? 85 : 65,
           weatherMatch: 70,
@@ -1775,6 +2078,8 @@ function repairAndValidateAiLooks({
       stylingStrategy,
       usedStyleDirections,
       normalizeItem,
+      styleProfile,
+      styleSemantics,
     }));
     repairedLooks += 1;
     fallbackUsed = true;
@@ -3348,6 +3653,9 @@ ${cachedStyleInterpretation
     ? "A validated cached style_semantics and style_profile are present in the user message. Treat them as immutable canonical style facts and do not reinterpret the original wording."
     : "Interpret the raw requested style exactly once through Style Semantic Reasoner, then use only the resulting canonical data downstream."}
 The immutable request context gender is ${requestContext.gender} and style_expression is ${requestContext.style_expression}. Every Look and item must preserve that gender; downstream stages must never infer it again. When style_expression=feminine, explicitly evaluate waistline, garment-length ratio, leg-line continuity, shoe shape/heel, skin exposure, and refined accessories without mechanically requiring skirts or heels.
+When style_profile.intent_priority_score >= 80, recommendations and all three Looks must be recognizably driven by the canonical style intent. recommendations must name the concrete garment, silhouette, shoe, material, color, and detail choices that express must_have; generic balanced advice is invalid.
+Each core Look item must be supported by preferred_items or by at least one concrete must_have/positive trait. Generic T-shirts, generic casual trousers, and generic sneakers are not safe defaults and must not be used unless the canonical StyleProfile explicitly supports them.
+Before returning, audit the whole Look against must_have and must_avoid. Replace any conflicting or stylistically neutral filler item in this same response; do not defer that correction to product search or product reranking.
 styling_strategy must contain body_strengths[], proportion_issues[], visual_goals[], waistline_strategy, top_length_strategy, bottom_strategy, shoe_strategy, color_strategy, silhouette_strategy, skin_exposure_strategy, accessory_strategy, and weather_strategy.
 Use height, weight, photographed shoulder/waist/leg proportions, current clothing, scene, weather, comfort, and requested style together. Valid visual_goals include elongate_legs, raise_visual_waistline, shorten_visual_torso, emphasize_waist, balance_shoulders, create_vertical_line, reduce_lower_body_bulk, enhance_body_curve, create_lightness, and create_structure.
 Every Look must add styling_goal, proportion_strategy, and why_this_changes_the_body_proportion. The three Looks must differ materially in silhouette, waistline, garment length, shoe shape, skin exposure, or color continuity—not merely color.
