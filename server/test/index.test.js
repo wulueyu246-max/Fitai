@@ -39,6 +39,7 @@ const {
   resolveLookTimeoutMs,
   sanitizeAiErrorMessage,
   shouldUseMockAi,
+  shouldRepairStyleInterpretation,
   isAllowedOrigin,
   isLocalDevelopmentOrigin,
   validateProductionConfig,
@@ -2171,6 +2172,7 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
 
   assert.equal(callCount, 2);
   assert.equal(result.analysis.analysisMode, "blueprint_partial");
+  assert.equal(shouldRepairStyleInterpretation(result.analysis), false);
   assert.equal(result.analysis.outfit_blueprint.blueprint_source, "ai_generated");
   assert.equal(result.analysis.look_validation_summary.blueprint_preserved, true);
   assert.equal(result.analysis.look_validation_summary.fallback_used, false);

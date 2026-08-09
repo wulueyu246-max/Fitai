@@ -4215,6 +4215,10 @@ function createBlueprintPartialAnalysis(blueprintPhase, requestId) {
   };
 }
 
+function shouldRepairStyleInterpretation(analysis = {}) {
+  return analysis.analysisMode !== "blueprint_partial";
+}
+
 async function requestStructuredAiPhase({
   phase,
   client = aiClient,
@@ -4870,7 +4874,25 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       ).reduce((sum, items) => sum + (Array.isArray(items) ? items.length : 0), 0),
     });
     let validatedStyleInterpretation;
-    if (analysis.analysisMode !== "rule_fallback") {
+    if (analysis.analysisMode !== "rule_fallback" &&
+        !shouldRepairStyleInterpretation(analysis)) {
+      try {
+        validatedStyleInterpretation = assertValidStyleInterpretation(
+          analysis,
+          {sourceText: styleCacheContext.requested_style},
+        );
+        fallbackStyleInterpretation = validatedStyleInterpretation;
+        styleInterpretationCache.set(styleCacheContext, validatedStyleInterpretation);
+      } catch (error) {
+        if (!(error instanceof StyleProfileInvalidError)) throw error;
+        console.warn("Style Semantic Repair deferred for completed Blueprint", {
+          requestId: res.locals.requestId,
+          issues: error.issues,
+          imageResubmitted: false,
+          blueprintPreserved: true,
+        });
+      }
+    } else if (analysis.analysisMode !== "rule_fallback") {
       try {
         validatedStyleInterpretation = assertValidStyleInterpretation(
           analysis,
@@ -5303,6 +5325,7 @@ module.exports = {
   parseBlueprintPhase,
   mergeBlueprintAndLookPhase,
   createBlueprintPartialAnalysis,
+  shouldRepairStyleInterpretation,
   requestStructuredAiPhase,
   generatePhasedOutfitAnalysis,
   repairAndValidateAiLooks,
