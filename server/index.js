@@ -2914,15 +2914,28 @@ function normalizeAccessoryDecisionCategory(value) {
 }
 
 function accessoryTypeForItem(item) {
-  const categoryType = normalizeAccessoryDecisionCategory(
-    item?.accessory_type || item?.accessoryType || item?.category,
+  const explicitType = normalizeAccessoryDecisionCategory(
+    item?.accessory_type || item?.accessoryType,
   );
+  if (explicitType) return explicitType;
+
+  const categoryType = normalizeAccessoryDecisionCategory(item?.category);
   const itemNameType = normalizeAccessoryDecisionCategory(
     item?.item_name || item?.itemName,
   );
-  return categoryType && categoryType !== "accessory"
-    ? categoryType
-    : itemNameType || categoryType;
+  if (categoryType) {
+    return categoryType !== "accessory"
+      ? categoryType
+      : itemNameType || categoryType;
+  }
+
+  // Core clothing categories are authoritative. Do not infer an accessory from
+  // substrings in their names (for example, "包臀裙" is a bottom, not a bag).
+  const productCategory = normalizeProductCategory(item?.category);
+  if (productCategory && !["bag", "hat", "accessory"].includes(productCategory)) {
+    return "";
+  }
+  return itemNameType;
 }
 
 function normalizeAccessoriesDecision(value, lookIndex) {
@@ -3566,6 +3579,140 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
   });
 }
 
+const FINAL_RESPONSE_CORE_STRUCTURES = Object.freeze({
+  top_bottom_shoes: Object.freeze(["top", "bottom", "shoes"]),
+  dress_shoes: Object.freeze(["dress", "shoes"]),
+  outerwear_bottom_shoes: Object.freeze(["outerwear", "bottom", "shoes"]),
+});
+
+function finalResponseCoreRequirement(look = {}) {
+  const declared = readOptionalString(
+    look?.look_direction?.core_structure ||
+    look?.lookDirection?.coreStructure ||
+    look?.core_structure ||
+    look?.coreStructure,
+  ).toLowerCase();
+  if (FINAL_RESPONSE_CORE_STRUCTURES[declared]) {
+    return {
+      coreStructure: declared,
+      required: FINAL_RESPONSE_CORE_STRUCTURES[declared],
+      enforce: true,
+    };
+  }
+  // Legacy responses predate core_structure. Preserve their existing behavior;
+  // the strict final gate applies when a Look explicitly declares its contract.
+  return {coreStructure: declared || "legacy", required: [], enforce: false};
+}
+
+function finalizeOutfitResponseIntegrity(payload = {}) {
+  const sourceLooks = Array.isArray(payload.looks) ? payload.looks : [];
+  const existingErrors = Array.isArray(payload.final_integrity_errors)
+    ? payload.final_integrity_errors
+    : [];
+  const newErrors = [];
+  const usableLooks = sourceLooks.filter((look, lookIndex) => {
+    const {coreStructure, required, enforce} = finalResponseCoreRequirement(look);
+    const categories = new Set((Array.isArray(look?.items) ? look.items : [])
+      .map((item) => normalizeProductCategory(item?.category))
+      .filter(Boolean));
+    if (!enforce) return true;
+    const missingCategories = required.length > 0
+      ? required.filter((category) => !categories.has(category))
+      : ["core_structure"];
+    if (missingCategories.length === 0) return true;
+    newErrors.push({
+      request_id: readOptionalString(look?.request_id || look?.requestId),
+      look_id: readOptionalString(look?.look_id || look?.lookId) ||
+        `look-${lookIndex + 1}`,
+      core_structure: coreStructure,
+      final_integrity_error: "MISSING_CORE_SLOT",
+      missing_categories: missingCategories,
+    });
+    return false;
+  });
+
+  const generatedCandidates = [
+    payload.look_quality_summary?.generated,
+    payload.look_validation_summary?.total_looks,
+    sourceLooks.length,
+  ].map(Number).filter(Number.isFinite);
+  const generated = generatedCandidates.length > 0
+    ? Math.max(...generatedCandidates)
+    : sourceLooks.length;
+  const usable = usableLooks.length;
+  const dropped = Math.max(0, generated - usable);
+  const existingWarnings = Number(payload.look_quality_summary?.warnings);
+  const warnings = (Number.isFinite(existingWarnings) ? existingWarnings : 0) +
+    newErrors.length;
+  const integrityErrors = [...existingErrors, ...newErrors];
+  const usableLookIds = new Set(usableLooks
+    .map((look) => readOptionalString(look?.look_id || look?.lookId))
+    .filter(Boolean));
+  const keepForUsableLook = (entry) => {
+    const lookId = readOptionalString(entry?.look_id || entry?.lookId);
+    return !lookId || usableLookIds.has(lookId);
+  };
+  const products = Array.isArray(payload.products)
+    ? payload.products.filter(keepForUsableLook)
+    : payload.products;
+  const recommendationProducts = Array.isArray(payload.recommendations?.products)
+    ? payload.recommendations.products.filter(keepForUsableLook)
+    : payload.recommendations?.products;
+  const priorValidation = payload.look_validation_summary || {};
+  const priorValidLooks = Number(priorValidation.valid_looks);
+  const priorRepairedLooks = Number(priorValidation.repaired_looks);
+
+  return {
+    ...payload,
+    looks: usableLooks,
+    products,
+    ...(payload.recommendations && typeof payload.recommendations === "object"
+      ? {
+        recommendations: {
+          ...payload.recommendations,
+          ...(Array.isArray(recommendationProducts)
+            ? {products: recommendationProducts}
+            : {}),
+        },
+      }
+      : {}),
+    look_validation_summary: {
+      ...priorValidation,
+      total_looks: generated,
+      valid_looks: Number.isFinite(priorValidLooks)
+        ? Math.min(priorValidLooks, usable)
+        : usable,
+      repaired_looks: Number.isFinite(priorRepairedLooks)
+        ? Math.min(priorRepairedLooks, usable)
+        : 0,
+      removed_looks: dropped,
+      final_usable_looks: usable,
+      final_integrity_passed: newErrors.length === 0,
+    },
+    look_quality_summary: {
+      ...payload.look_quality_summary,
+      generated,
+      usable,
+      dropped,
+      warnings,
+    },
+    final_integrity_errors: integrityErrors,
+  };
+}
+
+function logFinalResponseIntegrity(payload) {
+  console.info("final_response_integrity", {
+    request_id: readOptionalString(
+      payload?.look_validation_summary?.request_id ||
+      payload?.looks?.[0]?.request_id,
+    ),
+    generated: payload?.look_quality_summary?.generated || 0,
+    usable: payload?.look_quality_summary?.usable || 0,
+    dropped: payload?.look_quality_summary?.dropped || 0,
+    final_integrity_errors: payload?.final_integrity_errors || [],
+  });
+}
+
 async function buildOutfitApiResponse(
   analysis,
   productRecommendations,
@@ -3657,7 +3804,7 @@ async function buildOutfitApiResponse(
         summary: analysis.recommendations.summary,
       },
     });
-  return {
+  const responsePayload = finalizeOutfitResponseIntegrity({
     ...analysis,
     gender: effectiveGender,
     style_expression: recommendationContext.style_expression,
@@ -3667,7 +3814,9 @@ async function buildOutfitApiResponse(
       ...analysis.recommendations,
       products: catalogProducts,
     },
-  };
+  });
+  logFinalResponseIntegrity(responsePayload);
+  return responsePayload;
 }
 
 async function buildOutfitResponseForRequest(
@@ -3683,7 +3832,7 @@ async function buildOutfitResponseForRequest(
   const effectiveGender = profileGender !== "unisex" ? profileGender : analysisGender;
   const looks = normalizeAnalysisLooks(analysis, outfitRequest, effectiveGender);
   const products = looks.flatMap((look) => look.items);
-  return {
+  const responsePayload = finalizeOutfitResponseIntegrity({
     ...analysis,
     gender: effectiveGender,
     looks,
@@ -3692,7 +3841,9 @@ async function buildOutfitResponseForRequest(
       ...analysis.recommendations,
       products: [],
     },
-  };
+  });
+  logFinalResponseIntegrity(responsePayload);
+  return responsePayload;
 }
 
 function outfitRateLimiter(req, res, next) {
@@ -6951,6 +7102,7 @@ module.exports = {
   hasConcreteSemanticFallback,
   createMockOutfitAnalysis,
   assertStyleExpressionConsistency,
+  accessoryTypeForItem,
   buildOutfitApiResponse,
   extractAiText,
   normalizeAiOutfitPayload,
@@ -6966,6 +7118,7 @@ module.exports = {
   requestStructuredAiPhase,
   generatePhasedOutfitAnalysis,
   repairAndValidateAiLooks,
+  finalizeOutfitResponseIntegrity,
   repairLookItemNameFromEvidence,
   validateExecutableLookItems,
   parseStyleRepairPatch,

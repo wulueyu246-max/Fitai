@@ -7,6 +7,7 @@ process.env.AI_FORCE_MOCK = "true";
 
 const {
   app,
+  accessoryTypeForItem,
   assertStyleExpressionConsistency,
   analyticsStore,
   buildAiRequestUrl,
@@ -27,6 +28,7 @@ const {
   parseBlueprintPhase,
   mergeBlueprintAndLookPhase,
   generatePhasedOutfitAnalysis,
+  finalizeOutfitResponseIntegrity,
   repairLookItemNameFromEvidence,
   validateExecutableLookItems,
   repairStyleInterpretationAndLooks,
@@ -3705,6 +3707,44 @@ test("Native Look Generator keeps three independent executable directions", asyn
     Array.isArray(entry.preferred_attributes) &&
     Array.isArray(entry.avoid_attributes)));
 
+  const packageHipPayload = structuredClone(payload);
+  const packageHipBottom = packageHipPayload.looks[0].items.find(
+    (entry) => entry.category === "bottom",
+  );
+  packageHipBottom.product_type = "高腰包臀铅笔半身裙";
+  packageHipBottom.item_name = "高腰包臀铅笔半身裙";
+  packageHipBottom.fit = "高腰包臀";
+  packageHipPayload.looks[0].accessories_decision = [{
+    category: "bag",
+    include: false,
+    reason: "保持造型利落",
+  }];
+  const packageHipAnalysis = parseOutfitAnalysis(JSON.stringify(packageHipPayload), {
+    requestId: "native-look-package-hip",
+    gender: "female",
+    scene: "约会",
+    userInput: "御姐约会穿搭",
+    nativeExecutableLookContract: true,
+  });
+  const packageHipResponse = await buildOutfitApiResponse(packageHipAnalysis, [], {
+    requestId: "native-look-package-hip",
+    gender: "female",
+    scene: "约会",
+  });
+  assert.equal(
+    accessoryTypeForItem({category: "bottom", item_name: "高腰包臀铅笔半身裙"}),
+    "",
+  );
+  assert.deepEqual(
+    packageHipResponse.looks[0].items.map((entry) => entry.category),
+    ["top", "bottom", "shoes"],
+  );
+  assert.equal(
+    packageHipResponse.looks[0].items.find((entry) => entry.category === "bottom")
+      .item_name,
+    "高腰包臀铅笔半身裙",
+  );
+
   const twoOfThreePayload = structuredClone(payload);
   twoOfThreePayload.looks[2].items[0].category = "bottom";
   const twoOfThree = parseOutfitAnalysis(JSON.stringify(twoOfThreePayload), {
@@ -3726,6 +3766,80 @@ test("Native Look Generator keeps three independent executable directions", asyn
   });
   assert.equal(twoOfThreeResponse.looks.length, 2);
   assert.equal(twoOfThreeResponse.look_quality_summary.usable, 2);
+});
+
+test("recomputes usable Looks from the final response payload", () => {
+  const requestId = "final-integrity-request";
+  const item = (lookId, category, index) => ({
+    request_id: requestId,
+    look_id: lookId,
+    category,
+    slot_key: `${requestId}:${lookId}:${category}:${index}`,
+    item_name: `${category}-${index}`,
+  });
+  const look = (lookId, coreStructure, categories) => ({
+    request_id: requestId,
+    look_id: lookId,
+    look_direction: {core_structure: coreStructure},
+    items: categories.map((category, index) => item(lookId, category, index)),
+  });
+  const payload = {
+    looks: [
+      look("look-complete", "top_bottom_shoes", ["top", "bottom", "shoes"]),
+      look("look-missing-bottom", "top_bottom_shoes", ["top", "shoes"]),
+      look("look-dress", "dress_shoes", ["dress", "shoes"]),
+    ],
+    products: [
+      item("look-complete", "top", 0),
+      item("look-missing-bottom", "top", 0),
+      item("look-dress", "dress", 0),
+    ],
+    recommendations: {
+      products: [
+        {look_id: "look-complete", product_id: "kept-1"},
+        {look_id: "look-missing-bottom", product_id: "dropped-1"},
+        {look_id: "look-dress", product_id: "kept-2"},
+      ],
+    },
+    look_validation_summary: {
+      request_id: requestId,
+      total_looks: 3,
+      valid_looks: 3,
+      repaired_looks: 0,
+      removed_looks: 0,
+      fallback_used: false,
+    },
+    look_quality_summary: {generated: 3, usable: 3, dropped: 0, warnings: 0},
+  };
+
+  const response = finalizeOutfitResponseIntegrity(payload);
+
+  assert.deepEqual(response.looks.map((entry) => entry.look_id), [
+    "look-complete",
+    "look-dress",
+  ]);
+  assert.equal(response.look_quality_summary.generated, 3);
+  assert.equal(response.look_quality_summary.usable, 2);
+  assert.equal(response.look_quality_summary.dropped, 1);
+  assert.equal(response.look_validation_summary.valid_looks, 2);
+  assert.equal(response.look_validation_summary.removed_looks, 1);
+  assert.equal(response.look_validation_summary.final_usable_looks, 2);
+  assert.equal(response.look_validation_summary.final_integrity_passed, false);
+  assert.deepEqual(response.final_integrity_errors, [{
+    request_id: requestId,
+    look_id: "look-missing-bottom",
+    core_structure: "top_bottom_shoes",
+    final_integrity_error: "MISSING_CORE_SLOT",
+    missing_categories: ["bottom"],
+  }]);
+  assert.deepEqual(response.products.map((entry) => entry.look_id), [
+    "look-complete",
+    "look-dress",
+  ]);
+  assert.deepEqual(
+    response.recommendations.products.map((entry) => entry.product_id),
+    ["kept-1", "kept-2"],
+  );
 });
 
 test("aggregates daily V1.3 user and commerce metrics", () => {
