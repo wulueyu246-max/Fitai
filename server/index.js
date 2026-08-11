@@ -47,6 +47,7 @@ const {
 } = require("./product_relevance");
 const {ProductAestheticReranker} = require("./product_aesthetic_reranker");
 const {
+  BLUEPRINT_ITEM_KEYS,
   applyBlueprintToRequirement,
   blueprintHasCoreItems,
   enrichBlueprintFromLooks,
@@ -132,7 +133,6 @@ const DEFAULT_INTENT_TIMEOUT_MS = 20_000;
 const DEFAULT_BLUEPRINT_TIMEOUT_MS = 120_000;
 const DEFAULT_LOOK_TIMEOUT_MS = 60_000;
 const INTENT_PHASE_MAX_TOKENS = 1_400;
-const BLUEPRINT_PHASE_MAX_TOKENS = 1_800;
 // Manual rollback only: set AI_MODEL=qwen-vl-plus in the environment.
 // The server never switches to this legacy model automatically.
 const LEGACY_AI_MODEL = "qwen-vl-plus";
@@ -166,9 +166,80 @@ function resolveLookTimeoutMs(value) {
   );
 }
 
-function structuredJsonRequestOptions() {
+const BLUEPRINT_STRING_ARRAY_SCHEMA = Object.freeze({
+  type: "array",
+  items: {type: "string"},
+});
+
+const OUTFIT_BLUEPRINT_JSON_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    gender: {type: "string"},
+    bodyProfile: {type: "string"},
+    style: {type: "string"},
+    style_expression: {type: "string"},
+    outfit_blueprint: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        blueprint_source: {type: "string"},
+        style_identity: {type: "string"},
+        character_impression: {type: "string"},
+        visual_keywords: BLUEPRINT_STRING_ARRAY_SCHEMA,
+        core_elements: BLUEPRINT_STRING_ARRAY_SCHEMA,
+        silhouette_strategy: BLUEPRINT_STRING_ARRAY_SCHEMA,
+        color_palette: BLUEPRINT_STRING_ARRAY_SCHEMA,
+        material_direction: BLUEPRINT_STRING_ARRAY_SCHEMA,
+        must_have_items: {
+          type: "object",
+          additionalProperties: false,
+          properties: Object.fromEntries(BLUEPRINT_ITEM_KEYS.map((key) => [
+            key,
+            BLUEPRINT_STRING_ARRAY_SCHEMA,
+          ])),
+        },
+        avoid_items: BLUEPRINT_STRING_ARRAY_SCHEMA,
+        occasion_strategy: {type: "string"},
+      },
+      required: [
+        "blueprint_source",
+        "style_identity",
+        "character_impression",
+        "visual_keywords",
+        "core_elements",
+        "silhouette_strategy",
+        "color_palette",
+        "material_direction",
+        "must_have_items",
+        "avoid_items",
+        "occasion_strategy",
+      ],
+    },
+  },
+  required: [
+    "gender",
+    "bodyProfile",
+    "style",
+    "style_expression",
+    "outfit_blueprint",
+  ],
+});
+
+function blueprintStructuredResponseFormat() {
   return {
-    response_format: {type: "json_object"},
+    type: "json_schema",
+    json_schema: {
+      name: "fitai_outfit_blueprint",
+      strict: true,
+      schema: OUTFIT_BLUEPRINT_JSON_SCHEMA,
+    },
+  };
+}
+
+function structuredJsonRequestOptions(responseFormat = {type: "json_object"}) {
+  return {
+    response_format: responseFormat,
     enable_thinking: false,
   };
 }
@@ -606,6 +677,10 @@ function resolveAiModeReason(currentConfig, currentAiClient) {
 }
 
 function resolveAiFallbackReason(error) {
+  if (error?.code === "BLUEPRINT_STRUCTURED_OUTPUT_FAILED" ||
+      error?.code === "BLUEPRINT_BUSINESS_VALIDATION_FAILED") {
+    return error.code;
+  }
   if (error?.code === "LOOK_OUTPUT_TRUNCATED") {
     return "LOOK_OUTPUT_TRUNCATED";
   }
@@ -5587,13 +5662,112 @@ function intentPhaseFromCachedInterpretation(value, sourceText = "") {
   });
 }
 
-function parseBlueprintPhase(content, context = {}) {
-  const parsedPayload = parseAiPayloadBestEffort(content);
-  if (!parsedPayload || typeof parsedPayload !== "object" ||
-      Array.isArray(parsedPayload)) {
-    throw new Error("AI Blueprint 返回内容不是有效 JSON 对象");
+function validateJsonSchemaValue(value, schema, pathLabel = "$") {
+  const issues = [];
+  if (schema?.type === "object") {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return [`${pathLabel} must be an object`];
+    }
+    for (const key of schema.required || []) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) {
+        issues.push(`${pathLabel}.${key} is required`);
+      }
+    }
+    const properties = schema.properties || {};
+    for (const [key, entry] of Object.entries(value)) {
+      const propertySchema = properties[key];
+      if (!propertySchema) {
+        if (schema.additionalProperties === false) {
+          issues.push(`${pathLabel}.${key} is not allowed`);
+        }
+        continue;
+      }
+      issues.push(...validateJsonSchemaValue(
+        entry,
+        propertySchema,
+        `${pathLabel}.${key}`,
+      ));
+    }
+    return issues;
   }
-  const parsed = normalizeAiOutfitPayload(parsedPayload);
+  if (schema?.type === "array") {
+    if (!Array.isArray(value)) return [`${pathLabel} must be an array`];
+    value.forEach((entry, index) => {
+      issues.push(...validateJsonSchemaValue(
+        entry,
+        schema.items,
+        `${pathLabel}[${index}]`,
+      ));
+    });
+    return issues;
+  }
+  if (schema?.type === "string" && typeof value !== "string") {
+    issues.push(`${pathLabel} must be a string`);
+  }
+  return issues;
+}
+
+function validateBlueprintStructuredPayload(value) {
+  const issues = validateJsonSchemaValue(
+    value,
+    OUTFIT_BLUEPRINT_JSON_SCHEMA,
+  );
+  return Object.freeze({valid: issues.length === 0, issues});
+}
+
+function createBlueprintPhaseError(code, message, details = {}) {
+  const error = new Error(message);
+  error.code = code;
+  Object.assign(error, details);
+  return error;
+}
+
+function parseBlueprintPhase(content, context = {}) {
+  let parsedPayload;
+  if (context.enforceStructuredBlueprint) {
+    try {
+      parsedPayload = typeof content === "string"
+        ? JSON.parse(content.trim())
+        : null;
+    } catch (_) {
+      parsedPayload = null;
+    }
+  } else {
+    parsedPayload = parseAiPayloadBestEffort(content);
+  }
+  const structuredParseSuccess = Boolean(
+    parsedPayload && typeof parsedPayload === "object" &&
+    !Array.isArray(parsedPayload),
+  );
+  const schemaValidation = structuredParseSuccess
+    ? validateBlueprintStructuredPayload(parsedPayload)
+    : Object.freeze({valid: false, issues: ["$ must be an object"]});
+  if (context.enforceStructuredBlueprint) {
+    console.info("ai_blueprint_structured_output", {
+      requestId: context.requestId,
+      model: context.model || config.model,
+      response_format_type: context.responseFormatType || "json_schema",
+      finish_reason: context.finishReason ?? null,
+      content_length: Buffer.byteLength(String(content || ""), "utf8"),
+      structured_parse_success: structuredParseSuccess,
+      schema_validation_success: schemaValidation.valid,
+    });
+  }
+  if (!structuredParseSuccess) {
+    throw createBlueprintPhaseError(
+      "BLUEPRINT_STRUCTURED_OUTPUT_FAILED",
+      "AI Blueprint 结构化输出解析失败",
+    );
+  }
+  if (context.enforceStructuredBlueprint && !schemaValidation.valid) {
+    throw createBlueprintPhaseError(
+      "BLUEPRINT_STRUCTURED_OUTPUT_FAILED",
+      "AI Blueprint 结构化输出不符合 Schema",
+      {schemaIssues: schemaValidation.issues},
+    );
+  }
+  try {
+    const parsed = normalizeAiOutfitPayload(parsedPayload);
   const bodyProfile = readOptionalString(
     parsed.bodyProfile ?? parsed.body_profile ??
     parsed.bodyAnalysis ?? parsed.body_analysis,
@@ -5710,22 +5884,30 @@ function parseBlueprintPhase(content, context = {}) {
     parsed.styling_strategy || parsed.stylingStrategy,
     {bodyProfile, scene: context.scene},
   );
-  return Object.freeze({
-    gender,
-    bodyProfile,
-    style,
-    semantic_intent: context.semanticIntent || context.semantic_intent,
-    style_expression: resolveStyleExpression({
-      explicit: parsed.style_expression || parsed.styleExpression ||
-        context.style_expression || context.styleExpression,
-      styleProfile,
-    }),
-    style_semantics: styleSemantics,
-    style_profile: styleProfile,
-    style_validation_pending: styleValidationPending,
-    outfit_blueprint: outfitBlueprint,
-    styling_strategy: stylingStrategy,
-  });
+    return Object.freeze({
+      gender,
+      bodyProfile,
+      style,
+      semantic_intent: context.semanticIntent || context.semantic_intent,
+      style_expression: resolveStyleExpression({
+        explicit: parsed.style_expression || parsed.styleExpression ||
+          context.style_expression || context.styleExpression,
+        styleProfile,
+      }),
+      style_semantics: styleSemantics,
+      style_profile: styleProfile,
+      style_validation_pending: styleValidationPending,
+      outfit_blueprint: outfitBlueprint,
+      styling_strategy: stylingStrategy,
+    });
+  } catch (error) {
+    if (error?.code &&
+        error.code !== "BLUEPRINT_BUSINESS_VALIDATION_FAILED") {
+      error.originalCode = error.code;
+    }
+    error.code = "BLUEPRINT_BUSINESS_VALIDATION_FAILED";
+    throw error;
+  }
 }
 
 function mergeBlueprintAndLookPhase(blueprintPhase, content, context = {}) {
@@ -5799,6 +5981,7 @@ async function requestStructuredAiPhase({
   messages,
   timeoutMs,
   maxTokens,
+  responseFormat,
   requestId,
 }) {
   const abortController = new AbortController();
@@ -5810,10 +5993,11 @@ async function requestStructuredAiPhase({
     const outputBudget = Number.isInteger(maxTokens) && maxTokens > 0
       ? maxTokens
       : null;
+    const requestOptions = structuredJsonRequestOptions(responseFormat);
     const response = await client.chat.completions.create(
       {
         model: config.model,
-        ...structuredJsonRequestOptions(),
+        ...requestOptions,
         ...(outputBudget !== null
           ? {max_tokens: outputBudget}
           : {}),
@@ -5853,6 +6037,8 @@ async function requestStructuredAiPhase({
     console.info("ai_outfit_phase", {
       requestId,
       phase,
+      model: config.model,
+      response_format_type: requestOptions.response_format.type,
       duration_ms: Date.now() - startedAt,
       success: true,
       source: "ai_generated",
@@ -5864,10 +6050,21 @@ async function requestStructuredAiPhase({
     });
     return response;
   } catch (error) {
+    if (phase === "blueprint" && responseFormat?.type === "json_schema" &&
+        (error?.status === 400 || error?.status === 422 ||
+          /json[_ ]schema|response[_ ]format|structured output/i.test(
+            error?.message || "",
+          ))) {
+      if (error?.code) error.originalCode = error.code;
+      error.code = "BLUEPRINT_STRUCTURED_OUTPUT_FAILED";
+    }
     if (!error?.phaseLogged) {
+      const resolvedResponseFormat = responseFormat?.type || "json_object";
       console.warn("ai_outfit_phase", {
         requestId,
         phase,
+        model: config.model,
+        response_format_type: resolvedResponseFormat,
         duration_ms: Date.now() - startedAt,
         success: false,
         source: "ai_error",
@@ -6064,7 +6261,7 @@ async function generatePhasedOutfitAnalysis({
     phase: "blueprint",
     client,
     timeoutMs: blueprintTimeoutMs,
-    maxTokens: BLUEPRINT_PHASE_MAX_TOKENS,
+    responseFormat: blueprintStructuredResponseFormat(),
     requestId: outfitRequest.requestId,
     messages: [
       {
@@ -6085,6 +6282,10 @@ async function generatePhasedOutfitAnalysis({
     styleProfile: intentPhase.style_profile,
     knowledgeContext: fashionBrainResult.knowledge_context,
     knowledgeSources: fashionBrainResult.knowledge_sources,
+    enforceStructuredBlueprint: true,
+    model: config.model,
+    responseFormatType: "json_schema",
+    finishReason: blueprintResponse?.choices?.[0]?.finish_reason ?? null,
   });
   const blueprintDurationMs = Date.now() - blueprintStartedAt;
 
@@ -7158,5 +7359,8 @@ module.exports = {
   DEFAULT_BLUEPRINT_TIMEOUT_MS,
   DEFAULT_LOOK_TIMEOUT_MS,
   LEGACY_AI_MODEL,
+  OUTFIT_BLUEPRINT_JSON_SCHEMA,
+  blueprintStructuredResponseFormat,
+  validateBlueprintStructuredPayload,
   structuredJsonRequestOptions,
 };

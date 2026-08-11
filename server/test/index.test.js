@@ -58,6 +58,9 @@ const {
   DEFAULT_BLUEPRINT_TIMEOUT_MS,
   DEFAULT_LOOK_TIMEOUT_MS,
   LEGACY_AI_MODEL,
+  OUTFIT_BLUEPRINT_JSON_SCHEMA,
+  blueprintStructuredResponseFormat,
+  validateBlueprintStructuredPayload,
   structuredJsonRequestOptions,
 } = require("../index");
 const {AnalyticsStore} = require("../analytics_store");
@@ -2120,6 +2123,20 @@ test("disables thinking for stable structured JSON output", () => {
   });
 });
 
+test("uses strict JSON Schema for Blueprint structured output", () => {
+  const responseFormat = blueprintStructuredResponseFormat();
+
+  assert.equal(responseFormat.type, "json_schema");
+  assert.equal(responseFormat.json_schema.name, "fitai_outfit_blueprint");
+  assert.equal(responseFormat.json_schema.strict, true);
+  assert.equal(
+    responseFormat.json_schema.schema,
+    OUTFIT_BLUEPRINT_JSON_SCHEMA,
+  );
+  assert.equal(OUTFIT_BLUEPRINT_JSON_SCHEMA.type, "object");
+  assert.equal(OUTFIT_BLUEPRINT_JSON_SCHEMA.additionalProperties, false);
+});
+
 function phasedBlueprintFixture() {
   return {
     gender: "female",
@@ -2364,6 +2381,84 @@ function genericKnowledgeBlueprint() {
   };
   return fixture;
 }
+
+function structuredBlueprintFixture() {
+  const fixture = phasedBlueprintFixture();
+  return {
+    gender: fixture.gender,
+    bodyProfile: fixture.bodyProfile,
+    style: fixture.style,
+    style_expression: fixture.style_expression,
+    outfit_blueprint: fixture.outfit_blueprint,
+  };
+}
+
+test("accepts a complete Blueprint that matches the strict schema", () => {
+  const result = validateBlueprintStructuredPayload(
+    structuredBlueprintFixture(),
+  );
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.issues, []);
+});
+
+test("rejects a top-level Blueprint array in strict schema validation", () => {
+  const result = validateBlueprintStructuredPayload([
+    structuredBlueprintFixture(),
+  ]);
+
+  assert.equal(result.valid, false);
+  assert.match(result.issues[0], /must be an object/);
+});
+
+test("rejects Blueprint field type mismatches in strict schema validation", () => {
+  const payload = structuredBlueprintFixture();
+  payload.outfit_blueprint.core_elements = "蕾丝";
+  const result = validateBlueprintStructuredPayload(payload);
+
+  assert.equal(result.valid, false);
+  assert.ok(result.issues.some((issue) =>
+    issue.includes("outfit_blueprint.core_elements must be an array")));
+});
+
+test("rejects missing required Blueprint fields in strict schema validation", () => {
+  const payload = structuredBlueprintFixture();
+  delete payload.outfit_blueprint.occasion_strategy;
+  const result = validateBlueprintStructuredPayload(payload);
+
+  assert.equal(result.valid, false);
+  assert.ok(result.issues.some((issue) =>
+    issue.includes("outfit_blueprint.occasion_strategy is required")));
+});
+
+test("classifies malformed Blueprint structured output separately", () => {
+  assert.throws(
+    () => parseBlueprintPhase("[]", {
+      requestId: "blueprint-schema-error",
+      enforceStructuredBlueprint: true,
+      responseFormatType: "json_schema",
+      finishReason: "stop",
+    }),
+    (error) => error.code === "BLUEPRINT_STRUCTURED_OUTPUT_FAILED",
+  );
+});
+
+test("classifies executable Blueprint validation failures separately", () => {
+  const payload = structuredBlueprintFixture();
+  payload.outfit_blueprint.core_elements = [];
+  payload.outfit_blueprint.must_have_items = {};
+  assert.throws(
+    () => parseBlueprintPhase(JSON.stringify(payload), {
+      requestId: "blueprint-business-error",
+      gender: "female",
+      userInput: "未知穿搭",
+      enforceStructuredBlueprint: true,
+      responseFormatType: "json_schema",
+      finishReason: "stop",
+    }),
+    (error) => error.code === "BLUEPRINT_BUSINESS_VALIDATION_FAILED",
+  );
+});
 
 function retrieveKnowledge({sourceText, semanticIntent, styleProfile, height = 168}) {
   return buildFashionBrainContext({
@@ -2934,8 +3029,8 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
           }
           if (callCount === 2) {
             return {choices: [{message: {content: JSON.stringify(
-              phasedBlueprintFixture(),
-            )}}]};
+              structuredBlueprintFixture(),
+            )}, finish_reason: "stop"}]};
           }
           const timeout = new Error("Request timed out.");
           timeout.code = "ETIMEDOUT";
@@ -2982,7 +3077,13 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
   assert.equal(intentInput.requested_style, "甜妹穿搭");
 
   assert.match(requests[1].messages[0].content, /semantic_intent/);
-  assert.equal(requests[1].max_tokens, 1800);
+  assert.equal(Object.hasOwn(requests[1], "max_tokens"), false);
+  assert.equal(Object.hasOwn(requests[1], "max_completion_tokens"), false);
+  assert.deepEqual(
+    requests[1].response_format,
+    blueprintStructuredResponseFormat(),
+  );
+  assert.equal(requests[1].enable_thinking, false);
   assert.match(requests[1].messages[0].content, /Do not generate Looks/);
   assert.doesNotMatch(
     requests[1].messages[0].content,
@@ -3163,6 +3264,12 @@ test("reports live readiness and classifies provider fallback reasons", () => {
     resolveAiModeReason({forceMockAi: false}, {}),
     "vision_model_ready",
   );
+  assert.equal(resolveAiFallbackReason({
+    code: "BLUEPRINT_STRUCTURED_OUTPUT_FAILED",
+  }), "BLUEPRINT_STRUCTURED_OUTPUT_FAILED");
+  assert.equal(resolveAiFallbackReason({
+    code: "BLUEPRINT_BUSINESS_VALIDATION_FAILED",
+  }), "BLUEPRINT_BUSINESS_VALIDATION_FAILED");
   assert.equal(resolveAiFallbackReason({message: "Request timed out."}), "AI_TIMEOUT");
   assert.equal(resolveAiFallbackReason({message: "Request was aborted."}), "AI_TIMEOUT");
   assert.equal(resolveAiFallbackReason({status: 401}), "AI_AUTH_FAILED");
