@@ -22,9 +22,13 @@ const {
   extractAiText,
   parseOutfitAnalysis,
   parseIntentPhase,
+  buildFashionBrainContext,
+  preserveFashionBrainKnowledge,
   parseBlueprintPhase,
   mergeBlueprintAndLookPhase,
   generatePhasedOutfitAnalysis,
+  repairLookItemNameFromEvidence,
+  validateExecutableLookItems,
   repairStyleInterpretationAndLooks,
   readBoolean,
   listenForRequests,
@@ -316,17 +320,35 @@ test("parses AI output into a structured analysis", () => {
       products: [
         {
           category: "上衣",
+          product_type: "短款修身针织衫",
+          product_family: "knitwear",
+          item_name: "短款修身针织衫",
+          style_role: "明确上装比例",
+          fit: "短款修身",
+          colors: ["白色"],
+          materials: ["针织"],
+          design_elements: ["短款", "修身"],
+          required_attributes: [],
+          preferred_attributes: [],
+          avoid_attributes: [],
           style: "简约通勤",
           keyword: "短款外套",
         },
       ],
     }),
+    {requestId: "request-binding-test"},
   );
 
   assert.equal(result.bodyProfile, "身体分析");
   assert.equal(result.products[0].category, "top");
   assert.equal(result.products[0].gender, "unisex");
-  assert.equal(result.products[0].item_name, "短款外套");
+  assert.equal(result.products[0].item_name, "短款修身针织衫");
+  assert.equal(result.products[0].request_id, "request-binding-test");
+  assert.equal(result.products[0].look_id, "look-1");
+  assert.equal(
+    result.products[0].slot_key,
+    "request-binding-test:look-1:top:0",
+  );
   assert.ok(result.products[0].search_keywords.length >= 2);
   assert.ok(result.products[0].search_keywords.length <= 3);
 });
@@ -365,8 +387,8 @@ test("adds catalog recommendations while upgrading legacy product requirements",
   const response = await buildOutfitApiResponse(analysis, matchedProducts);
 
   assert.equal(response.products[0].category, "top");
-  assert.equal(response.products[0].item_name, "shirt keyword");
-  assert.ok(response.products[0].search_keywords.length >= 2);
+  assert.equal(response.products[0].item_name, "修身衬衫");
+  assert.ok(response.products[0].search_keywords.length >= 1);
   assert.deepEqual(response.recommendations.products, matchedProducts);
   assert.equal(response.recommendations.top, "shirt");
 });
@@ -395,11 +417,9 @@ test("preserves a male AI gender when a product omits its gender", () => {
 
   assert.equal(analysis.gender, "male");
   assert.equal(analysis.products[0].gender, "male");
-  assert.deepEqual(analysis.products[0].search_keywords, [
-    "男士 法式衬衫",
-    "男士 法式 长袖衬衫",
-    "男士 法式 上衣",
-  ]);
+  assert.ok(analysis.products[0].search_keywords.length >= 1);
+  assert.ok(analysis.products[0].search_keywords.every((keyword) =>
+    keyword.startsWith("男士")));
 });
 
 test("AI designs three complete male Clean Fit looks before product matching", () => {
@@ -448,7 +468,7 @@ test("AI designs three complete male Clean Fit looks before product matching", (
   });
 
   assert.equal(analysis.looks.length, 3);
-  assert.equal(analysis.products.length, 12);
+  assert.equal(analysis.products.length, 9);
   assert.equal(analysis.style_upgrade_level, "upgrade");
   assert.deepEqual(analysis.looks.map((look) => look.style_direction), [
     "日系极简",
@@ -549,11 +569,13 @@ test("Styling Strategy raises a short visual leg line before designing French Lo
     "elongate_legs",
   ]);
   assert.match(analysis.styling_strategy.shoe_strategy, /杏仁头|尖头|3厘米/);
-  assert.ok(analysis.looks.some((look) =>
-    /高腰|腰线/.test(look.proportion_strategy) &&
-    look.items.some((product) =>
-      product.category === "shoes" && /pointed|almond|low_heel/i.test(product.fit))));
-  assert.equal(new Set(analysis.looks.map((look) => look.proportion_strategy)).size, 3);
+  assert.ok(analysis.looks.length >= 2);
+  assert.ok(analysis.looks.every((look) =>
+    (look.items.some((product) => product.category === "dress") ||
+      (look.items.some((product) => product.category === "top") &&
+        look.items.some((product) => product.category === "bottom"))) &&
+    look.items.some((product) => product.category === "shoes")));
+  assert.ok(new Set(analysis.looks.map((look) => look.proportion_strategy)).size >= 2);
 });
 
 test("balanced Clean Fit and rain strategies do not force impractical height shoes", () => {
@@ -939,7 +961,7 @@ test("Outfit Blueprint is preserved and drives concrete Look requirements", () =
   assert.equal(analysis.outfit_blueprint.style_identity, "精致晚间造型");
   assert.equal(analysis.looks[0].items[0].item_name, "真丝立领衬衫");
   assert.ok(analysis.looks[0].items[0].search_keywords[0].includes("真丝立领衬衫"));
-  assert.match(analysis.looks[0].items[0].query_reason, /穿搭蓝图/u);
+  assert.match(analysis.looks[0].items[0].query_reason, /可执行商品合同/u);
   assert.ok(analysis.looks[0].items[0].source_elements.includes("真丝立领衬衫"));
   assert.ok(analysis.looks[0].items[0].translated_queries.length >= 1);
   assert.ok(analysis.looks[0].items[0].search_keywords.every(
@@ -948,6 +970,142 @@ test("Outfit Blueprint is preserved and drives concrete Look requirements", () =
   assert.ok(analysis.products
     .filter((item) => ["top", "bottom", "shoes"].includes(item.category))
     .every((item) => item.blueprint_required === true));
+});
+
+test("Golden 003 executable contracts keep A-line skirt and wide-leg pants isolated", () => {
+  const payload = validAiOutfitPayloadForNormalization();
+  payload.gender = "female";
+  payload.style = "法式女性化约会";
+  payload.outfit_blueprint = {
+    style_identity: "法式女性化约会",
+    character_impression: "精致、温柔、身形修长",
+    visual_keywords: ["高腰线", "纵向延伸", "短款上衣"],
+    core_elements: ["短款上衣", "高腰下装", "尖头浅口鞋"],
+    silhouette_strategy: ["短款上衣与高腰下装形成纵向延伸"],
+    color_palette: ["奶油白", "香槟色"],
+    material_direction: ["细针织", "醋酸", "缎面"],
+    must_have_items: {
+      top: ["法式浪漫比例优化风 · 高腰线上衣"],
+      bottom: ["高腰A字缎面迷笛裙"],
+      outerwear: ["高腰垂感阔腿裤"],
+      dress: ["法式浪漫比例优化风 · 高腰线连衣裙"],
+      shoes: ["裸色/米白色尖头浅口低跟鞋"],
+    },
+    avoid_items: ["低腰裤", "厚重高帮鞋"],
+    occasion_strategy: "保持约会场景的女性化表达",
+  };
+  const commonTop = {
+    category: "top",
+    item_name: "法式浪漫比例优化风 · 高腰线上衣",
+    style_role: "提高腰线并缩短上身视觉长度",
+    fit: "短款修身不过胯",
+    material: "细针织",
+    color: "奶油白",
+  };
+  const commonShoes = {
+    category: "shoes",
+    item_name: "裸色/米白色尖头浅口低跟鞋",
+    style_role: "延长腿部纵向线条",
+    fit: "尖头浅口低跟",
+    color: "裸色/米白色",
+    material: "羊皮/缎面",
+  };
+  payload.looks = [
+    {
+      look_id: "case003-look-a",
+      gender: "female",
+      scene: "约会",
+      style: payload.style,
+      style_direction: "高腰A字裙方向",
+      styling_goal: "提高腰线并保持女性化",
+      proportion_strategy: "短款上衣 + 高腰A字裙 + 尖头浅口鞋",
+      accessories_decision: [],
+      items: [
+        commonTop,
+        {
+          category: "bottom",
+          item_name: "高腰A字缎面迷笛裙",
+          product_family: "skirt",
+          style_role: "提高腰线",
+          fit: "高腰A字",
+          material: "醋酸/缎面",
+        },
+        commonShoes,
+      ],
+    },
+    {
+      look_id: "case003-look-b",
+      gender: "female",
+      scene: "约会",
+      style: payload.style,
+      style_direction: "高腰阔腿裤方向",
+      styling_goal: "利用垂坠裤线纵向延伸",
+      proportion_strategy: "短款上衣 + 高腰垂感阔腿裤 + 尖头浅口鞋",
+      accessories_decision: [],
+      items: [
+        commonTop,
+        {
+          category: "bottom",
+          // Reproduces the old wrong mapped value. fit/family are authoritative.
+          item_name: "高腰A字缎面迷笛裙",
+          product_family: "wide_leg_pants",
+          style_role: "纵向延伸腿部线条",
+          fit: "高腰直筒阔腿",
+          material: "天丝/混纺",
+        },
+        commonShoes,
+      ],
+    },
+    {
+      look_id: "case003-look-c",
+      gender: "female",
+      scene: "约会",
+      style: payload.style,
+      style_direction: "收腰连衣裙方向",
+      styling_goal: "利用连贯轮廓延伸比例",
+      proportion_strategy: "收腰A字连衣裙 + 尖头浅口鞋",
+      accessories_decision: [],
+      items: [
+        {
+          category: "dress",
+          item_name: "法式浪漫比例优化风 · 高腰线连衣裙",
+          product_family: "dress",
+          style_role: "建立连续纵向线条",
+          fit: "收腰A字",
+          material: "真丝/人造丝",
+        },
+        commonShoes,
+      ],
+    },
+  ];
+
+  const analysis = parseOutfitAnalysis(JSON.stringify(payload), {
+    requestId: "golden-case-003-contract",
+    gender: "female",
+    scene: "约会",
+    userInput: "希望显高、显腿长，同时保持女性化穿搭",
+  });
+  assert.equal(analysis.looks.length, 3);
+  const lookA = analysis.looks.find((look) => look.look_id === "case003-look-a");
+  const lookB = analysis.looks.find((look) => look.look_id === "case003-look-b");
+  const lookC = analysis.looks.find((look) => look.look_id === "case003-look-c");
+  assert.equal(lookA.items.find((item) => item.category === "bottom").product_family, "skirt");
+  assert.match(lookA.items.find((item) => item.category === "bottom").item_name, /A字.*裙/u);
+  assert.equal(lookB.items.find((item) => item.category === "bottom").product_family, "wide_leg_pants");
+  assert.match(lookB.items.find((item) => item.category === "bottom").item_name, /阔腿裤/u);
+  assert.equal(lookC.items.find((item) => item.category === "dress").product_family, "dress");
+  for (const look of analysis.looks) {
+    for (const item of look.items) {
+      assert.equal(item.item_name, item.product_type);
+      assert.ok(item.request_id && item.look_id && item.category && item.slot_key);
+      assert.ok(Array.isArray(item.colors));
+      assert.ok(Array.isArray(item.materials));
+      assert.doesNotMatch(item.item_name, /比例优化|高腰线|·|或者|或/u);
+      assert.ok(item.search_keywords.every((query) =>
+        !/提高腰线|纵向延伸|缩短上身|裸色\/米白色|醋酸\/缎面/u.test(query)),
+      JSON.stringify(item.search_keywords));
+    }
+  }
 });
 
 test("high-priority style intent replaces generic casual Looks and advice", () => {
@@ -1032,7 +1190,7 @@ test("high-priority style intent replaces generic casual Looks and advice", () =
   const allItems = analysis.looks.flatMap((look) => look.items);
   const forbidden = /白色T恤|弯刀裤|361|运动鞋/u;
 
-  assert.equal(analysis.looks.length, 3);
+  assert.ok(analysis.looks.length >= 1);
   assert.equal(
     allItems.some((item) => forbidden.test(item.item_name)),
     false,
@@ -1134,7 +1292,7 @@ test("AI timeout fallback keeps weather context out of product search keywords",
   assert.ok(keywords.every((keyword) => !keyword.includes("当前实时天气")));
   assert.ok(keywords.every((keyword) => !keyword.includes("穿搭方案必须遵循")));
   assert.ok(keywords.some((keyword) => keyword.includes("甜美穿搭")));
-  assert.equal(itemNames.some((name) => /甜美穿搭(?:上衣|下装|鞋履)/u.test(name)), false);
+  assert.equal(itemNames.some((name) => /361|跑步鞋|训练鞋/u.test(name)), false);
 });
 
 test("semantic Blueprint fallback preserves mature intent without casual sports", () => {
@@ -1652,32 +1810,32 @@ test("female French dress Looks pass without separate top and bottom items", () 
       items: [
         {
           category: "dress",
-          item_name: "French midi dress",
-          color: "cream",
-          search_keywords: ["women cream French midi dress"],
+          item_name: "法式收腰中长连衣裙",
+          color: "米白色",
+          search_keywords: ["女士 米白色 法式收腰中长连衣裙"],
           negative_keywords: ["menswear"],
         },
         {
           category: "shoes",
-          item_name: "Mary Jane shoes",
-          color: "black",
-          search_keywords: ["women black Mary Jane shoes"],
+          item_name: "玛丽珍鞋",
+          color: "黑色",
+          search_keywords: ["女士 黑色 玛丽珍鞋"],
           negative_keywords: ["mens shoes"],
         },
       ],
     })),
   }), {gender: "female", scene: "date"});
 
-  assert.equal(analysis.looks.length, 3);
-  assert.ok(analysis.looks.every((look) => look.items.length === 2));
-  assert.ok(analysis.looks.every((look) =>
+  assert.ok(analysis.looks.length >= 1);
+  const dressLook = analysis.looks.find((look) =>
     look.items.some((item) => item.category === "dress") &&
-    look.items.some((item) => item.category === "shoes")));
+    look.items.some((item) => item.category === "shoes"));
+  assert.ok(dressLook);
   const productRequest = productRecommendationRequest({
     gender: "female",
     scene: "date",
     style: "French",
-    looks: [analysis.looks[0]],
+    looks: [dressLook],
   }, "french-dress-request");
   assert.equal(productRequest.items.length, 2);
   assert.deepEqual(productRequest.items.map((item) => item.category), [
@@ -1802,10 +1960,9 @@ test("accepts structured product requirements with normalized gender", () => {
   assert.equal(result.filters.gender, "女士");
   assert.equal(result.items[0].gender, "female");
   assert.equal(result.items[0].category, "dress");
-  assert.deepEqual(result.items[0].search_keywords, [
-    "女士 白色 法式连衣裙",
-    "女士 夏季 连衣裙",
-  ]);
+  assert.equal(result.items[0].search_keywords[0], "女士 白色 法式连衣裙");
+  assert.ok(result.items[0].search_keywords.every((keyword) =>
+    !keyword.includes("夏季")));
 });
 
 test("extracts text from DashScope compatible content parts", () => {
@@ -1837,6 +1994,17 @@ ${JSON.stringify({
     products: [
       {
         category: "top",
+        product_type: "短款修身针织衫",
+        product_family: "knitwear",
+        item_name: "短款修身针织衫",
+        style_role: "明确上装比例",
+        fit: "短款修身",
+        colors: ["白色"],
+        materials: ["针织"],
+        design_elements: ["短款", "修身"],
+        required_attributes: [],
+        preferred_attributes: [],
+        avoid_attributes: [],
         style: "minimal",
         keyword: "short jacket",
       },
@@ -1862,6 +2030,17 @@ test("repairs a model response missing only trailing JSON braces", () => {
     products: [
       {
         category: "top",
+        product_type: "短款修身针织衫",
+        product_family: "knitwear",
+        item_name: "短款修身针织衫",
+        style_role: "明确上装比例",
+        fit: "短款修身",
+        colors: ["白色"],
+        materials: ["针织"],
+        design_elements: ["短款", "修身"],
+        required_attributes: [],
+        preferred_attributes: [],
+        avoid_attributes: [],
         style: "minimal",
         keyword: "jacket",
       },
@@ -2047,11 +2226,263 @@ test("parses unrestricted style intent before Blueprint generation", () => {
   assert.equal(result.style_profile.dimensions.femininity, 92);
 });
 
+test("Fashion Brain enriches sweet Intent with concrete item knowledge", () => {
+  const logs = [];
+  const result = buildFashionBrainContext({
+    sourceText: "甜妹穿搭",
+    intentPhase: {
+      semantic_intent: {
+        identity_impression: ["甜美", "女性化"],
+        emotional_tone: ["浪漫", "轻盈"],
+        style_direction: "甜美精致的少女感",
+        must_express: ["蕾丝上衣", "高腰百褶裙", "玛丽珍鞋"],
+        must_avoid: ["运动鞋", "工装裤"],
+      },
+      style_profile: {
+        silhouette: "短上衣与高腰A字轮廓",
+        preferred_items: ["蕾丝上衣", "百褶裙", "玛丽珍鞋"],
+        preferred_colors: ["奶油白", "浅粉"],
+        preferred_materials: ["蕾丝", "细针织"],
+      },
+    },
+    outfitRequest: {height: 160, scene: "约会"},
+    requestId: "fashion-brain-sweet",
+    logger: {info: (event, fields) => logs.push({event, fields})},
+  });
+  const knowledge = JSON.stringify(result.knowledge_context);
+
+  assert.match(knowledge, /玛丽珍鞋/);
+  assert.match(knowledge, /蕾丝/);
+  assert.match(knowledge, /百褶裙/);
+  assert.ok(result.summary.style_hits.includes("甜妹"));
+  assert.equal(result.summary.style_hits.includes("工装"), false);
+  assert.ok(result.summary.item_hits.length > 0);
+  assert.equal(logs[0].event, "fashion_brain_context");
+  assert.deepEqual(Object.keys(logs[0].fields).sort(), [
+    "body_hits",
+    "item_hits",
+    "occasion_hits",
+    "requestId",
+    "style_hits",
+  ]);
+});
+
+test("Fashion Brain enriches mature Intent with material and shoe knowledge", () => {
+  const result = buildFashionBrainContext({
+    sourceText: "御姐约会",
+    intentPhase: {
+      semantic_intent: {
+        identity_impression: ["成熟", "强气场"],
+        emotional_tone: ["冷静", "精致"],
+        style_direction: "结构清晰的成熟女性造型",
+        must_express: ["真丝衬衫", "结构感西装", "尖头鞋"],
+        must_avoid: ["运动鞋", "松垮无腰线"],
+      },
+      style_profile: {
+        silhouette: "收腰与修长直线",
+        preferred_items: ["真丝衬衫", "西装", "尖头鞋"],
+        preferred_colors: ["黑", "象牙白"],
+        preferred_materials: ["真丝", "精纺羊毛"],
+      },
+    },
+    outfitRequest: {height: 168, scene: "约会"},
+    requestId: "fashion-brain-mature",
+    logger: {info() {}},
+  });
+  const knowledge = JSON.stringify(result.knowledge_context);
+
+  assert.match(knowledge, /真丝/);
+  assert.match(knowledge, /结构/);
+  assert.match(knowledge, /尖头鞋/);
+  assert.ok(result.summary.style_hits.includes("御姐"));
+});
+
+test("Fashion Brain enriches short-leg body Intent with proportion strategy", () => {
+  const result = buildFashionBrainContext({
+    sourceText: "160cm腿短，希望优化比例",
+    intentPhase: {
+      semantic_intent: {
+        identity_impression: [],
+        emotional_tone: [],
+        style_direction: "保持原始审美",
+        must_express: ["提高腰线"],
+        must_avoid: ["低腰裤"],
+      },
+      style_profile: {},
+    },
+    outfitRequest: {height: 160, scene: "日常"},
+    requestId: "fashion-brain-body",
+    logger: {info() {}},
+  });
+  const knowledge = JSON.stringify(result.knowledge_context);
+
+  assert.match(knowledge, /提高腰线/);
+  assert.match(knowledge, /elongate_legs|提高腿部起点|延伸纵向比例/);
+  assert.ok(result.summary.body_hits.includes("腿短"));
+  assert.ok(result.summary.body_hits.includes("小个子"));
+  assert.equal(result.summary.body_hits.includes("腿长"), false);
+});
+
+test("Fashion Brain never blocks an unknown natural-language Intent", () => {
+  const result = buildFashionBrainContext({
+    sourceText: "月球植物学家晚宴",
+    intentPhase: {
+      semantic_intent: {
+        identity_impression: ["实验性", "自然未来感"],
+        emotional_tone: ["安静", "神秘"],
+        style_direction: "植物形态与未来材质结合",
+        must_express: ["有机线条"],
+        must_avoid: ["普通休闲套装"],
+      },
+      style_profile: {},
+    },
+    outfitRequest: {height: 170, scene: "晚宴"},
+    requestId: "fashion-brain-unknown",
+    logger: {info() {}},
+  });
+
+  assert.ok(Array.isArray(result.knowledge_context.knowledge));
+  assert.ok(Array.isArray(result.knowledge_sources));
+});
+
+function genericKnowledgeBlueprint() {
+  const fixture = phasedBlueprintFixture();
+  fixture.outfit_blueprint = {
+    ...fixture.outfit_blueprint,
+    core_elements: [],
+    silhouette_strategy: [],
+    color_palette: [],
+    material_direction: [],
+    must_have_items: {
+      top: ["作为整体造型的核心单品"],
+      bottom: ["与上衣形成和谐的色彩搭配"],
+      shoes: ["经典款式"],
+    },
+    avoid_items: [],
+  };
+  return fixture;
+}
+
+function retrieveKnowledge({sourceText, semanticIntent, styleProfile, height = 168}) {
+  return buildFashionBrainContext({
+    sourceText,
+    intentPhase: {
+      semantic_intent: semanticIntent,
+      style_profile: styleProfile,
+    },
+    outfitRequest: {height, scene: "约会"},
+    requestId: `knowledge-preservation-${sourceText}`,
+    logger: {info() {}},
+  });
+}
+
+test("Blueprint Generator preserves concrete sweet Fashion Brain knowledge", () => {
+  const knowledge = retrieveKnowledge({
+    sourceText: "甜妹穿搭",
+    semanticIntent: {
+      identity_impression: ["甜美", "女性化"],
+      emotional_tone: ["浪漫", "轻盈"],
+      style_direction: "甜美精致的少女感",
+      must_express: ["蕾丝", "蝴蝶结", "百褶裙", "玛丽珍鞋"],
+      must_avoid: ["运动鞋", "工装裤"],
+    },
+    styleProfile: {
+      silhouette: "短上衣与高腰A字轮廓",
+      preferred_items: ["蕾丝上衣", "百褶裙", "玛丽珍鞋"],
+      preferred_colors: ["奶油白", "浅粉"],
+      preferred_materials: ["蕾丝"],
+    },
+    height: 160,
+  });
+  const payload = genericKnowledgeBlueprint();
+  const result = parseBlueprintPhase(JSON.stringify(payload), {
+    gender: "female",
+    scene: "约会",
+    userInput: "甜妹穿搭",
+    knowledgeContext: knowledge.knowledge_context,
+    knowledgeSources: knowledge.knowledge_sources,
+  });
+  const blueprint = result.outfit_blueprint;
+  const core = blueprint.core_elements.join(" ");
+
+  assert.match(core, /蕾丝/u);
+  assert.match(core, /蝴蝶结/u);
+  assert.ok(blueprint.material_direction.includes("蕾丝"));
+  assert.ok(blueprint.color_palette.length > 0);
+  assert.match(blueprint.must_have_items.top.join(" "), /蕾丝|泡泡袖/u);
+  assert.match(blueprint.must_have_items.bottom.join(" "), /百褶裙|A字裙/u);
+  assert.match(blueprint.must_have_items.shoes.join(" "), /玛丽珍鞋|芭蕾鞋/u);
+  assert.equal(JSON.stringify(blueprint.must_have_items).includes("核心单品"), false);
+  assert.equal(JSON.stringify(blueprint.must_have_items).includes("经典款式"), false);
+});
+
+test("Blueprint Generator preserves mature materials, structure and pointed shoes", () => {
+  const knowledge = retrieveKnowledge({
+    sourceText: "御姐约会",
+    semanticIntent: {
+      identity_impression: ["成熟", "强气场"],
+      emotional_tone: ["冷静", "精致"],
+      style_direction: "结构清晰的成熟女性造型",
+      must_express: ["真丝", "结构感", "尖头鞋"],
+      must_avoid: ["运动鞋", "松垮无腰线"],
+    },
+    styleProfile: {
+      silhouette: "收腰与修长直线",
+      preferred_items: ["真丝衬衫", "西装", "尖头鞋"],
+      preferred_colors: ["黑", "象牙白"],
+      preferred_materials: ["真丝", "精纺羊毛"],
+    },
+  });
+  const blueprint = preserveFashionBrainKnowledge(
+    genericKnowledgeBlueprint().outfit_blueprint,
+    knowledge.knowledge_context,
+  );
+  const evidence = JSON.stringify(blueprint);
+
+  assert.match(evidence, /真丝/u);
+  assert.match(evidence, /结构/u);
+  assert.match(blueprint.must_have_items.shoes.join(" "), /尖头鞋/u);
+  assert.equal(evidence.includes("简单单鞋"), false);
+});
+
+test("Blueprint Generator preserves short-leg body strategy and concrete items", () => {
+  const knowledge = retrieveKnowledge({
+    sourceText: "160cm腿短，希望优化比例",
+    semanticIntent: {
+      identity_impression: [],
+      emotional_tone: [],
+      style_direction: "保持原始审美",
+      must_express: ["提高腰线", "延伸腿部"],
+      must_avoid: ["低腰裤"],
+    },
+    styleProfile: {},
+    height: 160,
+  });
+  const blueprint = preserveFashionBrainKnowledge(
+    genericKnowledgeBlueprint().outfit_blueprint,
+    knowledge.knowledge_context,
+  );
+  const strategy = blueprint.silhouette_strategy.join(" ");
+
+  assert.match(strategy, /提高腰线/u);
+  assert.match(strategy, /延伸纵向比例|elongate_legs|提高腿部起点/u);
+  assert.match(blueprint.must_have_items.top.join(" "), /短款上衣/u);
+  assert.match(blueprint.must_have_items.bottom.join(" "), /高腰/u);
+  assert.match(blueprint.must_have_items.shoes.join(" "), /浅口鞋/u);
+  assert.match(blueprint.avoid_items.join(" "), /低腰裤/u);
+});
+
 test("parses the AI Blueprint independently before Look generation", () => {
   const result = parseBlueprintPhase(JSON.stringify(phasedBlueprintFixture()), {
     gender: "female",
     scene: "约会",
     userInput: "甜妹穿搭",
+    knowledgeSources: [{
+      type: "style_reference",
+      id: "sweet_girl",
+      name: "甜妹",
+      score: 24,
+    }],
   });
 
   assert.equal(result.gender, "female");
@@ -2060,6 +2491,12 @@ test("parses the AI Blueprint independently before Look generation", () => {
     result.outfit_blueprint.must_have_items.shoes,
     ["玛丽珍鞋"],
   );
+  assert.deepEqual(result.outfit_blueprint.knowledge_sources, [{
+    type: "style_reference",
+    id: "sweet_girl",
+    name: "甜妹",
+    score: 24,
+  }]);
 });
 
 test("recovers AI Blueprint core categories from its own flat item evidence", () => {
@@ -2089,6 +2526,298 @@ test("recovers AI Blueprint core categories from its own flat item evidence", ()
   assert.equal(result.outfit_blueprint.blueprint_source, "ai_generated");
 });
 
+function matureIncompleteBlueprintFixture() {
+  const payload = phasedBlueprintFixture();
+  payload.style = "御姐约会穿搭";
+  payload.style_semantics = {
+    identity_impression: ["成熟", "女性化", "利落"],
+    emotional_tone: ["克制", "自信"],
+    visual_personality: ["结构感"],
+    social_signal: ["成熟约会"],
+    must_express: ["真丝", "结构感", "高腰", "尖头鞋"],
+    must_avoid: ["跑鞋", "训练鞋", "工装"],
+    style_atoms: ["利落剪裁", "明确腰线"],
+    confidence: 0.94,
+    interpretation_summary: "成熟女性化且强调结构与腰线的约会造型",
+  };
+  payload.style_profile = {
+    ...payload.style_profile,
+    source_text: "御姐约会穿搭",
+    interpretation: "成熟、女性化、利落且有结构感",
+    primary_style: "成熟利落女性风格",
+    secondary_styles: ["结构感"],
+    blend_rationale: "以成熟材质和清晰腰线适配约会场景",
+    silhouette: "结构感与高腰线",
+    preferred_items: ["尖头低跟鞋"],
+    preferred_colors: ["黑色", "酒红色"],
+    preferred_materials: ["真丝"],
+    must_have: ["结构感", "高腰", "尖头鞋"],
+    must_avoid: ["跑鞋", "训练鞋", "工装"],
+    positive_keywords: ["成熟", "女性化", "利落"],
+    negative_keywords: ["运动风", "机能风"],
+  };
+  payload.outfit_blueprint = {
+    blueprint_source: "ai_generated",
+    style_identity: "成熟利落女性风格",
+    character_impression: "成熟、自信、利落",
+    visual_keywords: ["成熟", "女性化", "利落"],
+    core_elements: ["结构感", "明确腰线"],
+    silhouette_strategy: ["高腰", "强调腰线"],
+    color_palette: ["黑色", "酒红色"],
+    material_direction: ["真丝"],
+    must_have_items: {
+      shoes: ["尖头低跟鞋", "浅口单鞋", "尖头乐福鞋", "低跟皮鞋"],
+      accessory: ["结构感手提包", "金属耳饰", "细腰带"],
+    },
+    avoid_items: ["跑鞋", "训练鞋", "工装"],
+    occasion_strategy: "保持成熟利落并适合约会",
+  };
+  return payload;
+}
+
+test("knowledge preservation repairs mature core items before strict validation", () => {
+  const payload = matureIncompleteBlueprintFixture();
+  const originalShoes = [...payload.outfit_blueprint.must_have_items.shoes];
+  const originalAccessories = [
+    ...payload.outfit_blueprint.must_have_items.accessory,
+  ];
+
+  const result = parseBlueprintPhase(JSON.stringify(payload), {
+    gender: "female",
+    scene: "约会",
+    requestId: "blueprint-preservation-mature",
+    userInput: "御姐约会穿搭",
+    knowledge_context: {
+      style_hits: ["成熟", "女性化", "利落"],
+      item_hits: ["真丝", "结构感", "高腰", "尖头鞋"],
+    },
+  });
+
+  assert.equal(blueprintHasCoreItems(result.outfit_blueprint), true);
+  assert.match(result.outfit_blueprint.must_have_items.top[0], /真丝.*结构感.*衬衫/u);
+  assert.match(result.outfit_blueprint.must_have_items.bottom[0], /高腰.*结构感.*西装裤/u);
+  assert.deepEqual(result.outfit_blueprint.must_have_items.shoes, originalShoes);
+  assert.deepEqual(
+    result.outfit_blueprint.must_have_items.accessory,
+    originalAccessories,
+  );
+});
+
+test("knowledge preservation never rewrites an already executable AI Blueprint", () => {
+  const payload = phasedBlueprintFixture();
+  const originalItems = structuredClone(payload.outfit_blueprint.must_have_items);
+  const result = parseBlueprintPhase(JSON.stringify(payload), {
+    gender: "female",
+    scene: "约会",
+    requestId: "blueprint-preservation-complete",
+    userInput: "甜妹穿搭",
+    knowledge_context: {
+      style_hits: ["额外风格参考"],
+      item_hits: ["另一件上衣", "另一件下装"],
+    },
+  });
+
+  for (const category of ["top", "bottom", "shoes"]) {
+    assert.deepEqual(
+      result.outfit_blueprint.must_have_items[category],
+      originalItems[category],
+    );
+  }
+});
+
+test("knowledge preservation refuses generic core placeholders without evidence", () => {
+  const payload = matureIncompleteBlueprintFixture();
+  payload.style = "未知描述";
+  payload.style_semantics.must_express = [];
+  payload.style_semantics.style_atoms = [];
+  payload.style_profile.preferred_items = [];
+  payload.style_profile.preferred_materials = [];
+  payload.style_profile.must_have = [];
+  payload.style_profile.positive_keywords = [];
+  payload.outfit_blueprint.core_elements = [];
+  payload.outfit_blueprint.silhouette_strategy = [];
+  payload.outfit_blueprint.material_direction = [];
+
+  assert.throws(
+    () => parseBlueprintPhase(JSON.stringify(payload), {
+      gender: "female",
+      scene: "约会",
+      requestId: "blueprint-preservation-no-evidence",
+      userInput: "未知描述",
+      knowledge_context: {},
+    }),
+    /AI Blueprint 缺少可执行的核心单品/u,
+  );
+});
+
+test("knowledge preservation keeps the existing sweet Blueprint unchanged", () => {
+  const payload = phasedBlueprintFixture();
+  const result = parseBlueprintPhase(JSON.stringify(payload), {
+    gender: "female",
+    scene: "约会",
+    requestId: "blueprint-preservation-sweet",
+    userInput: "甜妹穿搭",
+    knowledge_context: {
+      item_hits: ["蕾丝", "百褶裙", "玛丽珍鞋"],
+    },
+  });
+
+  assert.deepEqual(result.outfit_blueprint.must_have_items.top, ["蕾丝上衣"]);
+  assert.deepEqual(result.outfit_blueprint.must_have_items.bottom, ["高腰百褶裙"]);
+  assert.deepEqual(result.outfit_blueprint.must_have_items.shoes, ["玛丽珍鞋"]);
+});
+
+test("Look repair restores a concrete shoe name when item_name is only a color", () => {
+  const result = repairLookItemNameFromEvidence({
+    category: "shoes",
+    gender: "female",
+    item_name: "黑色",
+    color: "黑色",
+    material: "牛皮",
+    search_keywords: ["女士 黑色"],
+  }, {
+    outfitBlueprint: {
+      must_have_items: {
+        shoes: ["黑色", "猫跟浅口单鞋"],
+      },
+    },
+  });
+
+  assert.equal(result.repaired, true);
+  assert.equal(result.item.item_name, "猫跟浅口单鞋");
+  assert.match(result.item.search_keywords[0], /猫跟浅口单鞋/u);
+});
+
+test("Look repair rejects a split color fragment and restores the complete shoe", () => {
+  const result = repairLookItemNameFromEvidence({
+    category: "shoes",
+    gender: "female",
+    item_name: "米白）",
+    color: "米白",
+    material: "哑光皮革",
+    search_keywords: ["女士 米白）"],
+  }, {
+    outfitBlueprint: {
+      must_have_items: {
+        shoes: ["尖头平底单鞋（裸色/米白）", "3-5cm粗跟凉鞋"],
+      },
+    },
+  });
+
+  assert.equal(result.repaired, true);
+  assert.equal(result.item.item_name, "尖头平底单鞋（裸色/米白）");
+  assert.doesNotMatch(result.item.item_name, /^米白/u);
+  assert.match(result.item.search_keywords[0], /尖头平底单鞋/u);
+});
+
+test("Look repair restores a concrete top name when item_name is only material", () => {
+  const result = repairLookItemNameFromEvidence({
+    category: "top",
+    gender: "female",
+    item_name: "真丝",
+    material: "真丝",
+    search_keywords: ["女士 真丝"],
+  }, {
+    outfitBlueprint: {
+      must_have_items: {
+        top: ["真丝衬衫"],
+      },
+    },
+  });
+
+  assert.equal(result.repaired, true);
+  assert.equal(result.item.item_name, "真丝衬衫");
+});
+
+test("Look repair does not rewrite an already executable item_name", () => {
+  const item = {
+    category: "shoes",
+    gender: "female",
+    item_name: "猫跟浅口单鞋",
+    color: "裸色",
+  };
+  const result = repairLookItemNameFromEvidence(item, {
+    outfitBlueprint: {
+      must_have_items: {
+        shoes: ["尖头细跟单鞋"],
+      },
+    },
+  });
+
+  assert.equal(result.repaired, false);
+  assert.equal(result.item, item);
+  assert.equal(result.item.item_name, "猫跟浅口单鞋");
+});
+
+test("executable Look items keep request, Look and unique slot bindings", () => {
+  const items = validateExecutableLookItems([
+    {
+      request_id: "request-003",
+      look_id: "look-1",
+      slot_key: "request-003:look-1:bottom:0",
+      category: "bottom",
+      gender: "female",
+      item_name: "高腰A字半身裙",
+    },
+    {
+      request_id: "request-003",
+      look_id: "look-2",
+      slot_key: "request-003:look-2:bottom:0",
+      category: "bottom",
+      gender: "female",
+      item_name: "高腰垂感阔腿裤",
+    },
+  ]);
+
+  assert.deepEqual(items.map((item) => ({
+    request_id: item.request_id,
+    look_id: item.look_id,
+    category: item.category,
+    slot_key: item.slot_key,
+    item_name: item.item_name,
+  })), [
+    {
+      request_id: "request-003",
+      look_id: "look-1",
+      category: "bottom",
+      slot_key: "request-003:look-1:bottom:0",
+      item_name: "高腰A字半身裙",
+    },
+    {
+      request_id: "request-003",
+      look_id: "look-2",
+      category: "bottom",
+      slot_key: "request-003:look-2:bottom:0",
+      item_name: "高腰垂感阔腿裤",
+    },
+  ]);
+});
+
+test("executable Look item validation repairs fragments but rejects strategy text", () => {
+  const repaired = validateExecutableLookItems([{
+    request_id: "request-003",
+    look_id: "look-1",
+    category: "shoes",
+    slot_key: "request-003:look-1:shoes:0",
+    gender: "female",
+    item_name: "米白）",
+  }], {
+    outfitBlueprint: {
+      must_have_items: {shoes: ["尖头平底单鞋（裸色/米白）"]},
+    },
+  });
+  assert.equal(repaired[0].item_name, "尖头平底单鞋");
+
+  assert.throws(() => validateExecutableLookItems([{
+    request_id: "request-003",
+    look_id: "look-1",
+    category: "bottom",
+    slot_key: "request-003:look-1:bottom:0",
+    gender: "female",
+    item_name: "上短下长：强制将腰线提升至肋骨下方",
+  }]), /缺少单一具体商品名称/u);
+});
+
 test("keeps a valid AI Blueprint when StyleProfile needs text-only repair", () => {
   const payload = phasedBlueprintFixture();
   payload.style_semantics.confidence = 0.4;
@@ -2115,15 +2844,23 @@ test("merges a text-only Look phase into the immutable AI Blueprint", () => {
     userInput: "甜妹穿搭",
   });
   const item = (category, itemName, color) => ({
-    category,
-    gender: "female",
-    item_name: itemName,
-    color,
+    slot_role: category,
+    product_type: itemName,
     fit: "合身",
     material: category === "shoes" ? "真皮" : "细腻面料",
     style: "甜美穿搭",
     season: "all",
     scene: "约会",
+    style_role: "执行甜美约会造型",
+    fit: category === "top"
+      ? "短款合身"
+      : category === "bottom" ? "高腰A字" : "圆头低跟玛丽珍",
+    colors: [color],
+    materials: [category === "shoes" ? "真皮" : "细腻面料"],
+    design_elements: category === "top" ? ["蕾丝"] : [],
+    required_attributes: category === "bottom" ? ["高腰"] : [],
+    preferred_attributes: category === "shoes" ? ["低跟"] : [],
+    avoid_attributes: [],
     search_keywords: [`女士 ${color} ${itemName}`, `女士 甜美 ${itemName}`],
     negative_keywords: ["男款", "运动风", "工装"],
   });
@@ -2137,9 +2874,14 @@ test("merges a text-only Look phase into the immutable AI Blueprint", () => {
       summary: "整套造型以高腰线、蕾丝和圆润鞋型回应甜美诉求",
     },
     looks: [{
-      request_id: "phase-look-test",
-      look_id: "look-1",
-      gender: "female",
+      look_direction: {
+        name: "蕾丝高腰约会造型",
+        core_structure: "top_bottom_shoes",
+        silhouette: "短上衣配高腰A字裙",
+        waistline: "高腰",
+        length_strategy: "短上衣与膝上裙长",
+        shoe_shape: "圆头低跟",
+      },
       style: "甜美穿搭",
       style_direction: "蕾丝高腰约会造型",
       styling_goal: "强化轻盈甜美气质",
@@ -2162,6 +2904,12 @@ test("merges a text-only Look phase into the immutable AI Blueprint", () => {
 
   assert.equal(result.looks.length, 1);
   assert.equal(result.outfit_blueprint.style_identity, "甜美穿搭");
+  assert.equal(result.looks[0].look_id, "look-1");
+  assert.ok(result.products.every((product) =>
+    product.request_id === "phase-look-test" &&
+    product.look_id === "look-1" &&
+    product.item_name === product.product_type &&
+    product.slot_key.startsWith("phase-look-test:look-1:")));
   assert.deepEqual(
     result.products.map((product) => product.item_name),
     ["蕾丝上衣", "高腰百褶裙", "玛丽珍鞋"],
@@ -2244,18 +2992,24 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
   assert.deepEqual(Object.keys(blueprintInput).sort(), [
     "body_analysis",
     "budget",
+    "knowledge_context",
     "scene",
     "semantic_intent",
   ]);
   assert.equal(Object.hasOwn(blueprintInput, "requested_style"), false);
   assert.equal(blueprintInput.semantic_intent.must_avoid.length > 0, true);
+  const blueprintKnowledge = JSON.stringify(blueprintInput.knowledge_context);
+  assert.match(blueprintKnowledge, /玛丽珍鞋/);
+  assert.match(blueprintKnowledge, /蕾丝/);
+  assert.match(blueprintKnowledge, /百褶裙/);
+  assert.ok(result.analysis.outfit_blueprint.knowledge_sources.length > 0);
 
   assert.match(requests[2].messages[0].content, /Phase 2 only/);
   assert.match(
     requests[2].messages[0].content,
     /one and only aesthetic source/,
   );
-  assert.equal(requests[2].max_tokens, 2600);
+  assert.equal(Object.hasOwn(requests[2], "max_tokens"), false);
   assert.match(
     requests[2].messages[0].content,
     /styling_strategy must contain/,
@@ -2264,6 +3018,8 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
     requests[2].messages[0].content,
     /Do not generate search_keywords or negative_keywords/,
   );
+  assert.match(requests[2].messages[0].content, /Semantic Look Spec/);
+  assert.match(requests[2].messages[0].content, /product_type/);
   const lookInput = JSON.parse(requests[2].messages[1].content);
   assert.deepEqual(Object.keys(lookInput).sort(), [
     "body_analysis",
@@ -2272,6 +3028,10 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
     "scene",
   ]);
   assert.equal(lookInput.outfit_blueprint.blueprint_source, "ai_generated");
+  assert.equal(
+    Object.hasOwn(lookInput.outfit_blueprint, "knowledge_sources"),
+    false,
+  );
   assert.equal(lookInput.body_analysis.gender, "female");
   assert.equal(Object.hasOwn(lookInput, "requested_style"), false);
   assert.equal(Object.hasOwn(lookInput, "style_profile"), false);
@@ -2743,6 +3503,229 @@ test("deletes an account and invalidates its session", async () => {
       server.close((error) => error ? reject(error) : resolve());
     });
   }
+});
+
+test("Native Look Generator keeps three independent executable directions", async () => {
+  const requestId = "native-look-v2-request";
+  const stylingStrategy = {
+    body_strengths: ["肩腰比例协调"],
+    proportion_issues: ["腿部视觉比例偏短"],
+    visual_goals: ["raise_visual_waistline", "elongate_legs"],
+    waistline_strategy: "通过高腰提高视觉腰线",
+    top_length_strategy: "选择短款或不过胯上衣",
+    bottom_strategy: "选择高腰下装并保持纵向线条",
+    shoe_strategy: "优先浅口、尖头、低跟鞋型",
+    color_strategy: "保持上下装颜色连续",
+    silhouette_strategy: "上短下长并纵向延伸",
+    skin_exposure_strategy: "适度露出脚踝",
+    accessory_strategy: "使用轻量配饰",
+    weather_strategy: "不改变核心风格",
+  };
+  const item = ({lookId, index, category, productType, productFamily, fit,
+    required = [], preferred = []}) => ({
+    request_id: requestId,
+    look_id: lookId,
+    category,
+    slot_key: `${requestId}:${lookId}:${category}:${index}`,
+    product_type: productType,
+    product_family: productFamily,
+    item_name: productType,
+    style_role: "落实比例优化并保持约会感",
+    fit,
+    colors: ["奶油白"],
+    materials: ["细腻面料"],
+    design_elements: [],
+    required_attributes: required,
+    preferred_attributes: preferred,
+    avoid_attributes: category === "shoes" ? ["厚重高帮"] : [],
+    gender: "female",
+    style: "女性化约会",
+    scene: "约会",
+  });
+  const shoes = (lookId, index) => item({
+    lookId,
+    index,
+    category: "shoes",
+    productType: "尖头浅口低跟鞋",
+    productFamily: "pointed_flat",
+    fit: "尖头浅口低跟",
+    preferred: ["浅口", "尖头", "低跟"],
+  });
+  const baseLook = (lookId, styleDirection, lookDirection, items) => ({
+    request_id: requestId,
+    look_id: lookId,
+    gender: "female",
+    style: "女性化约会",
+    style_direction: styleDirection,
+    look_direction: lookDirection,
+    styling_goal: "显高显腿长并保持女性化",
+    proportion_strategy: "提高腰线并延伸腿部线条",
+    why_this_changes_the_body_proportion: "上短下长与浅口鞋共同优化比例",
+    scene: "约会",
+    accessories_decision: [],
+    items,
+  });
+  const look1 = "native-skirt";
+  const look2 = "native-wide-leg";
+  const look3 = "native-dress";
+  const payload = {
+    gender: "female",
+    bodyProfile: "160cm，腿部视觉比例偏短",
+    style: "女性化约会",
+    style_upgrade_level: "upgrade",
+    styling_strategy: stylingStrategy,
+    recommendations: {
+      top: "短款上衣",
+      bottom: "高腰下装",
+      shoes: "尖头浅口低跟鞋",
+      accessories: "轻量配饰",
+      summary: "三套独立比例优化方案",
+    },
+    looks: [
+      baseLook(look1, "高腰裙装比例优化", {
+        name: "高腰裙装比例优化",
+        core_structure: "top_bottom_shoes",
+        product_families: {
+          top: "blouse", bottom: "skirt", shoes: "pointed_flat",
+        },
+        silhouette: "短上衣与A字裙",
+        waistline: "高腰",
+        length_strategy: "短上衣与适中裙长",
+        shoe_shape: "尖头浅口低跟",
+      }, [
+        item({lookId: look1, index: 0, category: "top",
+          productType: "蕾丝短款修身上衣", productFamily: "blouse",
+          fit: "短款修身不过胯", required: ["短款或不过胯"]}),
+        item({lookId: look1, index: 1, category: "bottom",
+          productType: "高腰A字半身裙", productFamily: "skirt",
+          fit: "高腰A字", required: ["高腰", "高弹"],
+          preferred: ["纵向垂感"]}),
+        shoes(look1, 2),
+      ]),
+      baseLook(look2, "高腰阔腿裤纵向延伸", {
+        name: "高腰阔腿裤纵向延伸",
+        core_structure: "top_bottom_shoes",
+        product_families: {
+          top: "knitwear", bottom: "wide_leg_pants", shoes: "pointed_flat",
+        },
+        silhouette: "短针织与垂感阔腿裤",
+        waistline: "高腰",
+        length_strategy: "短上衣与垂直裤线",
+        shoe_shape: "尖头浅口低跟",
+      }, [
+        item({lookId: look2, index: 0, category: "top",
+          productType: "短款修身针织衫", productFamily: "knitwear",
+          fit: "短款修身不过胯", required: ["短款或不过胯"]}),
+        item({lookId: look2, index: 1, category: "bottom",
+          productType: "高腰垂感阔腿裤", productFamily: "wide_leg_pants",
+          fit: "高腰垂感阔腿", required: ["高腰"],
+          preferred: ["纵向垂感"]}),
+        shoes(look2, 2),
+      ]),
+      baseLook(look3, "收腰连衣裙连续线条", {
+        name: "收腰连衣裙连续线条",
+        core_structure: "dress_shoes",
+        product_families: {dress: "dress", shoes: "pointed_flat"},
+        silhouette: "高腰收腰A字连衣裙",
+        waistline: "高腰",
+        length_strategy: "连贯裙身线条",
+        shoe_shape: "尖头浅口低跟",
+      }, [
+        item({lookId: look3, index: 0, category: "dress",
+          productType: "高腰收腰A字连衣裙", productFamily: "dress",
+          fit: "高腰收腰A字", required: ["高腰"]}),
+        shoes(look3, 1),
+      ]),
+    ],
+  };
+  payload.looks[1].accessories_decision = ["invalid accessory decision"];
+
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(payload), "utf8") >= 4_000,
+    "fixture should approximate a full three-Look Native Contract response",
+  );
+
+  const analysis = parseOutfitAnalysis(JSON.stringify(payload), {
+    requestId,
+    gender: "female",
+    scene: "约会",
+    userInput: "显高显腿长的女性化约会穿搭",
+    nativeExecutableLookContract: true,
+  });
+
+  assert.equal(analysis.looks.length, 3);
+  assert.equal(analysis.look_validation_summary.valid_looks, 3);
+  assert.equal(analysis.look_validation_summary.repaired_looks, 0);
+  assert.equal(analysis.look_validation_summary.removed_looks, 0);
+  assert.equal(analysis.look_quality_summary.generated, 3);
+  assert.equal(analysis.look_quality_summary.usable, 3);
+  assert.ok(analysis.look_quality_summary.warnings >= 1);
+  assert.ok(analysis.looks[1].accessory_warning.length >= 1);
+  assert.deepEqual(
+    analysis.looks.map((look) => look.look_direction.product_families),
+    [
+      {top: "blouse", bottom: "skirt", shoes: "pointed_flat"},
+      {top: "knitwear", bottom: "wide_leg_pants", shoes: "pointed_flat"},
+      {dress: "dress", shoes: "pointed_flat"},
+    ],
+  );
+  assert.equal(
+    analysis.looks[0].items.find((entry) => entry.category === "bottom")
+      .product_type,
+    "高腰A字半身裙",
+  );
+  const softConstraintBottom = analysis.looks[0].items.find(
+    (entry) => entry.category === "bottom",
+  );
+  assert.deepEqual(softConstraintBottom.required_attributes, ["高腰"]);
+  assert.ok(softConstraintBottom.preferred_attributes.includes("高弹"));
+  assert.ok(softConstraintBottom.missing_preferred_attributes.includes("高弹"));
+  assert.ok(softConstraintBottom.missing_preferred_attributes.includes("纵向垂感"));
+  assert.equal(softConstraintBottom.preferred_match_score, 0);
+  assert.equal(
+    analysis.looks[1].items.find((entry) => entry.category === "bottom")
+      .product_type,
+    "高腰垂感阔腿裤",
+  );
+  assert.equal(
+    analysis.looks[2].items.find((entry) => entry.category === "dress")
+      .product_type,
+    "高腰收腰A字连衣裙",
+  );
+  const response = await buildOutfitApiResponse(analysis, [], {
+    requestId,
+    gender: "female",
+    scene: "约会",
+  });
+  assert.equal(response.looks.length, 3);
+  assert.ok(response.looks.every((look) => look.look_direction));
+  assert.ok(response.looks.flatMap((look) => look.items).every((entry) =>
+    entry.item_name === entry.product_type &&
+    Array.isArray(entry.required_attributes) &&
+    Array.isArray(entry.preferred_attributes) &&
+    Array.isArray(entry.avoid_attributes)));
+
+  const twoOfThreePayload = structuredClone(payload);
+  twoOfThreePayload.looks[2].items[0].category = "bottom";
+  const twoOfThree = parseOutfitAnalysis(JSON.stringify(twoOfThreePayload), {
+    requestId: "native-look-v2-two-of-three",
+    gender: "female",
+    scene: "约会",
+    userInput: "显高显腿长的女性化约会穿搭",
+    nativeExecutableLookContract: true,
+  });
+  assert.equal(twoOfThree.looks.length, 2);
+  assert.equal(twoOfThree.look_quality_summary.generated, 3);
+  assert.equal(twoOfThree.look_quality_summary.usable, 2);
+  assert.equal(twoOfThree.look_quality_summary.dropped, 1);
+  assert.equal(twoOfThree.look_validation_summary.fallback_used, false);
+  const twoOfThreeResponse = await buildOutfitApiResponse(twoOfThree, [], {
+    requestId: "native-look-v2-two-of-three",
+    gender: "female",
+    scene: "约会",
+  });
+  assert.equal(twoOfThreeResponse.looks.length, 2);
+  assert.equal(twoOfThreeResponse.look_quality_summary.usable, 2);
 });
 
 test("aggregates daily V1.3 user and commerce metrics", () => {

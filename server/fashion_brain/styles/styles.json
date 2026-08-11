@@ -1,0 +1,182 @@
+[
+  {
+    "id": "clean_fit", "name": "Clean Fit", "aliases": ["cleanfit", "干净穿搭", "清爽简约"],
+    "visual_identity": ["利落基础款", "低饱和配色", "整洁层次"], "personality": ["克制", "清爽", "现代"],
+    "dimensions": {"maturity": 55, "femininity": 45, "masculinity": 45, "luxury": 45, "minimalism": 90, "romantic": 20, "structure": 65, "sportiness": 30, "youthfulness": 60, "sexiness": 15, "casualness": 65},
+    "silhouette_preferences": ["合身直线", "上短下长", "松紧平衡"], "preferred_items": ["白衬衫", "针织衫", "西装裤", "直筒牛仔裤"], "preferred_colors": ["白", "灰", "海军蓝", "米色"], "preferred_materials": ["棉", "羊毛", "挺括针织"], "preferred_shoes": ["乐福鞋", "德训鞋"], "preferred_accessories": ["简洁托特包", "细腰带"], "avoid_elements": ["密集装饰", "高饱和撞色"], "compatible_occasions": ["日常", "通勤", "旅行"]
+  },
+  {
+    "id": "quiet_luxury", "name": "Quiet Luxury", "aliases": ["静奢", "低调奢华", "静默奢华"],
+    "visual_identity": ["无标识高级材质", "精确剪裁", "同色系层次"], "personality": ["沉稳", "克制", "考究"],
+    "dimensions": {"maturity": 80, "femininity": 55, "masculinity": 40, "luxury": 95, "minimalism": 85, "romantic": 25, "structure": 75, "sportiness": 10, "youthfulness": 25, "sexiness": 15, "casualness": 30},
+    "silhouette_preferences": ["流畅长线条", "松而有型", "肩线准确"], "preferred_items": ["羊绒针织衫", "大衣", "阔腿裤", "真丝衬衫"], "preferred_colors": ["驼色", "奶油白", "炭灰", "深棕"], "preferred_materials": ["羊绒", "真丝", "精纺羊毛"], "preferred_shoes": ["乐福鞋", "尖头鞋"], "preferred_accessories": ["无标识皮包", "精致腕表"], "avoid_elements": ["显眼Logo", "廉价亮片", "复杂印花"], "compatible_occasions": ["通勤", "聚会", "婚礼"]
+  },
+  {
+    "id": "old_money", "name": "Old Money", "aliases": ["老钱", "老钱风", "oldmoney"],
+    "visual_identity": ["学院与庄园感", "经典剪裁", "低调品质"], "personality": ["从容", "传统", "教养感"],
+    "dimensions": {"maturity": 75, "femininity": 50, "masculinity": 45, "luxury": 85, "minimalism": 65, "romantic": 30, "structure": 70, "sportiness": 25, "youthfulness": 35, "sexiness": 10, "casualness": 40},
+    "silhouette_preferences": ["合体西装线", "高腰直筒", "针织叠穿"], "preferred_items": ["Polo", "西装", "百褶裙", "羊绒衫"], "preferred_colors": ["海军蓝", "奶油白", "墨绿", "酒红"], "preferred_materials": ["羊绒", "粗花呢", "皮革"], "preferred_shoes": ["乐福鞋", "长靴"], "preferred_accessories": ["珍珠耳饰", "皮革腰带"], "avoid_elements": ["夸张Logo", "荧光色", "过度破洞"], "compatible_occasions": ["通勤", "日常", "聚会"]
+  },
+  {
+    "id": "power_feminine", "name": "御姐", "aliases": ["御姐风", "大女人", "power feminine"],
+    "visual_identity": ["锐利轮廓", "成熟女人味", "强气场"], "personality": ["自信", "果断", "精致"],
+    "dimensions": {"maturity": 90, "femininity": 85, "masculinity": 25, "luxury": 75, "minimalism": 55, "romantic": 30, "structure": 85, "sportiness": 10, "youthfulness": 20, "sexiness": 65, "casualness": 15},
+    "silhouette_preferences": ["收腰", "修长直线", "肩部结构"], "preferred_items": ["西装", "真丝衬衫", "包臀裙", "阔腿裤"], "preferred_colors": ["黑", "酒红", "象牙白", "深棕"], "preferred_materials": ["真丝", "醋酸", "精纺羊毛"], "preferred_shoes": ["尖头鞋", "高跟鞋", "长靴"], "preferred_accessories": ["链条包", "金属耳饰"], "avoid_elements": ["幼态卡通", "松垮无腰线"], "compatible_occasions": ["通勤", "聚会", "约会"]
+  },
+  {
+    "id": "sweet_girl", "name": "甜妹", "aliases": ["甜妹风", "甜美", "少女甜美"],
+    "visual_identity": ["轻盈甜美", "柔和曲线", "小量精致装饰"], "personality": ["亲和", "活泼", "浪漫"],
+    "dimensions": {"maturity": 20, "femininity": 90, "masculinity": 5, "luxury": 30, "minimalism": 30, "romantic": 85, "structure": 25, "sportiness": 20, "youthfulness": 95, "sexiness": 20, "casualness": 55},
+    "silhouette_preferences": ["A字轮廓", "短上衣高腰线", "适度泡泡袖"], "preferred_items": ["A字裙", "针织衫", "泡泡袖上衣", "百褶裙"], "preferred_colors": ["奶油白", "浅粉", "雾蓝", "鹅黄"], "preferred_materials": ["细针织", "棉", "薄纱"], "preferred_shoes": ["玛丽珍鞋", "芭蕾鞋"], "preferred_accessories": ["玛丽珍袜", "珍珠耳饰", "小链条包"], "avoid_elements": ["从头到脚堆叠蝴蝶结", "过重暗色", "粗犷廓形"], "compatible_occasions": ["约会", "日常", "聚会"]
+  },
+  {
+    "id": "coquette", "name": "Coquette", "aliases": ["蝴蝶结美学", "娇俏复古", "coquettecore"],
+    "visual_identity": ["复古闺房感", "蝴蝶结点缀", "蕾丝与缎面"], "personality": ["娇俏", "浪漫", "精心装饰"],
+    "dimensions": {"maturity": 30, "femininity": 95, "masculinity": 5, "luxury": 45, "minimalism": 15, "romantic": 100, "structure": 25, "sportiness": 5, "youthfulness": 80, "sexiness": 35, "casualness": 30},
+    "silhouette_preferences": ["收腰A摆", "贴身针织", "轻盈层叠"], "preferred_items": ["蕾丝上衣", "A字裙", "针织衫"], "preferred_colors": ["粉", "奶油白", "黑", "酒红"], "preferred_materials": ["蕾丝", "缎面", "薄纱"], "preferred_shoes": ["玛丽珍鞋", "芭蕾鞋"], "preferred_accessories": ["蝴蝶结发饰", "白丝袜", "珍珠耳饰"], "avoid_elements": ["运动机能面料", "粗重户外鞋"], "compatible_occasions": ["约会", "聚会", "日常"]
+  },
+  {
+    "id": "lolita", "name": "Lolita", "aliases": ["洛丽塔", "洛丽塔时装", "lo装"],
+    "visual_identity": ["历史裙装结构", "蓬裙", "完整头饰与袜装"], "personality": ["仪式感", "梦幻", "精致"],
+    "dimensions": {"maturity": 20, "femininity": 95, "masculinity": 5, "luxury": 55, "minimalism": 5, "romantic": 95, "structure": 60, "sportiness": 0, "youthfulness": 80, "sexiness": 5, "casualness": 10},
+    "silhouette_preferences": ["钟形蓬裙", "高腰连衣裙", "轮廓完整"], "preferred_items": ["蕾丝上衣", "A字裙", "泡泡袖"], "preferred_colors": ["奶油白", "粉", "酒红", "黑"], "preferred_materials": ["棉蕾丝", "提花", "天鹅绒"], "preferred_shoes": ["玛丽珍鞋"], "preferred_accessories": ["白丝袜", "头饰", "小手袋"], "avoid_elements": ["随意混入运动单品", "暴露破坏裙装比例"], "compatible_occasions": ["聚会", "日常"]
+  },
+  {
+    "id": "french", "name": "法式", "aliases": ["法式风", "French chic", "巴黎风"],
+    "visual_identity": ["不费力优雅", "复古小性感", "自然质感"], "personality": ["松弛", "浪漫", "自信"],
+    "dimensions": {"maturity": 60, "femininity": 80, "masculinity": 20, "luxury": 55, "minimalism": 55, "romantic": 75, "structure": 40, "sportiness": 10, "youthfulness": 45, "sexiness": 50, "casualness": 45},
+    "silhouette_preferences": ["自然收腰", "九分裤线", "适度露肤"], "preferred_items": ["真丝衬衫", "针织衫", "牛仔裤", "A字裙"], "preferred_colors": ["奶油白", "黑", "红", "牛仔蓝"], "preferred_materials": ["真丝", "亚麻", "棉"], "preferred_shoes": ["芭蕾鞋", "乐福鞋"], "preferred_accessories": ["藤编包", "细腰带", "金色耳饰"], "avoid_elements": ["过度精修感", "全身紧身"], "compatible_occasions": ["约会", "日常", "旅行"]
+  },
+  {
+    "id": "korean", "name": "韩系", "aliases": ["韩系穿搭", "韩风", "K-fashion"],
+    "visual_identity": ["清晰比例", "温柔低饱和", "流行基础款"], "personality": ["精致", "亲和", "时髦"],
+    "dimensions": {"maturity": 45, "femininity": 65, "masculinity": 25, "luxury": 45, "minimalism": 60, "romantic": 50, "structure": 50, "sportiness": 25, "youthfulness": 75, "sexiness": 30, "casualness": 55},
+    "silhouette_preferences": ["上短下长", "宽松西装", "直筒线条"], "preferred_items": ["西装", "针织衫", "百褶裙", "西装裤"], "preferred_colors": ["米白", "浅灰", "雾蓝", "黑"], "preferred_materials": ["针织", "西装料", "棉"], "preferred_shoes": ["德训鞋", "乐福鞋"], "preferred_accessories": ["托特包", "棒球帽"], "avoid_elements": ["脏乱层叠", "过多高饱和色"], "compatible_occasions": ["日常", "通勤", "约会"]
+  },
+  {
+    "id": "japanese", "name": "日系", "aliases": ["日系穿搭", "日杂风", "Japanese casual"],
+    "visual_identity": ["舒适层次", "自然色", "留白感"], "personality": ["安静", "自然", "细腻"],
+    "dimensions": {"maturity": 45, "femininity": 50, "masculinity": 35, "luxury": 30, "minimalism": 65, "romantic": 35, "structure": 30, "sportiness": 20, "youthfulness": 60, "sexiness": 10, "casualness": 80},
+    "silhouette_preferences": ["宽松直线", "长短叠穿", "下装有量感"], "preferred_items": ["针织衫", "阔腿裤", "A字裙", "衬衫"], "preferred_colors": ["燕麦", "卡其", "藏蓝", "苔绿"], "preferred_materials": ["棉", "亚麻", "粗针织"], "preferred_shoes": ["德训鞋", "乐福鞋"], "preferred_accessories": ["帆布托特包", "针织帽"], "avoid_elements": ["过度紧身", "强烈性感元素"], "compatible_occasions": ["日常", "旅行", "通勤"]
+  },
+  {
+    "id": "americana_vintage", "name": "美式复古", "aliases": ["美式复古风", "Americana", "学院复古"],
+    "visual_identity": ["旧化质感", "运动学院元素", "丹宁皮革"], "personality": ["率性", "怀旧", "有活力"],
+    "dimensions": {"maturity": 40, "femininity": 35, "masculinity": 60, "luxury": 20, "minimalism": 35, "romantic": 15, "structure": 45, "sportiness": 60, "youthfulness": 70, "sexiness": 25, "casualness": 90},
+    "silhouette_preferences": ["宽松上装", "高腰丹宁", "短夹克"], "preferred_items": ["牛仔裤", "卫衣", "Polo", "工装裤"], "preferred_colors": ["牛仔蓝", "酒红", "奶油白", "棕"], "preferred_materials": ["丹宁", "棉", "皮革"], "preferred_shoes": ["德训鞋", "老爹鞋"], "preferred_accessories": ["棒球帽", "牛仔帽", "皮带"], "avoid_elements": ["未来感亮面", "过度精致套装"], "compatible_occasions": ["日常", "旅行", "聚会"]
+  },
+  {
+    "id": "streetwear", "name": "Streetwear", "aliases": ["街头", "街头潮流", "街头风"],
+    "visual_identity": ["宽松廓形", "图形与层叠", "运动和青年文化"], "personality": ["叛逆", "松弛", "表达欲"],
+    "dimensions": {"maturity": 25, "femininity": 25, "masculinity": 70, "luxury": 25, "minimalism": 25, "romantic": 5, "structure": 35, "sportiness": 75, "youthfulness": 90, "sexiness": 25, "casualness": 95},
+    "silhouette_preferences": ["oversize", "上宽下宽", "层次堆叠"], "preferred_items": ["卫衣", "工装裤", "牛仔裤"], "preferred_colors": ["黑", "灰", "军绿", "高饱和点色"], "preferred_materials": ["棉", "丹宁", "尼龙"], "preferred_shoes": ["老爹鞋", "跑鞋"], "preferred_accessories": ["棒球帽", "链条包"], "avoid_elements": ["全套商务剪裁", "纤弱鞋履"], "compatible_occasions": ["日常", "旅行", "聚会"]
+  },
+  {
+    "id": "y2k", "name": "Y2K", "aliases": ["千禧风", "千禧辣妹", "2000年代"],
+    "visual_identity": ["千禧未来感", "短小紧身", "金属亮色"], "personality": ["大胆", "玩味", "青春"],
+    "dimensions": {"maturity": 20, "femininity": 70, "masculinity": 25, "luxury": 25, "minimalism": 10, "romantic": 20, "structure": 25, "sportiness": 45, "youthfulness": 100, "sexiness": 75, "casualness": 70},
+    "silhouette_preferences": ["短上衣", "低腰或迷你下装", "紧松对比"], "preferred_items": ["短针织衫", "牛仔裤", "A字裙"], "preferred_colors": ["银", "粉", "水蓝", "黑"], "preferred_materials": ["亮面尼龙", "丹宁", "网纱"], "preferred_shoes": ["老爹鞋", "长靴"], "preferred_accessories": ["腋下包", "彩色眼镜", "金属腰链"], "avoid_elements": ["保守长线条", "沉闷同色套装"], "compatible_occasions": ["聚会", "日常"]
+  },
+  {
+    "id": "dark_academia", "name": "Dark Academia", "aliases": ["暗黑学院", "深色学院风", "黑暗学院"],
+    "visual_identity": ["古典学术氛围", "深色层叠", "旧书房质感"], "personality": ["理性", "神秘", "怀旧"],
+    "dimensions": {"maturity": 65, "femininity": 40, "masculinity": 55, "luxury": 45, "minimalism": 40, "romantic": 50, "structure": 70, "sportiness": 5, "youthfulness": 45, "sexiness": 15, "casualness": 40},
+    "silhouette_preferences": ["西装叠穿", "高腰长下装", "合体针织"], "preferred_items": ["西装", "针织衫", "百褶裙", "西装裤"], "preferred_colors": ["深棕", "炭灰", "酒红", "墨绿"], "preferred_materials": ["粗花呢", "羊毛", "灯芯绒"], "preferred_shoes": ["乐福鞋", "长靴"], "preferred_accessories": ["皮革托特包", "细领带"], "avoid_elements": ["荧光色", "轻薄海滩元素"], "compatible_occasions": ["日常", "通勤", "聚会"]
+  },
+  {
+    "id": "light_academia", "name": "Light Academia", "aliases": ["浅色学院", "明亮学院风", "轻学院"],
+    "visual_identity": ["明亮古典学院", "奶油色层次", "轻盈书卷气"], "personality": ["温和", "知性", "怀旧"],
+    "dimensions": {"maturity": 55, "femininity": 55, "masculinity": 35, "luxury": 40, "minimalism": 50, "romantic": 55, "structure": 60, "sportiness": 10, "youthfulness": 60, "sexiness": 10, "casualness": 45},
+    "silhouette_preferences": ["合体针织叠衬衫", "高腰直筒", "轻量西装"], "preferred_items": ["针织衫", "衬衫", "百褶裙", "西装裤"], "preferred_colors": ["奶油白", "燕麦", "浅棕", "鼠尾草绿"], "preferred_materials": ["棉", "薄羊毛", "亚麻"], "preferred_shoes": ["乐福鞋", "玛丽珍鞋"], "preferred_accessories": ["帆布托特包", "皮带"], "avoid_elements": ["重黑全套", "夸张街头图形"], "compatible_occasions": ["日常", "通勤", "旅行"]
+  },
+  {
+    "id": "normcore", "name": "Normcore", "aliases": ["常人风", "无风格穿搭", "基础舒适"],
+    "visual_identity": ["普通基础款", "中性实穿", "刻意不追潮流"], "personality": ["随和", "务实", "低调"],
+    "dimensions": {"maturity": 40, "femininity": 30, "masculinity": 45, "luxury": 15, "minimalism": 80, "romantic": 5, "structure": 25, "sportiness": 35, "youthfulness": 55, "sexiness": 5, "casualness": 100},
+    "silhouette_preferences": ["自然宽松", "直筒", "基础叠穿"], "preferred_items": ["卫衣", "牛仔裤", "针织衫"], "preferred_colors": ["灰", "白", "藏蓝", "卡其"], "preferred_materials": ["棉", "丹宁", "抓绒"], "preferred_shoes": ["德训鞋", "跑鞋"], "preferred_accessories": ["托特包", "棒球帽"], "avoid_elements": ["复杂礼服结构", "夸张装饰"], "compatible_occasions": ["日常", "旅行"]
+  },
+  {
+    "id": "gorpcore", "name": "Gorpcore", "aliases": ["户外机能", "山系", "户外风"],
+    "visual_identity": ["技术户外装备", "功能分区", "自然与警示配色"], "personality": ["冒险", "务实", "活跃"],
+    "dimensions": {"maturity": 35, "femininity": 20, "masculinity": 70, "luxury": 20, "minimalism": 35, "romantic": 0, "structure": 55, "sportiness": 95, "youthfulness": 65, "sexiness": 5, "casualness": 90},
+    "silhouette_preferences": ["宽松可活动", "多层系统", "束口下装"], "preferred_items": ["冲锋衣", "工装裤", "功能背心"], "preferred_colors": ["军绿", "岩灰", "黑", "橙色点缀"], "preferred_materials": ["尼龙", "防水膜", "抓绒"], "preferred_shoes": ["跑鞋", "徒步鞋"], "preferred_accessories": ["功能斜挎包", "棒球帽"], "avoid_elements": ["娇贵真丝", "细高跟"], "compatible_occasions": ["旅行", "日常"]
+  },
+  {
+    "id": "preppy", "name": "Preppy", "aliases": ["学院风", "常春藤", "美式学院"],
+    "visual_identity": ["校队与学院符号", "整洁叠穿", "经典格纹"], "personality": ["聪明", "活力", "端正"],
+    "dimensions": {"maturity": 45, "femininity": 45, "masculinity": 45, "luxury": 45, "minimalism": 45, "romantic": 20, "structure": 65, "sportiness": 40, "youthfulness": 80, "sexiness": 10, "casualness": 55},
+    "silhouette_preferences": ["合体上装", "高腰百褶", "针织叠衬衫"], "preferred_items": ["Polo", "百褶裙", "西装", "针织衫"], "preferred_colors": ["海军蓝", "白", "酒红", "墨绿"], "preferred_materials": ["棉", "羊毛针织", "粗花呢"], "preferred_shoes": ["乐福鞋", "德训鞋"], "preferred_accessories": ["棒球帽", "皮带", "托特包"], "avoid_elements": ["破烂感", "过度夜店化"], "compatible_occasions": ["日常", "通勤", "面试"]
+  },
+  {
+    "id": "elevated_workwear", "name": "通勤高级", "aliases": ["高级通勤", "职场高级", "精英通勤"],
+    "visual_identity": ["专业剪裁", "质感中性色", "高效胶囊衣橱"], "personality": ["专业", "可靠", "有判断力"],
+    "dimensions": {"maturity": 85, "femininity": 55, "masculinity": 40, "luxury": 80, "minimalism": 75, "romantic": 20, "structure": 90, "sportiness": 5, "youthfulness": 25, "sexiness": 20, "casualness": 15},
+    "silhouette_preferences": ["结构肩线", "清晰腰线", "垂直长线"], "preferred_items": ["西装", "真丝衬衫", "西装裤", "包臀裙"], "preferred_colors": ["炭灰", "海军蓝", "象牙白", "驼色"], "preferred_materials": ["精纺羊毛", "真丝", "醋酸"], "preferred_shoes": ["尖头鞋", "乐福鞋"], "preferred_accessories": ["托特包", "腕表", "细腰带"], "avoid_elements": ["睡衣感", "夸张度假印花"], "compatible_occasions": ["通勤", "面试", "聚会"]
+  },
+  {
+    "id": "minimalism", "name": "极简主义", "aliases": ["极简风", "Minimalism", "冷淡风"],
+    "visual_identity": ["减少元素", "几何轮廓", "材质与比例主导"], "personality": ["理性", "克制", "独立"],
+    "dimensions": {"maturity": 65, "femininity": 35, "masculinity": 45, "luxury": 60, "minimalism": 100, "romantic": 5, "structure": 75, "sportiness": 15, "youthfulness": 35, "sexiness": 10, "casualness": 40},
+    "silhouette_preferences": ["建筑感直线", "单色长线", "留白"], "preferred_items": ["西装", "阔腿裤", "针织衫", "衬衫"], "preferred_colors": ["黑", "白", "灰", "燕麦"], "preferred_materials": ["羊毛", "棉", "醋酸"], "preferred_shoes": ["乐福鞋", "尖头鞋"], "preferred_accessories": ["几何包", "极简金属饰品"], "avoid_elements": ["繁复蕾丝", "多色图案"], "compatible_occasions": ["通勤", "日常", "面试"]
+  },
+  {
+    "id": "hot_girl", "name": "辣妹", "aliases": ["辣妹风", "Hot Girl", "性感街头"],
+    "visual_identity": ["自信露肤", "贴身曲线", "强视觉焦点"], "personality": ["大胆", "外向", "有掌控感"],
+    "dimensions": {"maturity": 45, "femininity": 80, "masculinity": 20, "luxury": 35, "minimalism": 25, "romantic": 20, "structure": 40, "sportiness": 35, "youthfulness": 80, "sexiness": 100, "casualness": 55},
+    "silhouette_preferences": ["紧身短上衣", "高腰强调曲线", "露肤有重点"], "preferred_items": ["包臀裙", "短上衣", "牛仔裤"], "preferred_colors": ["黑", "红", "银", "高饱和色"], "preferred_materials": ["弹力针织", "皮革", "丹宁"], "preferred_shoes": ["高跟鞋", "长靴", "老爹鞋"], "preferred_accessories": ["链条包", "金属首饰"], "avoid_elements": ["全身无重点宽松", "幼态繁复装饰"], "compatible_occasions": ["聚会", "约会", "日常"]
+  },
+  {
+    "id": "balletcore", "name": "Balletcore", "aliases": ["芭蕾风", "芭蕾美学", "舞者风"],
+    "visual_identity": ["舞者训练服元素", "柔软贴身", "薄纱与绑带"], "personality": ["优雅", "自律", "轻盈"],
+    "dimensions": {"maturity": 35, "femininity": 95, "masculinity": 5, "luxury": 40, "minimalism": 45, "romantic": 85, "structure": 20, "sportiness": 30, "youthfulness": 80, "sexiness": 35, "casualness": 45},
+    "silhouette_preferences": ["贴身上装", "轻盈A摆", "腿部线条延伸"], "preferred_items": ["针织衫", "A字裙", "裹身上衣"], "preferred_colors": ["芭蕾粉", "奶油白", "灰", "黑"], "preferred_materials": ["细针织", "薄纱", "缎面"], "preferred_shoes": ["芭蕾鞋", "玛丽珍鞋"], "preferred_accessories": ["堆堆袜", "缎带发饰"], "avoid_elements": ["粗重工装", "多口袋机能"], "compatible_occasions": ["约会", "日常", "聚会"]
+  },
+  {
+    "id": "punk", "name": "朋克", "aliases": ["朋克风", "Punk", "摇滚朋克"],
+    "visual_identity": ["反叛DIY", "金属与破坏", "黑色皮革"], "personality": ["叛逆", "直接", "不妥协"],
+    "dimensions": {"maturity": 35, "femininity": 30, "masculinity": 70, "luxury": 15, "minimalism": 10, "romantic": 10, "structure": 50, "sportiness": 30, "youthfulness": 75, "sexiness": 50, "casualness": 70},
+    "silhouette_preferences": ["紧窄与宽松冲突", "层叠破坏", "短夹克"], "preferred_items": ["皮夹克", "工装裤", "牛仔裤"], "preferred_colors": ["黑", "红", "银", "格纹"], "preferred_materials": ["皮革", "丹宁", "网纱"], "preferred_shoes": ["厚底靴", "长靴"], "preferred_accessories": ["链条", "铆钉腰带"], "avoid_elements": ["乖巧整套学院", "柔弱糖果配色"], "compatible_occasions": ["聚会", "日常"]
+  },
+  {
+    "id": "workwear", "name": "工装", "aliases": ["工装风", "Workwear", "复古工装"],
+    "visual_identity": ["耐用功能结构", "多口袋", "劳动服传统"], "personality": ["可靠", "率性", "务实"],
+    "dimensions": {"maturity": 45, "femininity": 20, "masculinity": 75, "luxury": 10, "minimalism": 35, "romantic": 0, "structure": 65, "sportiness": 55, "youthfulness": 55, "sexiness": 10, "casualness": 90},
+    "silhouette_preferences": ["宽松直线", "结构夹克", "束脚或直筒裤"], "preferred_items": ["工装裤", "工装夹克", "牛仔裤"], "preferred_colors": ["卡其", "军绿", "丹宁蓝", "棕"], "preferred_materials": ["帆布", "丹宁", "灯芯绒"], "preferred_shoes": ["工装靴", "老爹鞋"], "preferred_accessories": ["帆布包", "牛仔帽"], "avoid_elements": ["娇贵薄纱", "细高跟"], "compatible_occasions": ["日常", "旅行"]
+  },
+  {
+    "id": "techwear", "name": "机能风", "aliases": ["Techwear", "城市机能", "赛博机能"],
+    "visual_identity": ["城市技术装备", "模块化细节", "暗色未来感"], "personality": ["冷静", "敏捷", "未来导向"],
+    "dimensions": {"maturity": 40, "femininity": 15, "masculinity": 80, "luxury": 30, "minimalism": 40, "romantic": 0, "structure": 80, "sportiness": 80, "youthfulness": 65, "sexiness": 10, "casualness": 70},
+    "silhouette_preferences": ["模块层叠", "可调节收束", "立体口袋"], "preferred_items": ["功能外套", "工装裤", "功能背心"], "preferred_colors": ["黑", "炭灰", "橄榄绿"], "preferred_materials": ["尼龙", "防水织物", "弹力面料"], "preferred_shoes": ["跑鞋", "战术靴"], "preferred_accessories": ["胸包", "多功能腰带"], "avoid_elements": ["浪漫蕾丝", "古典珠宝"], "compatible_occasions": ["日常", "旅行"]
+  },
+  {
+    "id": "resort", "name": "度假风", "aliases": ["Resort", "海岛度假", "假日风"],
+    "visual_identity": ["松弛露肤", "轻盈流动", "自然或热带色彩"], "personality": ["放松", "明快", "浪漫"],
+    "dimensions": {"maturity": 45, "femininity": 70, "masculinity": 20, "luxury": 50, "minimalism": 40, "romantic": 70, "structure": 15, "sportiness": 15, "youthfulness": 55, "sexiness": 45, "casualness": 80},
+    "silhouette_preferences": ["宽松长裙", "自然收腰", "透气阔腿"], "preferred_items": ["吊带裙", "真丝衬衫", "阔腿裤"], "preferred_colors": ["白", "海蓝", "珊瑚色", "植物绿"], "preferred_materials": ["亚麻", "真丝", "棉纱"], "preferred_shoes": ["凉鞋", "芭蕾鞋"], "preferred_accessories": ["草编包", "宽檐帽"], "avoid_elements": ["厚重羊毛", "严肃商务套装"], "compatible_occasions": ["旅行", "约会", "日常"]
+  },
+  {
+    "id": "wedding_elegance", "name": "婚礼高级", "aliases": ["婚礼宾客高级", "高级婚礼穿搭", "Wedding elegance"],
+    "visual_identity": ["礼仪得体", "精致材质", "镜头友好"], "personality": ["优雅", "尊重场合", "从容"],
+    "dimensions": {"maturity": 75, "femininity": 75, "masculinity": 25, "luxury": 90, "minimalism": 55, "romantic": 65, "structure": 65, "sportiness": 0, "youthfulness": 30, "sexiness": 35, "casualness": 5},
+    "silhouette_preferences": ["长线礼服", "明确腰线", "精致套装"], "preferred_items": ["醋酸连衣裙", "真丝衬衫", "西装", "包臀裙"], "preferred_colors": ["宝石色", "柔和粉彩", "海军蓝"], "preferred_materials": ["真丝", "醋酸", "精纺羊毛"], "preferred_shoes": ["尖头鞋", "高跟鞋"], "preferred_accessories": ["珍珠耳饰", "小手包"], "avoid_elements": ["宾客穿纯白全套", "过度暴露", "日常运动装"], "compatible_occasions": ["婚礼", "聚会"]
+  },
+  {
+    "id": "athleisure", "name": "Athleisure", "aliases": ["运动休闲", "健身休闲", "运动混搭"],
+    "visual_identity": ["运动性能与城市日常融合", "流线贴合", "干净活力"], "personality": ["自律", "高效", "轻松"],
+    "dimensions": {"maturity": 35, "femininity": 40, "masculinity": 45, "luxury": 25, "minimalism": 60, "romantic": 5, "structure": 35, "sportiness": 100, "youthfulness": 75, "sexiness": 35, "casualness": 95},
+    "silhouette_preferences": ["贴身与宽松平衡", "短上衣高腰", "流线运动剪裁"], "preferred_items": ["卫衣", "运动上衣", "束脚裤"], "preferred_colors": ["黑", "灰", "白", "亮色点缀"], "preferred_materials": ["弹力针织", "尼龙", "速干面料"], "preferred_shoes": ["跑鞋", "老爹鞋"], "preferred_accessories": ["棒球帽", "运动斜挎包"], "avoid_elements": ["娇贵真丝全套", "正式婚礼礼服"], "compatible_occasions": ["日常", "旅行"]
+  },
+  {
+    "id": "vintage", "name": "Vintage", "aliases": ["古着", "复古风", "年代感穿搭"],
+    "visual_identity": ["年代细节", "旧化质感", "独特单品叙事"], "personality": ["怀旧", "个性", "有故事感"],
+    "dimensions": {"maturity": 55, "femininity": 55, "masculinity": 40, "luxury": 40, "minimalism": 25, "romantic": 65, "structure": 45, "sportiness": 15, "youthfulness": 45, "sexiness": 30, "casualness": 55},
+    "silhouette_preferences": ["年代对应腰线", "新旧混搭", "单一主角单品"], "preferred_items": ["A字裙", "真丝衬衫", "牛仔裤", "西装"], "preferred_colors": ["酒红", "芥末黄", "棕", "墨绿"], "preferred_materials": ["天鹅绒", "丹宁", "真丝"], "preferred_shoes": ["玛丽珍鞋", "乐福鞋", "长靴"], "preferred_accessories": ["古董首饰", "皮革包"], "avoid_elements": ["全身年代戏服化", "多个时代无逻辑混搭"], "compatible_occasions": ["日常", "约会", "聚会"]
+  },
+  {
+    "id": "artist", "name": "艺术家风", "aliases": ["Artist style", "文艺艺术家", "创意穿搭"],
+    "visual_identity": ["个人化比例", "材质与色彩实验", "手工感"], "personality": ["创造力", "自由", "敏感"],
+    "dimensions": {"maturity": 50, "femininity": 45, "masculinity": 40, "luxury": 30, "minimalism": 35, "romantic": 55, "structure": 35, "sportiness": 15, "youthfulness": 55, "sexiness": 20, "casualness": 70},
+    "silhouette_preferences": ["不对称层次", "宽松长线", "局部雕塑感"], "preferred_items": ["宽松衬衫", "阔腿裤", "工装裤", "针织衫"], "preferred_colors": ["陶土色", "群青", "黑", "自然色"], "preferred_materials": ["亚麻", "手工针织", "棉", "做旧皮革"], "preferred_shoes": ["乐福鞋", "德训鞋"], "preferred_accessories": ["手工首饰", "大托特包"], "avoid_elements": ["无个性的整套复制", "纯功能商务制服"], "compatible_occasions": ["日常", "旅行", "聚会"]
+  }
+]

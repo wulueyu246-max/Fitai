@@ -2,16 +2,31 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  buildProductSearchTokens,
   translateBlueprintSearchRequirement,
 } = require("../blueprint_search_translator");
 const {normalizeOutfitBlueprint} = require("../outfit_blueprint");
 const {normalizeProductRequirement} = require("../product_relevance");
+const {
+  normalizeExecutableProductRequirement,
+} = require("../executable_product_requirement");
 
 function translate(blueprintValue, requirement) {
   const blueprint = normalizeOutfitBlueprint(blueprintValue);
-  return translateBlueprintSearchRequirement(
-    normalizeProductRequirement(requirement),
+  const boundRequirement = {
+    request_id: requirement.request_id || "translator-test",
+    look_id: requirement.look_id || "look-1",
+    slot_key: requirement.slot_key ||
+      `translator-test:look-1:${requirement.category}:0`,
+    ...requirement,
+  };
+  const normalized = normalizeProductRequirement(boundRequirement);
+  const executable = normalizeExecutableProductRequirement(normalized, {
+    originalRequirement: normalized,
     blueprint,
+  });
+  return translateBlueprintSearchRequirement(
+    executable,
   );
 }
 
@@ -50,7 +65,7 @@ test("translates a sweet Blueprint into concrete marketplace language", () => {
   assert.doesNotMatch(shoes.search_keywords[0], /甜妹鞋|少女鞋|女生鞋/);
   assert.doesNotMatch(shoes.search_keywords.join(" "), /运动鞋|跑鞋|篮球鞋/);
   assert.match(top.search_keywords[0], /蕾丝荷叶边蝴蝶结上衣/);
-  assert.ok(shoes.query_reason.includes("穿搭蓝图"));
+  assert.ok(shoes.query_reason.includes("可执行商品合同"));
   assert.ok(shoes.source_elements.includes("圆头低跟玛丽珍皮鞋"));
   assert.ok(!shoes.search_keywords.some((query) => query.includes("甜妹")));
 });
@@ -71,6 +86,7 @@ test("translates a mature structured Blueprint without casual sports terms", () 
     category: "bottom",
     gender: "female",
     item_name: "裤子",
+    material: "精纺羊毛",
     search_keywords: [],
     negative_keywords: [],
   });
@@ -128,4 +144,107 @@ test("an unknown natural-language Blueprint still produces a concrete query", ()
   assert.doesNotMatch(result.search_keywords.join(" "), /月球植物学家/);
   assert.ok(result.translated_queries.every((entry) =>
     entry.query_reason && entry.source_elements.length > 0));
+});
+
+test("keeps Look-specific bottom requirements bound after translation", () => {
+  const blueprint = normalizeOutfitBlueprint({
+    style_identity: "显高约会风",
+    core_elements: ["提高腰线"],
+    must_have_items: {
+      top: ["短款修身上衣"],
+      bottom: ["高腰A字裙", "高腰直筒九分裤"],
+      shoes: ["尖头浅口单鞋"],
+    },
+  });
+  const lookA = translate(blueprint, {
+      category: "bottom",
+      gender: "female",
+      item_name: "高腰A字裙",
+      fit: "高腰A字",
+      search_keywords: [],
+      negative_keywords: [],
+    });
+  const lookB = translate(blueprint, {
+      category: "bottom",
+      gender: "female",
+      item_name: "高腰直筒九分裤",
+      fit: "高腰直筒九分",
+      search_keywords: [],
+      negative_keywords: [],
+    });
+
+  assert.equal(lookA.item_name, "高腰A字裙");
+  assert.equal(lookB.item_name, "高腰直筒九分裤");
+});
+
+test("excludes internal English proportion strategy from marketplace queries", () => {
+  const result = translate({
+    style_identity: "显高约会风",
+    core_elements: ["Raise waistline to improve leg proportion", "提高腰线"],
+    silhouette_strategy: ["Maintain clean vertical lines from shoulder to hem"],
+    material_direction: ["轻盈雪纺 (Light Chiffon)"],
+    color_palette: ["奶油白 (Cream White)"],
+    must_have_items: {
+      top: ["短款修身上衣"],
+      bottom: ["高腰A字裙"],
+      shoes: ["尖头浅口单鞋"],
+    },
+  }, {
+    category: "bottom",
+    gender: "female",
+    item_name: "高腰A字裙",
+    search_keywords: [],
+    negative_keywords: [],
+  });
+
+  assert.match(result.search_keywords[0], /女士/u);
+  assert.match(result.search_keywords[0], /高腰A字裙/u);
+  assert.doesNotMatch(
+    result.search_keywords.join(" "),
+    /Raise waistline|improve leg proportion|Maintain clean vertical lines/iu,
+  );
+});
+
+test("builds Taobao tokens only from structured product attributes", () => {
+  const tokens = buildProductSearchTokens({
+    requirement: {
+      category: "bottom",
+      gender: "female",
+      color: "奶油白",
+      material: "垂坠面料",
+    },
+    blueprint: {
+      silhouette_strategy: ["上短下长：强制将腰线提升至肋骨下方"],
+      visual_goals: ["Raise waistline to improve leg proportion"],
+    },
+    itemName: "高腰A字半身裙",
+  });
+
+  assert.deepEqual(tokens, ["女士", "奶油白", "垂坠面料", "高腰A字半身裙"]);
+});
+
+test("excludes Chinese internal styling strategy from marketplace queries", () => {
+  const result = translate({
+    style_identity: "显高约会",
+    core_elements: ["提高腰线"],
+    silhouette_strategy: ["上短下长：强制将腰线提升至肋骨下方"],
+    visual_keywords: ["缩短上半身视觉长度"],
+    material_direction: ["垂坠面料"],
+    must_have_items: {
+      bottom: ["高腰A字半身裙"],
+    },
+  }, {
+    category: "bottom",
+    gender: "female",
+    item_name: "高腰A字半身裙",
+    search_keywords: [],
+    negative_keywords: [],
+  });
+
+  assert.match(result.search_keywords[0], /女士/u);
+  assert.match(result.search_keywords[0], /高腰A字半身裙/u);
+  assert.doesNotMatch(
+    result.search_keywords.join(" "),
+    /上短下长|强制将腰线|Raise waistline|缩短上半身/u,
+  );
 });

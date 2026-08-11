@@ -1,0 +1,9 @@
+[
+  {"id":"date","occasion":"约会","name":"约会","aliases":["约会穿搭","date"],"dress_level":"smart casual to semi-formal","preferred_styles":["法式","甜妹","Clean Fit","Balletcore"],"avoid_styles":["无场合依据的全套户外装备"],"recommended_items":["针织衫","A字裙","芭蕾鞋","精致小包"]},
+  {"id":"commute","occasion":"通勤","name":"通勤","aliases":["上班","职场","办公室"],"dress_level":"smart casual to business formal","preferred_styles":["通勤高级","Quiet Luxury","Clean Fit","极简主义"],"avoid_styles":["过度暴露","影响行动的夸张造型"],"recommended_items":["西装","真丝衬衫","西装裤","乐福鞋","托特包"]},
+  {"id":"wedding","occasion":"婚礼","name":"婚礼","aliases":["参加婚礼","婚宴","wedding"],"dress_level":"semi-formal to formal","preferred_styles":["婚礼高级","Quiet Luxury","法式"],"avoid_styles":["宾客纯白全套","运动休闲","过度抢镜"],"recommended_items":["醋酸连衣裙","西装","尖头鞋","珍珠耳饰"]},
+  {"id":"travel","occasion":"旅行","name":"旅行","aliases":["旅游","出游","长途"],"dress_level":"practical casual","preferred_styles":["Clean Fit","Athleisure","Gorpcore","日系"],"avoid_styles":["难打理且限制行动的造型"],"recommended_items":["针织衫","宽松裤装","跑鞋","轻量外套"]},
+  {"id":"party","occasion":"聚会","name":"聚会","aliases":["派对","party","朋友聚餐"],"dress_level":"smart casual to cocktail","preferred_styles":["辣妹","Y2K","Vintage","御姐"],"avoid_styles":["与活动性质不符的严肃面试套装"],"recommended_items":["有焦点的上衣","包臀裙","长靴","链条包"]},
+  {"id":"interview","occasion":"面试","name":"面试","aliases":["求职面试","interview"],"dress_level":"business appropriate","preferred_styles":["通勤高级","Clean Fit","极简主义","Preppy"],"avoid_styles":["夸张Logo","过度露肤","影响整洁度的破坏元素"],"recommended_items":["合身西装","衬衫","西装裤","乐福鞋"]},
+  {"id":"daily","occasion":"日常","name":"日常","aliases":["平时","daily","休闲日常"],"dress_level":"casual","preferred_styles":["Clean Fit","日系","Normcore","韩系"],"avoid_styles":["无需求时牺牲舒适度的礼服化造型"],"recommended_items":["针织衫","牛仔裤","德训鞋","托特包"]}
+]

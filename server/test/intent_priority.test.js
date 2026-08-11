@@ -135,6 +135,26 @@ test("Style Gate rejects a conflicting 361 sports shoe before ranking", () => {
   assert.equal(result.intent_priority_score, 92);
 });
 
+test("Style Gate does not reduce a compound long-top constraint to the word top", () => {
+  const profile = {
+    intent_priority_score: 95,
+    must_avoid: ["盖臀长上衣"],
+  };
+  const cropped = evaluateStyleGate({
+    title: "女士短款合身上衣显腰线",
+    category: "top",
+  }, profile, 95);
+  const longLoose = evaluateStyleGate({
+    title: "女士宽松长款遮臀上衣",
+    category: "top",
+  }, profile, 95);
+
+  assert.equal(cropped.allowed, true);
+  assert.deepEqual(cropped.matched_negative_keywords, []);
+  assert.equal(longLoose.allowed, false);
+  assert.deepEqual(longLoose.matched_negative_keywords, ["盖臀长上衣"]);
+});
+
 test("Style Gate records safe conflict diagnostics", async () => {
   const entries = [];
   const profile = highPriorityProfile();

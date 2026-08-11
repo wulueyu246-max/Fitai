@@ -135,6 +135,92 @@ test("normalizes AI must-have item objects without replacing Blueprint intent", 
   assert.deepEqual(objectBlueprint.must_have_items.shoes, ["玛丽珍鞋"]);
 });
 
+test("keeps slash-separated color options inside a concrete item name", () => {
+  const blueprint = normalizeOutfitBlueprint({
+    style_identity: "显高约会风",
+    must_have_items: {
+      top: ["短款修身上衣"],
+      bottom: ["高腰A字裙"],
+      shoes: ["尖头平底单鞋（裸色/米白）"],
+    },
+  });
+
+  assert.deepEqual(blueprint.must_have_items.shoes, [
+    "尖头平底单鞋（裸色/米白）",
+  ]);
+  assert.equal(blueprint.must_have_items.shoes.includes("米白）"), false);
+});
+
+test("splits alternative Blueprint products without splitting product attributes", () => {
+  const blueprint = normalizeOutfitBlueprint({
+    style_identity: "显高约会",
+    must_have_items: {
+      top: ["真丝/醋酸衬衫"],
+      bottom: ["高腰A字半身裙 或 高腰垂感阔腿裤"],
+      shoes: ["尖头平底单鞋（裸色/米白）"],
+    },
+  });
+
+  assert.deepEqual(blueprint.must_have_items.top, ["真丝/醋酸衬衫"]);
+  assert.deepEqual(blueprint.must_have_items.bottom, [
+    "高腰A字半身裙",
+    "高腰垂感阔腿裤",
+  ]);
+  assert.deepEqual(blueprint.must_have_items.shoes, [
+    "尖头平底单鞋（裸色/米白）",
+  ]);
+});
+
+test("maps alternative Blueprint bottoms by the current Look requirement", () => {
+  const blueprint = normalizeOutfitBlueprint({
+    style_identity: "显高约会",
+    must_have_items: {
+      bottom: ["高腰A字版型半身裙 或 高腰垂感阔腿裤"],
+    },
+  });
+  const skirt = applyBlueprintToRequirement({
+    category: "bottom",
+    gender: "female",
+    item_name: "高腰A字迷笛裙",
+  }, blueprint, 1);
+  const trousers = applyBlueprintToRequirement({
+    category: "bottom",
+    gender: "female",
+    item_name: "高腰垂坠阔腿裤",
+  }, blueprint, 0);
+
+  assert.equal(skirt.item_name, "高腰A字版型半身裙");
+  assert.equal(trousers.item_name, "高腰垂感阔腿裤");
+});
+
+test("binds each Look requirement to its matching Blueprint category item", () => {
+  const blueprint = normalizeOutfitBlueprint({
+    style_identity: "显高约会风",
+    must_have_items: {
+      top: ["短款修身上衣"],
+      bottom: ["高腰A字裙", "高腰直筒九分裤"],
+      shoes: ["尖头浅口单鞋"],
+    },
+  });
+  const lookA = applyBlueprintToRequirement({
+    category: "bottom",
+    gender: "female",
+    item_name: "高腰A字裙",
+    search_keywords: [],
+    negative_keywords: [],
+  }, blueprint, 1);
+  const lookB = applyBlueprintToRequirement({
+    category: "bottom",
+    gender: "female",
+    item_name: "高腰直筒九分裤",
+    search_keywords: [],
+    negative_keywords: [],
+  }, blueprint, 0);
+
+  assert.equal(lookA.item_name, "高腰A字裙");
+  assert.equal(lookB.item_name, "高腰直筒九分裤");
+});
+
 test("a concrete Blueprint creates item-first Taobao search keywords", () => {
   const blueprint = normalizeOutfitBlueprint(examples[0].blueprint);
   const generic = normalizeProductRequirement({

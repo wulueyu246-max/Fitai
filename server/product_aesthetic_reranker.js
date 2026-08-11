@@ -808,7 +808,9 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
     const brandQuality = boundedScore(match.product.brand_quality_score ?? BRAND_SCORE.C);
     const aiAesthetic = score(item.aesthetic_score ?? item.ai_taste_score);
     const bodyStrategyMatch = score(
-      item.body_strategy_match_score ?? item.fit_score,
+      match.product.body_strategy_match_score ??
+      item.body_strategy_match_score ??
+      item.fit_score,
     );
     const visualQuality = boundedScore(
       match.product.commerce_visual_score ??

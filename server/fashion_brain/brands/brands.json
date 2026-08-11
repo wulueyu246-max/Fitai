@@ -1,0 +1,17 @@
+[
+  {"id":"uniqlo","brand":"Uniqlo","name":"Uniqlo","aliases":["优衣库"],"positioning":"大众基础款与功能日常","price_level":"accessible","style_alignment":["Clean Fit","Normcore","日系","Athleisure"],"avoid_contexts":["依赖独特礼服工艺的正式场合"]},
+  {"id":"cos","brand":"COS","name":"COS","aliases":[],"positioning":"现代建筑感极简设计","price_level":"premium high street","style_alignment":["极简主义","Clean Fit","通勤高级"],"avoid_contexts":["繁复甜美或历史Lolita"]},
+  {"id":"zara","brand":"ZARA","name":"ZARA","aliases":[],"positioning":"快速响应趋势的都市时装","price_level":"high street","style_alignment":["韩系","辣妹","通勤高级","Y2K"],"avoid_contexts":["要求长期材质投资的Quiet Luxury核心单品"]},
+  {"id":"massimo_dutti","brand":"Massimo Dutti","name":"Massimo Dutti","aliases":[],"positioning":"成熟都市与质感通勤","price_level":"premium high street","style_alignment":["通勤高级","Old Money","Quiet Luxury"],"avoid_contexts":["强街头潮流"]},
+  {"id":"ralph_lauren","brand":"Ralph Lauren","name":"Ralph Lauren","aliases":["拉夫劳伦"],"positioning":"美式经典、马术与学院生活方式","price_level":"premium to luxury","style_alignment":["Old Money","Preppy","美式复古"],"avoid_contexts":["赛博机能"]},
+  {"id":"lacoste","brand":"Lacoste","name":"Lacoste","aliases":["鳄鱼"],"positioning":"法式网球运动与Polo传统","price_level":"premium","style_alignment":["Preppy","Old Money","Athleisure"],"avoid_contexts":["正式晚宴礼服"]},
+  {"id":"nike","brand":"Nike","name":"Nike","aliases":["耐克"],"positioning":"全球运动性能与街头文化","price_level":"accessible to premium","style_alignment":["Athleisure","Streetwear","Gorpcore"],"avoid_contexts":["传统商务正式","婚礼高级"]},
+  {"id":"adidas","brand":"Adidas","name":"Adidas","aliases":["阿迪达斯"],"positioning":"运动性能与复古运动生活方式","price_level":"accessible to premium","style_alignment":["Athleisure","Streetwear","美式复古"],"avoid_contexts":["传统婚礼礼服"]},
+  {"id":"new_balance","brand":"New Balance","name":"New Balance","aliases":["NB","新百伦"],"positioning":"跑步技术与低调复古运动","price_level":"accessible to premium","style_alignment":["Clean Fit","Normcore","Athleisure","美式复古"],"avoid_contexts":["正式婚礼"]},
+  {"id":"levis","brand":"Levi's","name":"Levi's","aliases":["李维斯"],"positioning":"经典美式丹宁与工装传统","price_level":"accessible to premium","style_alignment":["美式复古","Vintage","工装","Streetwear"],"avoid_contexts":["严格商务正式"]},
+  {"id":"max_mara","brand":"Max Mara","name":"Max Mara","aliases":["麦丝玛拉"],"positioning":"意大利高级女装与标志性大衣","price_level":"luxury","style_alignment":["Quiet Luxury","通勤高级","御姐"],"avoid_contexts":["青少年街头造型"]},
+  {"id":"the_row","brand":"The Row","name":"The Row","aliases":[],"positioning":"顶级材质、克制廓形与隐形奢华","price_level":"ultra luxury","style_alignment":["Quiet Luxury","极简主义"],"avoid_contexts":["高饱和Logo街头"]},
+  {"id":"loro_piana","brand":"Loro Piana","name":"Loro Piana","aliases":["诺悠翩雅"],"positioning":"顶级羊绒与低调生活方式奢侈品","price_level":"ultra luxury","style_alignment":["Quiet Luxury","Old Money"],"avoid_contexts":["粗暴户外环境","强潮流一次性造型"]},
+  {"id":"max_co","brand":"Max&Co.","name":"Max&Co.","aliases":[],"positioning":"现代年轻化意式女装","price_level":"premium","style_alignment":["通勤高级","法式","韩系"],"avoid_contexts":["专业户外运动"]},
+  {"id":"loewe","brand":"Loewe","name":"Loewe","aliases":["罗意威"],"positioning":"工艺皮具与艺术化奢侈时装","price_level":"luxury","style_alignment":["艺术家风","极简主义","度假风"],"avoid_contexts":["纯功能健身场景"]}
+]

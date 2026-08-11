@@ -63,6 +63,57 @@ function constraintFragments(value) {
   return [...new Set(fragments.filter((fragment) => fragment.length >= 2))];
 }
 
+const GENERIC_GARMENT_FRAGMENTS = new Set([
+  "上衣", "下装", "裤子", "裙子", "鞋子", "女鞋", "男鞋", "外套", "包包", "帽子",
+]);
+
+function matchesBodyProportionConstraint(evidence, constraint) {
+  const normalizedEvidence = normalizeToken(evidence);
+  const normalizedConstraint = normalizeToken(constraint);
+  if (!normalizedEvidence || !normalizedConstraint) return null;
+
+  const targetsLongTop = /(?:盖臀|遮臀|长款|oversize|宽松).*上衣|上衣.*(?:盖臀|遮臀|长款|oversize|宽松)/u
+    .test(normalizedConstraint);
+  if (targetsLongTop) {
+    const isTop = /上衣|衬衫|针织衫|毛衣|卫衣|t恤|polo|top|shirt/u
+      .test(normalizedEvidence);
+    const isExplicitlyCropped = /短款|露腰|高腰短上衣/u.test(normalizedEvidence);
+    const isExplicitlyFitted = /合身|修身|收腰|紧身/u.test(normalizedEvidence);
+    if (isExplicitlyCropped && isExplicitlyFitted) return false;
+    const coversHips = /盖臀|遮臀/u.test(normalizedEvidence);
+    const longAndLoose = /长款|中长款/u.test(normalizedEvidence) &&
+      /宽松|oversize|廓形/u.test(normalizedEvidence);
+    return isTop && (coversHips || longAndLoose);
+  }
+
+  if (/低腰/u.test(normalizedConstraint)) {
+    return /低腰/u.test(normalizedEvidence);
+  }
+  if (/拖地/u.test(normalizedConstraint)) {
+    return /拖地/u.test(normalizedEvidence);
+  }
+  if (/厚重/u.test(normalizedConstraint) && /高帮/u.test(normalizedConstraint)) {
+    return /厚重|笨重|重型/u.test(normalizedEvidence) &&
+      /高帮|厚底高帮/u.test(normalizedEvidence);
+  }
+  return null;
+}
+
+function negativeConstraintMatches(evidence, constraint) {
+  const normalizedEvidence = normalizeToken(evidence);
+  const normalizedConstraint = normalizeToken(constraint);
+  if (!normalizedEvidence || !normalizedConstraint) return false;
+  const bodyMatch = matchesBodyProportionConstraint(
+    normalizedEvidence,
+    normalizedConstraint,
+  );
+  if (bodyMatch != null) return bodyMatch;
+  if (normalizedEvidence.includes(normalizedConstraint)) return true;
+  return constraintFragments(constraint)
+    .filter((fragment) => !GENERIC_GARMENT_FRAGMENTS.has(fragment))
+    .some((fragment) => normalizedEvidence.includes(fragment));
+}
+
 function styleGateConstraints(styleProfile = {}) {
   const mustHave = Array.isArray(styleProfile.must_have)
     ? styleProfile.must_have
@@ -108,7 +159,7 @@ function evaluateStyleGate(product = {}, styleProfile = {}, intentPriorityScore)
     product.color,
   ].filter(Boolean).join(" "));
   const matchedNegativeKeywords = constraints.must_avoid.filter((keyword) =>
-    constraintFragments(keyword).some((fragment) => evidence.includes(fragment)));
+    negativeConstraintMatches(evidence, keyword));
   const matchedMustHaveKeywords = constraints.must_have.filter((keyword) =>
     constraintFragments(keyword).some((fragment) => evidence.includes(fragment)));
   return Object.freeze({
@@ -233,6 +284,7 @@ module.exports = {
   hasStyleViolation,
   intentDebugSummary,
   lookIntentScore,
+  negativeConstraintMatches,
   productIntentScore,
   resolveIntentPriorityScore,
   shouldRejectForStyle,

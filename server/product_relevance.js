@@ -284,8 +284,46 @@ function normalizeProductRequirement(input = {}, context = {}) {
   const translatedQueries = normalizeTranslatedQueries(
     input.translated_queries || input.translatedQueries,
   );
+  const colors = normalizeStringList(
+    input.colors || (input.color ? [input.color] : []),
+    "colors",
+    10,
+  );
+  const materials = normalizeStringList(
+    input.materials || (input.material ? [input.material] : []),
+    "materials",
+    10,
+  );
+  const designElements = normalizeStringList(
+    input.design_elements || input.designElements || [],
+    "design_elements",
+    20,
+  );
+  const requiredAttributes = normalizeStringList(
+    input.required_attributes || input.requiredAttributes || [],
+    "required_attributes",
+    20,
+  );
+  const preferredAttributes = normalizeStringList(
+    input.preferred_attributes || input.preferredAttributes || [],
+    "preferred_attributes",
+    20,
+  );
+  const avoidAttributes = normalizeStringList(
+    input.avoid_attributes || input.avoidAttributes || [],
+    "avoid_attributes",
+    20,
+  );
   return {
+    request_id: optionalText(
+      input.request_id || input.requestId || context.request_id || context.requestId,
+      "request_id",
+    ),
     look_id: optionalText(input.look_id || input.lookId || context.look_id || context.lookId, "look_id"),
+    slot_key: optionalText(
+      input.slot_key || input.slotKey || context.slot_key || context.slotKey,
+      "slot_key",
+    ),
     category,
     search_subcategory: searchSubcategory,
     gender,
@@ -297,9 +335,29 @@ function normalizeProductRequirement(input = {}, context = {}) {
     ),
     blueprint_required: input.blueprint_required === true ||
       context.blueprint_required === true,
+    product_type: optionalText(
+      input.product_type || input.productType || itemName,
+      "product_type",
+    ),
+    product_family: optionalText(
+      input.product_family || input.productFamily,
+      "product_family",
+    ),
     item_name: itemName,
-    color: optionalText(input.color || context.color, "color"),
-    material: optionalText(input.material || context.material, "material"),
+    style_role: optionalLooseText(
+      input.style_role || input.styleRole || context.style_role,
+    ),
+    colors,
+    materials,
+    design_elements: designElements,
+    required_attributes: requiredAttributes,
+    preferred_attributes: preferredAttributes,
+    avoid_attributes: avoidAttributes,
+    color: optionalText(colors[0] || input.color || context.color, "color"),
+    material: optionalText(
+      materials[0] || input.material || context.material,
+      "material",
+    ),
     style: optionalText(input.style || context.style, "style"),
     season: normalizeSeason(input.season || context.season),
     scene: optionalText(input.scene || context.scene, "scene"),

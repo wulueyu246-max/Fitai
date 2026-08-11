@@ -918,6 +918,93 @@ test("Blueprint search expansion recovers abstract queries and logs the successf
   assert.equal(summary[1].candidate_count, 1);
 });
 
+test("short-leg body strategy keeps proportion-improving products and rejects conflicts", async () => {
+  let itemId = 0;
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client: {
+      call: async (method, params) => {
+        const query = String(params.q || "");
+        const candidates = /鞋/u.test(query)
+          ? [
+            ["女士浅口尖头低跟鞋", "女鞋"],
+            ["女士厚重厚底高帮鞋", "女鞋"],
+          ]
+          : /裤|裙|下装/u.test(query)
+            ? [
+              ["女士高腰垂坠直筒裤显腿长", "女裤"],
+              ["女士低腰宽松拖地裤", "女裤"],
+            ]
+            : [
+              ["女士短款合身上衣显腰线", "女士上衣"],
+              ["女士宽松长款遮臀上衣", "女士上衣"],
+            ];
+        return response(method, candidates.map(([title, category]) => taobaoItem({
+          item_basic_info: {
+            item_id: `body-strategy-${itemId++}`,
+            title,
+            category_name: category,
+            pict_url: `//img.example.com/body-strategy-${itemId}.jpg`,
+          },
+          publish_info: {click_url: `//s.click.taobao.com/body-strategy-${itemId}`},
+        })));
+      },
+    },
+    reranker: null,
+    logger: {info() {}, warn() {}},
+  });
+  const products = await provider.recommendForQueries([
+    {
+      look_id: "proportion-look",
+      category: "top",
+      gender: "female",
+      item_name: "短款合身上衣",
+      search_keywords: ["女士 短款合身上衣"],
+    },
+    {
+      look_id: "proportion-look",
+      category: "bottom",
+      gender: "female",
+      item_name: "高腰垂坠直筒裤",
+      search_keywords: ["女士 高腰垂坠直筒裤"],
+    },
+    {
+      look_id: "proportion-look",
+      category: "shoes",
+      gender: "female",
+      item_name: "浅口尖头低跟鞋",
+      search_keywords: ["女士 浅口尖头低跟鞋"],
+    },
+  ], {
+    requestId: "short-leg-body-strategy",
+    style_profile: {
+      intent_priority_score: 95,
+      must_avoid: ["盖臀长上衣", "低腰裤", "厚重高帮鞋"],
+    },
+    outfit_blueprint: {
+      core_elements: ["提高腰线", "高腰", "纵向延伸"],
+      silhouette_strategy: ["短款上衣搭配高腰下装"],
+      must_have_items: {
+        top: ["短款合身上衣"],
+        bottom: ["高腰垂坠直筒裤"],
+        shoes: ["浅口尖头低跟鞋"],
+      },
+      avoid_items: ["低腰裤", "拖地裤", "厚重高帮鞋", "盖臀长上衣"],
+    },
+  });
+
+  assert.equal(products.length, 3);
+  assert.ok(products.some((product) =>
+    product.category === "top" && /短款合身/u.test(product.title)));
+  assert.ok(products.some((product) =>
+    product.category === "bottom" && /高腰/u.test(product.title)));
+  assert.ok(products.some((product) =>
+    product.category === "shoes" && /浅口.*尖头.*低跟/u.test(product.title)));
+  assert.ok(products.every((product) => product.body_strategy_match_score >= 90));
+  assert.equal(products.some((product) => /低腰|拖地|厚重|高帮/u.test(product.title)), false);
+});
+
 test("mature, classic and unknown Blueprints all retain at least one matching candidate", async (t) => {
   const cases = [
     {

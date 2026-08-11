@@ -31,6 +31,9 @@ const {
 const {
   expandBlueprintSearchPlan,
 } = require("./blueprint_search_expansion");
+const {
+  bodyStrategyMatchAssessment,
+} = require("./body_strategy_match");
 
 const PRODUCT_CATEGORIES = SUPPORTED_PRODUCT_CATEGORIES;
 const DEFAULT_SAMPLE_MATERIAL_ID = "28029";
@@ -427,9 +430,30 @@ class TaobaoProductProvider extends ProductProvider {
             intent_priority_score: gate.intent_priority_score,
           });
         }
+        const bodyAssessment = bodyStrategyMatchAssessment(
+          product,
+          requirement,
+          finalOutfitBlueprint,
+          context,
+        );
+        const bodyStrategyScore = Number.isFinite(
+          Number(product.body_strategy_match_score),
+        ) ? Number(product.body_strategy_match_score) : bodyAssessment.score;
+        if (bodyAssessment.configured && bodyStrategyScore < 40) {
+          this.logger.info?.("Body Strategy Gate rejected final product", {
+            request_id: context.requestId || undefined,
+            title: product.title,
+            category: product.category,
+            body_strategy_match_score: bodyStrategyScore,
+            conflict_elements: bodyAssessment.conflict_elements,
+          });
+          return [];
+        }
         return gate.allowed ? [{
           ...product,
           blueprint_match_score: blueprintScore,
+          body_strategy_match_score: bodyStrategyScore,
+          body_strategy_configured: bodyAssessment.configured,
           matched_elements: product.matched_elements ||
             blueprintAssessment.matched_elements,
           conflict_elements: product.conflict_elements ||
@@ -606,7 +630,30 @@ class TaobaoProductProvider extends ProductProvider {
         conflict_elements: assessment.conflict_elements,
       }];
     });
-    const styleGatedProducts = blueprintGatedProducts.filter((product) => {
+    const bodyGatedProducts = blueprintGatedProducts.flatMap((product) => {
+      const assessment = bodyStrategyMatchAssessment(
+        product,
+        requirement,
+        outfitBlueprint,
+        filters,
+      );
+      if (assessment.configured && assessment.score < 40) {
+        this.logger.info?.("Body Strategy Gate rejected candidate", {
+          title: product.title,
+          look_id: requirement.look_id || undefined,
+          category: requirement.category,
+          body_strategy_match_score: assessment.score,
+          conflict_elements: assessment.conflict_elements,
+        });
+        return [];
+      }
+      return [{
+        ...product,
+        body_strategy_match_score: assessment.score,
+        body_strategy_configured: assessment.configured,
+      }];
+    });
+    const styleGatedProducts = bodyGatedProducts.filter((product) => {
       const gate = evaluateStyleGate(product, styleProfile, intentPriorityScore);
       if (!gate.allowed) {
         this.logger.info?.("Style Gate rejected candidate", {
@@ -647,6 +694,7 @@ class TaobaoProductProvider extends ProductProvider {
       }))
       .sort((left, right) =>
         right.blueprint_match_score - left.blueprint_match_score ||
+        right.body_strategy_match_score - left.body_strategy_match_score ||
         right.style_match_score - left.style_match_score ||
         right.budget_preference_score - left.budget_preference_score ||
         right.relevance_score - left.relevance_score);
@@ -1352,6 +1400,7 @@ function logProductBlueprintSummaries(logger, products, requestId) {
       request_id: requestId,
       product_title: product.title,
       blueprint_score: Number(product.blueprint_match_score),
+      body_strategy_match_score: Number(product.body_strategy_match_score),
       matched_elements: Array.isArray(product.matched_elements)
         ? product.matched_elements
         : [],

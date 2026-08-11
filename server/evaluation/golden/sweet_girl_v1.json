@@ -1,0 +1,107 @@
+{
+  "case_id": "sweet_girl_v1",
+  "case_version": 1,
+  "record_type": "golden_expectation",
+  "captured_request_id": "783d1683-556f-4f41-9b55-20ee082c12d5",
+  "user_input": {
+    "requested_style": "甜妹穿搭",
+    "gender": "female",
+    "scene": "约会",
+    "height_cm": 160,
+    "weight_kg": 49,
+    "item_budget": "200-500",
+    "outfit_budget": "800-1500"
+  },
+  "fashion_brain_context": {
+    "style_hits": ["甜美少女", "Coquette"],
+    "item_hits": ["蕾丝", "蝴蝶结", "百褶裙", "玛丽珍鞋"],
+    "body_hits": ["明确腰线", "轻盈比例"],
+    "occasion_hits": ["日常约会"]
+  },
+  "blueprint": {
+    "blueprint_source": "ai_generated",
+    "style_identity": "Sweet Core（甜系核心）",
+    "character_impression": "甜美、精致、柔和且具有少女感",
+    "visual_keywords": ["甜美", "少女感", "浪漫", "精致"],
+    "core_elements": ["蕾丝", "蝴蝶结", "百褶裙", "玛丽珍"],
+    "silhouette_strategy": ["明确腰线", "轻盈裙摆", "柔和轮廓"],
+    "color_palette": ["奶白色", "浅粉色", "马卡龙色"],
+    "material_direction": ["蕾丝", "细腻棉质", "轻盈雪纺"],
+    "must_have_items": {
+      "top": ["蕾丝蝴蝶结上衣"],
+      "bottom": ["高腰百褶裙", "高腰A字裙"],
+      "dress": ["蕾丝收腰连衣裙"],
+      "shoes": ["圆头低跟玛丽珍鞋", "芭蕾单鞋"]
+    },
+    "avoid_items": ["跑鞋", "训练鞋", "工装裤", "运动训练外套"],
+    "occasion_strategy": "保持甜美精致，同时满足约会场景的舒适度"
+  },
+  "search_queries": [
+    {
+      "category": "top",
+      "query": "女士 甜美 蕾丝 蝴蝶结 上衣",
+      "source_elements": ["蕾丝蝴蝶结上衣", "蕾丝", "蝴蝶结"]
+    },
+    {
+      "category": "bottom",
+      "query": "女士 高腰 百褶裙 A字裙",
+      "source_elements": ["高腰百褶裙", "高腰A字裙"]
+    },
+    {
+      "category": "dress",
+      "query": "女士 甜美 蕾丝 收腰 连衣裙",
+      "source_elements": ["蕾丝收腰连衣裙", "蕾丝"]
+    },
+    {
+      "category": "shoes",
+      "query": "女士 玛丽珍 圆头 低跟 复古甜美鞋",
+      "source_elements": ["圆头低跟玛丽珍鞋", "玛丽珍", "甜美"]
+    }
+  ],
+  "final_products": [
+    {
+      "category": "dress",
+      "title": "Fabrique 日光黄纯棉刺绣蕾丝无袖圆领女士连衣裙2026年春夏新品",
+      "source": "taobao",
+      "is_mock": false,
+      "blueprint_match_score": 86,
+      "body_strategy_match_score": 72
+    },
+    {
+      "category": "top",
+      "title": "法系RO春夏新品甜美马卡龙色刺绣复古V领裹身上衣女士裹身衬衫女",
+      "source": "taobao",
+      "is_mock": false,
+      "blueprint_match_score": 82,
+      "body_strategy_match_score": 70
+    },
+    {
+      "category": "shoes",
+      "title": "定金丨糖果茶会丨lolita鞋甜美可爱马卡龙色系简约女鞋",
+      "source": "taobao",
+      "is_mock": false,
+      "blueprint_match_score": 78,
+      "body_strategy_match_score": 65
+    },
+    {
+      "category": "shoes",
+      "title": "【现货】绵羊卷卷马卡龙色绵羊泡芙画框扣玛丽珍鞋舒适软底单鞋",
+      "source": "taobao",
+      "is_mock": false,
+      "blueprint_match_score": 94,
+      "body_strategy_match_score": 76
+    }
+  ],
+  "blueprint_match_score": {
+    "hard_gate_minimum": 50,
+    "golden_average_minimum": 75
+  },
+  "body_strategy_match_score": {
+    "valid_minimum": 0,
+    "golden_average_minimum": 60
+  },
+  "total_duration": {
+    "milliseconds": 94206,
+    "maximum_regression_milliseconds": 120000
+  }
+}

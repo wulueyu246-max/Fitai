@@ -1,0 +1,7 @@
+[
+  {"id":"rain","name":"雨天","aliases":["下雨","阴雨","阵雨","rainy"],"conditions":["潮湿","路面湿滑"],"recommended_strategy":["选择防滑耐水鞋底","缩短易沾水的裤裙长度","准备轻量防水外层"],"recommended_items":["防水外套","抓地鞋履","不拖地的下装"],"avoid_items":["吸水麂皮鞋","拖地裤脚","娇贵真丝外层"]},
+  {"id":"hot","name":"炎热","aliases":["高温","酷暑","很热"],"conditions":["高温","易出汗"],"recommended_strategy":["增加透气与排汗","减少不必要层次"],"recommended_items":["亚麻衬衫","轻薄下装"],"avoid_items":["厚重羊绒","不透气多层"]},
+  {"id":"cold","name":"寒冷","aliases":["低温","严寒","很冷"],"conditions":["低温","保暖需求"],"recommended_strategy":["建立贴身保暖层与防风外层","保护颈部和脚踝"],"recommended_items":["羊绒针织衫","大衣","长靴"],"avoid_items":["大面积无保暖露肤"]},
+  {"id":"wind","name":"大风","aliases":["刮风","强风","windy"],"conditions":["风大","体感温度下降"],"recommended_strategy":["选择可闭合外层","固定帽饰与轻薄下摆"],"recommended_items":["防风外套","直筒裤"],"avoid_items":["不固定的宽檐帽","失控的超轻蓬裙"]},
+  {"id":"snow","name":"雪天","aliases":["下雪","冰雪","snowy"],"conditions":["低温","湿滑","融雪水"],"recommended_strategy":["保暖、防水、防滑同时满足"],"recommended_items":["防水长靴","羊毛大衣","保暖内层"],"avoid_items":["光滑薄底鞋","拖地衣摆"]}
+]

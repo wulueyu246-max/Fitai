@@ -1,0 +1,12 @@
+[
+  {"id":"silk","material":"真丝","name":"真丝","aliases":["Silk"],"visual_meaning":["高级","女性化","柔和光泽"],"suitable_styles":["御姐","Old Money","法式","Quiet Luxury"],"avoid_contexts":["剧烈运动","无防护户外雨天"],"care_notes":["避免摩擦与强光","按标签专业清洁"]},
+  {"id":"cashmere","material":"羊绒","name":"羊绒","aliases":["Cashmere"],"visual_meaning":["Quiet Luxury","高级感","柔软温暖"],"suitable_styles":["Quiet Luxury","Old Money","极简主义"],"avoid_contexts":["高温运动","暴雨无外层"],"care_notes":["低温轻柔清洁","平铺晾干"]},
+  {"id":"nylon","material":"尼龙","name":"尼龙","aliases":["Nylon"],"visual_meaning":["机能","户外","轻量科技"],"suitable_styles":["机能风","Gorpcore","Athleisure"],"avoid_contexts":["正式婚礼","传统商务面试"],"care_notes":["远离高温熨烫"]},
+  {"id":"wool","material":"羊毛","name":"羊毛","aliases":["Wool"],"visual_meaning":["结构","温暖","经典品质"],"suitable_styles":["通勤高级","Dark Academia","Old Money"],"avoid_contexts":["湿热盛夏"],"care_notes":["防虫防潮","控制洗涤温度"]},
+  {"id":"cotton","material":"棉","name":"棉","aliases":["Cotton"],"visual_meaning":["自然","亲和","日常"],"suitable_styles":["Clean Fit","Normcore","日系","美式复古"],"avoid_contexts":["要求强光泽的正式礼服"],"care_notes":["深浅色分洗"]},
+  {"id":"linen","material":"亚麻","name":"亚麻","aliases":["Linen"],"visual_meaning":["松弛","天然纹理","透气"],"suitable_styles":["法式","度假风","日系","艺术家风"],"avoid_contexts":["要求无褶精确的正式面试"],"care_notes":["接受自然褶皱或蒸汽整理"]},
+  {"id":"denim","material":"丹宁","name":"丹宁","aliases":["牛仔布","Denim"],"visual_meaning":["耐用","休闲","复古"],"suitable_styles":["美式复古","Streetwear","Vintage","工装"],"avoid_contexts":["正式婚礼"],"care_notes":["减少洗涤保持色落层次"]},
+  {"id":"acetate","material":"醋酸","name":"醋酸","aliases":["Acetate"],"visual_meaning":["垂坠","含蓄光泽","精致"],"suitable_styles":["通勤高级","御姐","极简主义"],"avoid_contexts":["高摩擦户外活动"],"care_notes":["低温熨烫","避免强碱"]},
+  {"id":"leather","material":"皮革","name":"皮革","aliases":["Leather"],"visual_meaning":["力量","结构","耐久"],"suitable_styles":["朋克","Old Money","御姐","工装"],"avoid_contexts":["酷热暴晒","暴雨无养护"],"care_notes":["定期护理","保持干燥"]},
+  {"id":"lace","material":"蕾丝","name":"蕾丝","aliases":["Lace"],"visual_meaning":["浪漫","精细","轻透"],"suitable_styles":["Coquette","Lolita","甜妹","法式"],"avoid_contexts":["粗犷户外运动"],"care_notes":["避免勾丝","轻柔洗涤"]}
+]

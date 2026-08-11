@@ -16,6 +16,33 @@ const {
   sortProductsByCategoryPriority,
 } = require("../product_relevance");
 
+test("product requirement normalization preserves Look binding fields", () => {
+  const requirement = normalizeProductRequirement({
+    request_id: "request-003",
+    look_id: "look-2",
+    slot_key: "request-003:look-2:shoes:0",
+    category: "shoes",
+    gender: "female",
+    product_type: "尖头浅口低跟单鞋",
+    product_family: "pointed_flat",
+    item_name: "尖头浅口低跟单鞋",
+    style_role: "延长腿部纵向线条",
+    colors: ["裸色", "米白色"],
+    materials: ["羊皮", "缎面"],
+    design_elements: ["尖头", "浅口"],
+  });
+
+  assert.equal(requirement.request_id, "request-003");
+  assert.equal(requirement.look_id, "look-2");
+  assert.equal(requirement.slot_key, "request-003:look-2:shoes:0");
+  assert.equal(requirement.product_type, "尖头浅口低跟单鞋");
+  assert.equal(requirement.product_family, "pointed_flat");
+  assert.equal(requirement.style_role, "延长腿部纵向线条");
+  assert.deepEqual(requirement.colors, ["裸色", "米白色"]);
+  assert.deepEqual(requirement.materials, ["羊皮", "缎面"]);
+  assert.deepEqual(requirement.design_elements, ["尖头", "浅口"]);
+});
+
 test("Taobao keyword normalization removes duplicate gender and splits color alternatives", () => {
   const requirement = {
     category: "top",

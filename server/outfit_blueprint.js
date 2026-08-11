@@ -33,6 +33,59 @@ function cleanList(value, limit = 16) {
   return [...new Set(values.map(cleanText).filter(Boolean))].slice(0, limit);
 }
 
+const CONCRETE_PRODUCT_ITEM_PATTERN =
+  /(?:上衣|衬衫|针织衫|毛衣|背心|吊带|T恤|Polo|卫衣|裤|半身裙|连衣裙|裙装|裙|鞋|靴|凉鞋|单鞋|外套|西装|风衣|大衣|夹克|开衫|包|手袋|帽|袜|耳环|耳饰|项链|手链|戒指|胸针|腰带|皮带|丝巾|围巾|手表|眼镜)/iu;
+
+const PRODUCT_ITEM_MATCH_FEATURES = Object.freeze([
+  "A字", "百褶", "半身裙", "连衣裙", "迷笛裙", "短裙", "长裙",
+  "阔腿裤", "九分裤", "直筒裤", "西装裤", "短裤", "牛仔裤",
+  "衬衫", "针织衫", "毛衣", "背心", "吊带", "T恤", "Polo", "卫衣",
+  "平底鞋", "尖头", "浅口", "玛丽珍", "芭蕾鞋", "乐福鞋", "凉鞋",
+  "猫跟", "低跟", "高跟", "靴", "外套", "西装", "风衣", "大衣",
+  "手提包", "斜挎包", "托特包", "帽", "袜", "耳饰", "项链", "腰带",
+]);
+
+function hasConcreteProductItem(value) {
+  return CONCRETE_PRODUCT_ITEM_PATTERN.test(cleanText(value));
+}
+
+function splitOutsideItemGroups(text) {
+  const parts = [];
+  let current = "";
+  let depth = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (["（", "(", "【", "["].includes(character)) depth += 1;
+    if (["）", ")", "】", "]"].includes(character)) {
+      depth = Math.max(0, depth - 1);
+    }
+    const alternativeWord = depth === 0 && text.startsWith("或者", index)
+      ? "或者"
+      : depth === 0 && character === "或" ? "或" : "";
+    if (alternativeWord || (depth === 0 && /[、,，/|]/u.test(character))) {
+      const part = cleanText(current);
+      if (part) parts.push(part);
+      current = "";
+      if (alternativeWord === "或者") index += 1;
+      continue;
+    }
+    current += character;
+  }
+  const last = cleanText(current);
+  if (last) parts.push(last);
+  return parts;
+}
+
+function splitBlueprintItemNames(value) {
+  const text = cleanText(value);
+  if (!text) return [];
+  const alternatives = splitOutsideItemGroups(text);
+  if (alternatives.length < 2 || !alternatives.every(hasConcreteProductItem)) {
+    return [text];
+  }
+  return [...new Set(alternatives)].slice(0, 8);
+}
+
 function normalizeBlueprintItemKey(value) {
   const key = cleanText(value).toLowerCase();
   if (BLUEPRINT_ITEM_KEYS.includes(key)) return key;
@@ -43,7 +96,7 @@ function normalizeBlueprintItemKey(value) {
 }
 
 function blueprintItemNames(value) {
-  if (typeof value === "string") return cleanList(value, 8);
+  if (typeof value === "string") return splitBlueprintItemNames(value);
   if (Array.isArray(value)) {
     return [...new Set(value.flatMap(blueprintItemNames))].slice(0, 8);
   }
@@ -59,6 +112,28 @@ function blueprintItemNames(value) {
     value.description,
   ];
   return [...new Set(candidates.flatMap(blueprintItemNames))].slice(0, 8);
+}
+
+function matchingBlueprintItem(desiredItems, requestedItemName) {
+  const requested = normalizeEvidence(requestedItemName);
+  if (requested.length < 3) return "";
+  const exact = desiredItems.find((itemName) => {
+    const desired = normalizeEvidence(itemName);
+    return desired === requested || desired.includes(requested) ||
+      requested.includes(desired);
+  });
+  if (exact) return exact;
+  const requestedFeatures = PRODUCT_ITEM_MATCH_FEATURES.filter((feature) =>
+    requested.includes(normalizeEvidence(feature)));
+  if (requestedFeatures.length === 0) return "";
+  const ranked = desiredItems.map((itemName, index) => ({
+    itemName,
+    index,
+    score: requestedFeatures.filter((feature) =>
+      normalizeEvidence(itemName).includes(normalizeEvidence(feature))).length,
+  })).filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score || left.index - right.index);
+  return ranked[0]?.itemName || "";
 }
 
 function normalizeMustHaveItems(value) {
@@ -298,8 +373,12 @@ function applyBlueprintToRequirement(requirement = {}, blueprint = {}, variantIn
       blueprint_required: false,
     };
   }
+  const matchedItem = matchingBlueprintItem(
+    desiredItems,
+    requirement.item_name || requirement.itemName,
+  );
   const itemName = desiredItems.length > 0
-    ? desiredItems[Math.abs(variantIndex) % desiredItems.length]
+    ? matchedItem || desiredItems[Math.abs(variantIndex) % desiredItems.length]
     : cleanText(requirement.item_name);
   const audience = requirement.gender === "male"
     ? "男士"

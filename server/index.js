@@ -55,6 +55,16 @@ const {
 const {
   translateBlueprintSearchRequirement,
 } = require("./blueprint_search_translator");
+const {
+  canonicalizeAttribute,
+  categoryForSlotRole,
+  compileExecutableProductContract,
+  extractCanonicalAttributeValues,
+  normalizeExecutableItemName,
+  normalizeExecutableProductRequirement,
+  normalizeNativeExecutableProductContract,
+  validateExecutableProductContract,
+} = require("./executable_product_requirement");
 const {TaobaoService} = require("./taobao_service");
 const {
   assertContextGender,
@@ -71,6 +81,11 @@ const {
   normalizeStyleSemantics,
 } = require("./style_interpreter");
 const {
+  FashionBrain,
+  FashionContext,
+  KNOWLEDGE_KINDS,
+} = require("./fashion_brain");
+const {
   LOOK_INTENT_WEIGHTS,
   MIN_LOOK_STYLE_SCORE,
   hasActionableStyleConstraints,
@@ -86,6 +101,8 @@ require("dotenv").config({
   path: path.join(__dirname, ".env"),
   quiet: true,
 });
+
+const fashionBrain = FashionBrain.load();
 
 function readPositiveInteger(value, fallback) {
   const parsed = Number(value);
@@ -116,7 +133,6 @@ const DEFAULT_BLUEPRINT_TIMEOUT_MS = 120_000;
 const DEFAULT_LOOK_TIMEOUT_MS = 60_000;
 const INTENT_PHASE_MAX_TOKENS = 1_400;
 const BLUEPRINT_PHASE_MAX_TOKENS = 1_800;
-const LOOK_PHASE_MAX_TOKENS = 2_600;
 // Manual rollback only: set AI_MODEL=qwen-vl-plus in the environment.
 // The server never switches to this legacy model automatically.
 const LEGACY_AI_MODEL = "qwen-vl-plus";
@@ -590,6 +606,9 @@ function resolveAiModeReason(currentConfig, currentAiClient) {
 }
 
 function resolveAiFallbackReason(error) {
+  if (error?.code === "LOOK_OUTPUT_TRUNCATED") {
+    return "LOOK_OUTPUT_TRUNCATED";
+  }
   if (
     error?.name === "AbortError" ||
     error?.name === "APIUserAbortError" ||
@@ -1241,8 +1260,22 @@ function finalizeBlueprintSearchRequirement(
   variantIndex = 0,
   {preserveExistingKeywords = false} = {},
 ) {
+  const applied = applyBlueprintToRequirement(
+    requirement,
+    outfitBlueprint,
+    variantIndex,
+  );
+  const normalizedRequirement = normalizeExecutableProductRequirement(applied, {
+    originalRequirement: requirement,
+    blueprint: outfitBlueprint,
+  });
+  const executable = validateExecutableLookItems([normalizedRequirement], {
+    outfitBlueprint,
+    fallbackIndex: variantIndex,
+  })[0];
+  const contract = validateExecutableProductContract(executable);
   const translated = translateBlueprintSearchRequirement(
-    applyBlueprintToRequirement(requirement, outfitBlueprint, variantIndex),
+    contract,
     outfitBlueprint,
     {variantIndex},
   );
@@ -1388,9 +1421,17 @@ function parseOutfitAnalysis(content, context = {}) {
       throw new Error(`AI 返回 products[${index}] 必须是对象`);
     }
     try {
+      const requestId = readOptionalString(context.requestId) || "outfit-analysis";
+      const lookId = readOptionalString(look.look_id) || "look-1";
+      const category = normalizeProductCategory(
+        product.category || product.item_name || product.itemName,
+      );
       const initialRequirement = normalizeProductRequirement({
         ...product,
-        look_id: look.look_id,
+        request_id: product.request_id || product.requestId || requestId,
+        look_id: product.look_id || product.lookId || lookId,
+        slot_key: product.slot_key || product.slotKey ||
+          `${requestId}:${lookId}:${category || "item"}:${index}`,
         gender: Object.prototype.hasOwnProperty.call(product, "gender")
           ? product.gender
           : look.gender,
@@ -1435,6 +1476,9 @@ function parseOutfitAnalysis(content, context = {}) {
       normalizeItem,
       styleProfile,
       styleSemantics,
+      outfitBlueprint,
+      nativeExecutableLookContract:
+        context.nativeExecutableLookContract === true,
     })
     : null;
   const looks = lookRepairResult
@@ -1498,6 +1542,12 @@ function parseOutfitAnalysis(content, context = {}) {
       repaired_looks: 0,
       removed_looks: 0,
       fallback_used: false,
+    },
+    look_quality_summary: lookRepairResult?.summary.look_quality_summary || {
+      generated: 1,
+      usable: 1,
+      dropped: 0,
+      warnings: 0,
     },
   };
 }
@@ -1740,6 +1790,180 @@ const LOOK_REPAIR_ITEM_DEFAULTS = Object.freeze({
   bottom: Object.freeze({male: "中高腰直筒裤", female: "中高腰直筒下装", unisex: "中高腰直筒裤"}),
   shoes: Object.freeze({male: "简洁低帮鞋", female: "简洁浅口鞋", unisex: "简洁低帮鞋"}),
 });
+
+const NON_EXECUTABLE_LOOK_ITEM_NAMES = new Set([
+  "黑色", "白色", "灰色", "裸色", "米色", "棕色", "红色", "蓝色",
+  "绿色", "黄色", "紫色", "粉色", "金色", "银色",
+  "真丝", "皮革", "牛皮", "羊皮", "羊毛", "棉", "棉麻", "醋酸",
+  "聚酯纤维", "高级", "简约", "甜美", "复古", "休闲", "优雅",
+  "成熟", "利落", "时尚", "基础", "合身", "修身", "宽松",
+].map((value) => value.toLowerCase()));
+
+const EXECUTABLE_ITEM_CATEGORY_PATTERNS = Object.freeze({
+  top: /(?:上衣|衬衫|t恤|tee|针织|毛衣|背心|吊带|polo|卫衣)/iu,
+  bottom: /(?:裤|半身裙|短裙|长裙|裙裤)/u,
+  dress: /(?:连衣裙|裙装|套裙)/u,
+  shoes: /(?:鞋|靴|玛丽珍|乐福|芭蕾|猫跟|高跟|低跟|单鞋)/u,
+  outerwear: /(?:外套|西装|风衣|大衣|夹克|开衫)/u,
+  bag: /(?:包|手袋)/u,
+  hat: /帽/u,
+  accessory: /(?:耳环|耳饰|项链|手链|戒指|胸针|腰带|皮带|丝巾|围巾|手表|眼镜)/u,
+});
+
+function containsInternalStrategyText(value) {
+  const text = readOptionalString(value);
+  return /\b(?:raise|maintain|improve|shorten|elongate|balance|emphasize)\b/iu
+    .test(text) ||
+    /(?:上短下长|强制将|提升至肋骨|缩短上半身|延长腿部|视觉重心|比例策略)\s*[:：]?/u
+      .test(text) ||
+    /[:：].*(?:腰线|比例|视觉|重心|腿部|上半身)/u.test(text);
+}
+
+function hasMultipleExecutableItemCandidates(value) {
+  const text = readOptionalString(value);
+  if (!text) return false;
+  const candidates = text.split(/\s*(?:或者|或)\s*/u).filter(Boolean);
+  return candidates.length > 1 && candidates.every((candidate) =>
+    Object.values(EXECUTABLE_ITEM_CATEGORY_PATTERNS)
+      .some((pattern) => pattern.test(candidate)));
+}
+
+function isNonExecutableLookItemName(value) {
+  const itemName = readOptionalString(value);
+  if (!itemName) return true;
+  if (containsInternalStrategyText(itemName) ||
+      hasMultipleExecutableItemCandidates(itemName)) return true;
+  const openCount = [...itemName]
+    .filter((character) => ["（", "(", "【", "["].includes(character)).length;
+  const closeCount = [...itemName]
+    .filter((character) => ["）", ")", "】", "]"].includes(character)).length;
+  if (openCount !== closeCount) return true;
+  const normalized = itemName.toLowerCase()
+    .replace(/^[\s\p{P}\p{S}]+|[\s\p{P}\p{S}]+$/gu, "")
+    .replace(/\s+/g, "");
+  if (!normalized) return true;
+  if (NON_EXECUTABLE_LOOK_ITEM_NAMES.has(normalized)) return true;
+  if (/^(?:x{0,3}s|x{0,3}l|\d{2,3}(?:码)?|\d{2,3}\/[0-9a-z]{1,4}|\d+(?:[.-–]\d+)?cm)$/iu
+    .test(normalized)) {
+    return true;
+  }
+  const fragments = normalized.split(/[\/、，,|]+/u).filter(Boolean);
+  return fragments.length > 1 && fragments.every((fragment) =>
+    NON_EXECUTABLE_LOOK_ITEM_NAMES.has(fragment) ||
+    /^(?:\d+(?:[.-–]\d+)?cm|x{0,3}[sl])$/iu.test(fragment));
+}
+
+function validateExecutableLookItems(
+  items,
+  {
+    outfitBlueprint = {},
+    lookRequirementNames = {},
+    fallbackIndex = 0,
+  } = {},
+) {
+  if (!Array.isArray(items)) {
+    throw new TypeError("executable Look items must be an array");
+  }
+  const usedSlotKeys = new Set();
+  return items.map((sourceItem, itemIndex) => {
+    const category = normalizeProductCategory(sourceItem?.category);
+    if (!category) throw new TypeError("executable Look item category is required");
+    const requestId = readOptionalString(
+      sourceItem.request_id || sourceItem.requestId,
+    ) || "request-unspecified";
+    const lookId = readOptionalString(sourceItem.look_id || sourceItem.lookId) ||
+      "look-1";
+    const slotKey = readOptionalString(sourceItem.slot_key || sourceItem.slotKey) ||
+      `${requestId}:${lookId}:${category}:${fallbackIndex + itemIndex}`;
+    let item = {
+      ...sourceItem,
+      request_id: requestId,
+      look_id: lookId,
+      category,
+      slot_key: slotKey,
+    };
+    if (isNonExecutableLookItemName(item.item_name)) {
+      item = repairLookItemNameFromEvidence(item, {
+        outfitBlueprint,
+        lookRequirementNames,
+      }).item;
+    }
+    item = {
+      ...item,
+      item_name: normalizeExecutableItemName(item.item_name),
+    };
+    if (isNonExecutableLookItemName(item.item_name) ||
+        containsInternalStrategyText(item.item_name) ||
+        hasMultipleExecutableItemCandidates(item.item_name)) {
+      throw new TypeError(
+        `Look ${lookId} 的 ${category} 缺少单一具体商品名称`,
+      );
+    }
+    if (usedSlotKeys.has(slotKey)) {
+      throw new TypeError(`Look item slot_key 重复：${slotKey}`);
+    }
+    usedSlotKeys.add(slotKey);
+    return item;
+  });
+}
+
+function isConcreteLookItemName(category, value) {
+  const itemName = readOptionalString(value);
+  if (isNonExecutableLookItemName(itemName)) return false;
+  const pattern = EXECUTABLE_ITEM_CATEGORY_PATTERNS[category];
+  return pattern ? pattern.test(itemName) : true;
+}
+
+function repairLookItemNameFromEvidence(
+  item,
+  {outfitBlueprint = {}, lookRequirementNames = {}} = {},
+) {
+  if (!isNonExecutableLookItemName(item?.item_name)) {
+    return {item, repaired: false};
+  }
+  const category = readOptionalString(item?.category).toLowerCase();
+  const blueprintNames = Array.isArray(
+    outfitBlueprint?.must_have_items?.[category],
+  ) ? outfitBlueprint.must_have_items[category] : [];
+  const lookNames = Array.isArray(lookRequirementNames?.[category])
+    ? lookRequirementNames[category]
+    : [];
+  const itemName = [...lookNames, ...blueprintNames]
+    .map(readOptionalString)
+    .find((candidate) => isConcreteLookItemName(category, candidate));
+  if (!itemName) return {item, repaired: false};
+
+  const audience = item.gender === "male"
+    ? "男士"
+    : item.gender === "female" ? "女士" : "";
+  const primaryKeyword = boundedSearchKeyword([
+    audience,
+    item.color,
+    item.material,
+    itemName,
+  ]);
+  const searchKeywords = [...new Set([
+    primaryKeyword,
+    ...(Array.isArray(item.search_keywords) ? item.search_keywords : [])
+      .filter((keyword) => readOptionalString(keyword).includes(itemName)),
+  ].map(readOptionalString).filter(Boolean))].slice(0, 3);
+  return {
+    item: {
+      ...item,
+      item_name: itemName,
+      search_keywords: searchKeywords,
+      query_reason: `从当前穿搭蓝图恢复具体${category}单品“${itemName}”`,
+      source_elements: [
+        itemName,
+        ...(Array.isArray(item.source_elements)
+          ? item.source_elements.filter((value) =>
+            !isNonExecutableLookItemName(value))
+          : []),
+      ],
+    },
+    repaired: true,
+  };
+}
 
 function buildRepairedCoreItem(
   category,
@@ -2024,6 +2248,201 @@ function createRepairedFallbackLook({
   return look;
 }
 
+const NATIVE_LOOK_STRUCTURES = Object.freeze(new Set([
+  "top_bottom_shoes",
+  "dress_shoes",
+  "outerwear_bottom_shoes",
+]));
+
+function nativeConstraintAlternatives(value) {
+  return [...new Set(readOptionalString(value)
+    .split(/\s*(?:或|或者|\/|、)\s*/u)
+    .map(readOptionalString)
+    .filter(Boolean))];
+}
+
+function nativeConstraintListsOverlap(expected, actual) {
+  const expectedTerms = nativeConstraintAlternatives(expected);
+  return actual.some((candidate) => {
+    const candidateTerms = nativeConstraintAlternatives(candidate);
+    return expectedTerms.some((expectedTerm) => candidateTerms.some(
+      (candidateTerm) => expectedTerm.includes(candidateTerm) ||
+        candidateTerm.includes(expectedTerm),
+    ));
+  });
+}
+
+function executableBodyConstraints(stylingStrategy = {}, category = "") {
+  const waist = readOptionalString(stylingStrategy.waistline_strategy);
+  const top = readOptionalString(stylingStrategy.top_length_strategy);
+  const bottom = readOptionalString(stylingStrategy.bottom_strategy);
+  const shoes = readOptionalString(stylingStrategy.shoe_strategy);
+  const silhouette = readOptionalString(stylingStrategy.silhouette_strategy);
+  const required = [];
+  const preferred = [];
+  const avoid = [];
+  if (category === "top" &&
+      /(?:短款|不过胯|上短下长|缩短上半身)/u.test(
+        `${top} ${waist} ${silhouette}`,
+      )) {
+    required.push("短款或不过胯");
+  }
+  if (["bottom", "dress"].includes(category) &&
+      /(?:高腰|提高腰线|抬高腰线)/u.test(`${waist} ${bottom} ${silhouette}`)) {
+    required.push("高腰");
+  }
+  if (category === "bottom") {
+    if (/九分/u.test(bottom)) preferred.push("九分");
+    if (/(?:垂坠|垂感|纵向)/u.test(`${bottom} ${silhouette}`)) {
+      preferred.push("纵向垂感");
+    }
+    if (/低腰/u.test(bottom)) avoid.push("低腰");
+    if (/拖地/u.test(bottom)) avoid.push("拖地");
+  }
+  if (category === "shoes") {
+    for (const attribute of ["浅口", "尖头", "低跟", "中低跟", "轻量增高"]) {
+      if (shoes.includes(attribute)) preferred.push(attribute);
+    }
+    for (const attribute of ["厚重高帮", "粗重厚底"]) {
+      if (shoes.includes(attribute)) avoid.push(attribute);
+    }
+  }
+  return {
+    required_attributes: [...new Set(required)],
+    preferred_attributes: [...new Set(preferred)],
+    avoid_attributes: [...new Set(avoid)],
+  };
+}
+
+function assertNativeBodyConstraints(item, stylingStrategy) {
+  const expected = executableBodyConstraints(stylingStrategy, item.category);
+  const actualRequired = Array.isArray(item.required_attributes)
+    ? item.required_attributes
+    : [];
+  const missingRequired = expected.required_attributes.filter(
+    (value) => !nativeConstraintListsOverlap(value, actualRequired),
+  );
+  if (missingRequired.length > 0) {
+    throw new Error(
+      `Native Look ${item.look_id} 的 ${item.category} 未声明 required_attributes：${missingRequired.join("、")}`,
+    );
+  }
+}
+
+function blueprintConstraintSources(outfitBlueprint = {}, category = "") {
+  const mustHave = outfitBlueprint.must_have_items ||
+    outfitBlueprint.mustHaveItems || {};
+  const values = Array.isArray(mustHave?.[category])
+    ? mustHave[category]
+    : mustHave?.[category] == null ? [] : [mustHave[category]];
+  return [...new Set(values.flatMap((value) => {
+    const text = value && typeof value === "object"
+      ? value.product_type || value.item_name || value.itemName || ""
+      : value;
+    return extractCanonicalAttributeValues(text);
+  }))].map((value) => ({
+    value,
+    level: "required",
+    source: "blueprint",
+  }));
+}
+
+function executableConstraintSources(
+  stylingStrategy = {},
+  outfitBlueprint = {},
+  category = "",
+) {
+  const body = executableBodyConstraints(stylingStrategy, category);
+  const bodySources = [
+    ...body.required_attributes.map((value) => ({
+      value,
+      level: "required",
+      source: "body_strategy",
+    })),
+    ...body.preferred_attributes.map((value) => ({
+      value,
+      level: "preferred",
+      source: "body_strategy",
+    })),
+    ...body.avoid_attributes.map((value) => ({
+      value,
+      level: "avoid",
+      source: "body_strategy",
+    })),
+    ...blueprintConstraintSources(outfitBlueprint, category),
+  ];
+  const seen = new Set();
+  return bodySources.filter((entry) => {
+    const key = `${entry.level}:${canonicalizeAttribute(entry.value)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function normalizeNativeLookDirection(rawDirection, lookId) {
+  if (!rawDirection || typeof rawDirection !== "object" ||
+      Array.isArray(rawDirection)) {
+    throw new Error(`Native Look ${lookId} 缺少结构化 look_direction`);
+  }
+  const name = readOptionalString(rawDirection.name);
+  const coreStructure = readOptionalString(
+    rawDirection.core_structure || rawDirection.coreStructure,
+  ).toLowerCase();
+  if (!name || !NATIVE_LOOK_STRUCTURES.has(coreStructure)) {
+    throw new Error(`Native Look ${lookId} 的 look_direction 结构无效`);
+  }
+  return {
+    name,
+    core_structure: coreStructure,
+    product_families: {},
+    silhouette: readOptionalString(rawDirection.silhouette),
+    waistline: readOptionalString(rawDirection.waistline),
+    length_strategy: readOptionalString(
+      rawDirection.length_strategy || rawDirection.lengthStrategy,
+    ),
+    shoe_shape: readOptionalString(
+      rawDirection.shoe_shape || rawDirection.shoeShape,
+    ),
+  };
+}
+
+function assertNativeLookDirection(lookDirection, items, lookId) {
+  const categories = new Set(items.map((item) => item.category));
+  const requiredByStructure = {
+    top_bottom_shoes: ["top", "bottom", "shoes"],
+    dress_shoes: ["dress", "shoes"],
+    outerwear_bottom_shoes: ["outerwear", "bottom", "shoes"],
+  }[lookDirection.core_structure];
+  if (!requiredByStructure.every((category) => categories.has(category))) {
+    throw new Error(`Native Look ${lookId} 与 look_direction 核心结构不一致`);
+  }
+  for (const item of items) {
+    const expectedFamily = lookDirection.product_families[item.category];
+    if (expectedFamily && expectedFamily !== item.product_family) {
+      throw new Error(
+        `Native Look ${lookId} 的 ${item.category} 与 look_direction 串位`,
+      );
+    }
+  }
+  for (const category of requiredByStructure) {
+    if (!lookDirection.product_families[category]) {
+      throw new Error(
+        `Native Look ${lookId} 的 look_direction 缺少 ${category} family`,
+      );
+    }
+  }
+}
+
+function nativeLookCoreSignature(items) {
+  return items
+    .filter((item) => ["top", "bottom", "dress", "outerwear", "shoes"]
+      .includes(item.category))
+    .map((item) => `${item.category}:${item.product_family}:${item.product_type}`)
+    .sort()
+    .join("|");
+}
+
 function repairAndValidateAiLooks({
   parsedLooks,
   analysisGender,
@@ -2034,21 +2453,45 @@ function repairAndValidateAiLooks({
   normalizeItem,
   styleProfile,
   styleSemantics,
+  outfitBlueprint,
+  nativeExecutableLookContract = false,
 }) {
   const looks = [];
   const usedStyleItemNames = new Set();
   let validLooks = 0;
   let repairedLooks = 0;
   let removedLooks = 0;
+  let warningCount = 0;
+  const nativeCoreSignatures = new Set();
+  const lookRequirementNames = {};
+  for (const rawLook of parsedLooks) {
+    const rawLookId = readOptionalString(rawLook?.look_id || rawLook?.lookId);
+    if (!rawLookId) continue;
+    lookRequirementNames[rawLookId] ||= {};
+    for (const rawItem of Array.isArray(rawLook?.items) ? rawLook.items : []) {
+      const category = normalizeProductCategory(
+        rawItem?.category || rawItem?.item_name || rawItem?.itemName,
+      );
+      const itemName = readOptionalString(rawItem?.item_name || rawItem?.itemName);
+      if (!category || !isConcreteLookItemName(category, itemName)) continue;
+      lookRequirementNames[rawLookId][category] ||= [];
+      if (!lookRequirementNames[rawLookId][category].includes(itemName)) {
+        lookRequirementNames[rawLookId][category].push(itemName);
+      }
+    }
+  }
 
   parsedLooks.forEach((rawLook, lookIndex) => {
     try {
       if (!rawLook || typeof rawLook !== "object" || Array.isArray(rawLook)) {
         throw new Error("Look 必须是对象");
       }
-      const lookId = readOptionalString(rawLook.look_id || rawLook.lookId);
+      const lookId = nativeExecutableLookContract
+        ? `look-${lookIndex + 1}`
+        : readOptionalString(rawLook.look_id || rawLook.lookId);
       if (!lookId) throw new Error("look_id 不能为空");
-      const explicitGender = Object.prototype.hasOwnProperty.call(rawLook, "gender");
+      const explicitGender = !nativeExecutableLookContract &&
+        Object.prototype.hasOwnProperty.call(rawLook, "gender");
       if (explicitGender && !isSupportedAiGender(rawLook.gender)) {
         throw new Error("gender 非法");
       }
@@ -2098,6 +2541,157 @@ function repairAndValidateAiLooks({
           styleProfile,
           styleSemantics,
         );
+      }
+
+      if (nativeExecutableLookContract) {
+        const lookDirection = normalizeNativeLookDirection(
+          rawLook.look_direction || rawLook.lookDirection,
+          lookId,
+        );
+        const lookWarnings = [];
+        const nativeItems = [];
+        rawLook.items.forEach((rawItem, itemIndex) => {
+          const category = categoryForSlotRole(
+            rawItem?.slot_role || rawItem?.slotRole || rawItem?.category,
+          );
+          if (!category) {
+            throw new Error(`Semantic Look ${lookId} item slot_role 非法`);
+          }
+          try {
+            const compiled = compileExecutableProductContract(rawItem, {
+              requestId: readOptionalString(context.requestId),
+              lookId,
+              category,
+              itemIndex,
+              gender: look.gender,
+              style: look.style,
+              scene: look.scene,
+              constraintSources: executableConstraintSources(
+                stylingStrategy,
+                outfitBlueprint,
+                category,
+              ),
+            });
+            assertNativeBodyConstraints(compiled, stylingStrategy);
+            const finalized = normalizeItem(compiled, itemIndex, look);
+            const verified = normalizeNativeExecutableProductContract({
+              ...finalized,
+              request_id: compiled.request_id,
+              look_id: compiled.look_id,
+              slot_key: compiled.slot_key,
+              product_type: compiled.product_type,
+              product_family: compiled.product_family,
+              item_name: compiled.item_name,
+              style_role: compiled.style_role,
+              fit: compiled.fit,
+              colors: compiled.colors,
+              materials: compiled.materials,
+              design_elements: compiled.design_elements,
+              required_attributes: compiled.required_attributes,
+              preferred_attributes: compiled.preferred_attributes,
+              avoid_attributes: compiled.avoid_attributes,
+              constraint_sources: compiled.constraint_sources,
+              required_attribute_constraints:
+                compiled.required_attribute_constraints,
+              missing_required_attributes: compiled.missing_required_attributes,
+              missing_preferred_attributes: compiled.missing_preferred_attributes,
+              preferred_match_score: compiled.preferred_match_score,
+              warnings: compiled.warnings,
+            }, {
+              expectedRequestId: readOptionalString(context.requestId),
+              expectedLookId: lookId,
+              expectedCategory: category,
+            }).contract;
+            lookWarnings.push(...verified.warnings);
+            nativeItems.push({
+              ...finalized,
+              ...verified,
+              search_keywords: finalized.search_keywords,
+              negative_keywords: finalized.negative_keywords,
+              query_reason: finalized.query_reason,
+              source_elements: finalized.source_elements,
+              translated_queries: finalized.translated_queries,
+            });
+          } catch (error) {
+            if (["bag", "hat", "accessory"].includes(category)) {
+              lookWarnings.push(`${category} 配饰项已忽略：${error.message}`);
+              return;
+            }
+            throw error;
+          }
+        });
+        lookDirection.product_families = Object.fromEntries(nativeItems.map(
+          (item) => [item.category, item.product_family],
+        ));
+        const nativeCategories = new Set(nativeItems.map((item) => item.category));
+        if (!isValidLookComposition(nativeCategories, look.gender) ||
+            !nativeCategories.has("shoes")) {
+          throw new Error(`Native Look ${lookId} 缺少完整核心组合`);
+        }
+        assertNativeLookDirection(lookDirection, nativeItems, lookId);
+        const signature = nativeLookCoreSignature(nativeItems);
+        if (!signature || nativeCoreSignatures.has(signature)) {
+          throw new Error(`Native Look ${lookId} 与已有 Look 核心组合重复`);
+        }
+        nativeCoreSignatures.add(signature);
+        let decisions = [];
+        const hasDecisions = Object.prototype.hasOwnProperty.call(
+          rawLook,
+          "accessories_decision",
+        ) || Object.prototype.hasOwnProperty.call(rawLook, "accessoriesDecision");
+        if (hasDecisions) {
+          decisions = normalizeAccessoriesDecision(
+            rawLook.accessories_decision || rawLook.accessoriesDecision,
+            lookIndex,
+          );
+          lookWarnings.push(...(decisions.warnings || []));
+        }
+        const finalStyleScore = nativeItems.length > 0
+          ? nativeItems.reduce((sum, item) => sum + (
+            Number.isFinite(Number(item.style_match_score))
+              ? Number(item.style_match_score)
+              : styleMatchScore({
+                evidence: [
+                  item.product_type,
+                  item.style_role,
+                  item.fit,
+                  ...item.design_elements,
+                ].join(" "),
+                relevanceScore: 65,
+                styleProfile,
+                styleSemantics,
+              })
+          ), 0) / nativeItems.length
+          : 0;
+        if (shouldEnforceCanonicalStyle(styleProfile, styleSemantics) &&
+            nativeItems.some((item) => hasStyleViolation([
+              item.product_type,
+              item.style_role,
+              item.fit,
+              ...item.design_elements,
+            ].join(" "), styleProfile, styleSemantics))) {
+          throw new Error("高优先级风格意图未通过 Native Look 硬门槛");
+        }
+        looks.push({
+          ...look,
+          look_direction: lookDirection,
+          accessories_decision: decisions,
+          accessory_warning: lookWarnings.filter((warning) =>
+            /accessor|配饰|accessories_decision|\b(?:bag|hat|accessory)\b/iu
+              .test(warning)),
+          warnings: [...new Set(lookWarnings)],
+          items: nativeItems,
+          style_match_score: finalStyleScore,
+          intent_score: lookIntentScore({
+            styleMatch: finalStyleScore,
+            bodyMatch: stylingStrategy.visual_goals.length > 0 ? 85 : 65,
+            sceneMatch: look.scene ? 85 : 65,
+            weatherMatch: 70,
+          }),
+        });
+        warningCount += new Set(lookWarnings).size;
+        validLooks += 1;
+        return;
       }
 
       let repaired = false;
@@ -2164,24 +2758,30 @@ function repairAndValidateAiLooks({
       );
       if (!finalCoreRepair) throw new Error("缺少可修复的核心穿搭单品");
       const finalItems = finalCoreRepair.items.map((item) => {
+        const nameRepair = repairLookItemNameFromEvidence(item, {
+          outfitBlueprint,
+          lookRequirementNames: lookRequirementNames[look.look_id] || {},
+        });
+        repaired ||= nameRepair.repaired;
+        const repairedItem = nameRepair.item;
         const searchKeywords = ensureStyleAnchoredSearchKeywords(
-          item.search_keywords,
+          repairedItem.search_keywords,
           styleProfile,
           styleSemantics,
         );
-        if (Number.isFinite(Number(item.style_match_score))) {
-          return {...item, search_keywords: searchKeywords};
+        if (Number.isFinite(Number(repairedItem.style_match_score))) {
+          return {...repairedItem, search_keywords: searchKeywords};
         }
         const evidence = [
-          item.item_name,
-          item.style,
-          item.color,
-          item.fit,
-          item.material,
+          repairedItem.item_name,
+          repairedItem.style,
+          repairedItem.color,
+          repairedItem.fit,
+          repairedItem.material,
           ...searchKeywords,
         ].filter(Boolean).join(" ");
         return {
-          ...item,
+          ...repairedItem,
           search_keywords: searchKeywords,
           style_match_score: styleMatchScore({
             evidence,
@@ -2220,13 +2820,20 @@ function repairAndValidateAiLooks({
       });
       if (repaired) repairedLooks += 1;
       else validLooks += 1;
-    } catch {
+    } catch (error) {
+      if (nativeExecutableLookContract) {
+        console.warn("native_executable_look_rejected", {
+          requestId: readOptionalString(context.requestId),
+          lookId: `look-${lookIndex + 1}`,
+          reason: error.message,
+        });
+      }
       removedLooks += 1;
     }
   });
 
   let fallbackUsed = false;
-  if (looks.length === 0) {
+  if (looks.length === 0 && !nativeExecutableLookContract) {
     looks.push(createRepairedFallbackLook({
       lookIndex: 0,
       gender: analysisGender,
@@ -2251,6 +2858,12 @@ function repairAndValidateAiLooks({
       repaired_looks: repairedLooks,
       removed_looks: removedLooks,
       fallback_used: fallbackUsed,
+      look_quality_summary: {
+        generated: parsedLooks.length,
+        usable: looks.length,
+        dropped: removedLooks,
+        warnings: warningCount,
+      },
     },
   };
 }
@@ -2313,34 +2926,45 @@ function accessoryTypeForItem(item) {
 }
 
 function normalizeAccessoriesDecision(value, lookIndex) {
-  if (value == null) return [];
+  const normalizedDecisions = [];
+  const warnings = [];
+  Object.defineProperty(normalizedDecisions, "warnings", {
+    value: warnings,
+    enumerable: false,
+  });
+  if (value == null) return normalizedDecisions;
   if (!Array.isArray(value)) {
-    throw new Error(`AI 返回 looks[${lookIndex}].accessories_decision 必须是数组`);
+    warnings.push(`looks[${lookIndex}].accessories_decision 非数组，已忽略`);
+    return normalizedDecisions;
   }
   const seen = new Set();
-  const normalizedDecisions = [];
   value.forEach((decision, decisionIndex) => {
     if (!decision || typeof decision !== "object" || Array.isArray(decision)) {
-      throw new Error(
-        `AI 返回 looks[${lookIndex}].accessories_decision[${decisionIndex}] 必须是对象`,
+      warnings.push(
+        `looks[${lookIndex}].accessories_decision[${decisionIndex}] 非对象，已忽略`,
       );
+      return;
     }
     const category = normalizeAccessoryDecisionCategory(decision.category);
     if (!category) {
-      throw new Error(
-        `AI 返回 looks[${lookIndex}].accessories_decision 存在无效 category`,
+      warnings.push(
+        `looks[${lookIndex}].accessories_decision[${decisionIndex}] category 无效，已忽略`,
       );
+      return;
     }
     if (seen.has(category)) return;
     if (typeof decision.include !== "boolean") {
-      throw new Error(
-        `AI 返回 looks[${lookIndex}].accessories_decision[${decisionIndex}].include 必须是布尔值`,
+      warnings.push(
+        `looks[${lookIndex}].accessories_decision[${decisionIndex}].include 无效，已忽略`,
       );
+      return;
     }
-    const reason = readOptionalString(decision.reason);
-    if (!reason) {
-      throw new Error(
-        `AI 返回 looks[${lookIndex}].accessories_decision[${decisionIndex}].reason 不能为空`,
+    const reason = readOptionalString(decision.reason) || (decision.include
+      ? "该配饰有助于提升整体造型完成度"
+      : "当前造型无需额外加入该配饰");
+    if (!readOptionalString(decision.reason)) {
+      warnings.push(
+        `looks[${lookIndex}].accessories_decision[${decisionIndex}].reason 已使用安全默认值`,
       );
     }
     seen.add(category);
@@ -2375,7 +2999,9 @@ function buildAccessoryRequirement(accessoryType, items, lookIndex) {
     ? defaults.femaleNames
     : defaults.names;
   const requirement = normalizeProductRequirement({
+    request_id: context.request_id,
     look_id: context.look_id,
+    slot_key: `${context.request_id || "request-unspecified"}:${context.look_id || `look-${lookIndex + 1}`}:${defaults.category}:${accessoryType}`,
     category: defaults.category,
     search_subcategory: accessoryType,
     gender,
@@ -2732,9 +3358,16 @@ function createBasicFallbackOutfitAnalysis(
     const lookNumber = Number(/(\d+)$/.exec(String(look.look_id || ""))?.[1]);
     const blueprintVariantIndex = index +
       (Number.isFinite(lookNumber) ? Math.max(0, lookNumber - 1) : 0);
+    const requestId = readOptionalString(outfitRequest.requestId) ||
+      "outfit-fallback";
+    const category = normalizeProductCategory(
+      product.category || product.item_name || product.itemName,
+    );
     const initialRequirement = normalizeProductRequirement({
       ...product,
+      request_id: requestId,
       look_id: look.look_id,
+      slot_key: `${requestId}:${look.look_id}:${category || "item"}:${index}`,
       gender: look.gender,
       item_name: product.item_name || product.itemName || product.keyword,
       search_keywords: product.search_keywords ||
@@ -2849,6 +3482,9 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
     }
     const lookId = readOptionalString(look.look_id || look.lookId) ||
       `look-${lookIndex + 1}`;
+    const requestId = readOptionalString(
+      look.request_id || look.requestId || outfitRequest.requestId,
+    ) || "outfit-analysis";
     const hasAccessoryDecision = Object.prototype.hasOwnProperty.call(
       look,
       "accessories_decision",
@@ -2858,9 +3494,15 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
       lookIndex,
     );
     const normalizedItems = (Array.isArray(look.items) ? look.items : []).map((product, itemIndex) => {
+      const category = normalizeProductCategory(
+        product.category || product.item_name || product.itemName,
+      );
       const initialRequirement = normalizeProductRequirement({
         ...product,
+        request_id: requestId,
         look_id: lookId,
+        slot_key: readOptionalString(product.slot_key || product.slotKey) ||
+          `${requestId}:${lookId}:${category || "item"}:${itemIndex}`,
         gender: lookGender,
       }, {
         gender: lookGender,
@@ -2893,7 +3535,7 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
       accessory_type: item.accessory_type || accessoryTypeForItem(item),
     }));
     return {
-      request_id: readOptionalString(look.request_id || look.requestId || outfitRequest.requestId),
+      request_id: requestId,
       look_id: lookId,
       gender: lookGender,
       scene: readOptionalString(look.scene) || readOptionalString(outfitRequest.scene),
@@ -2903,6 +3545,9 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
         lookIndex,
         usedStyleDirections,
       ),
+      ...(look.look_direction || look.lookDirection
+        ? {look_direction: look.look_direction || look.lookDirection}
+        : {}),
       styling_goal: readOptionalString(
         look.styling_goal || look.stylingGoal,
       ),
@@ -3711,9 +4356,18 @@ function productRecommendationRequest(input = {}, requestId = "") {
         if (!item || typeof item !== "object" || Array.isArray(item)) {
           throw new TypeError(`looks[${lookIndex}].items[${itemIndex}] must be an object`);
         }
+        const category = normalizeProductCategory(
+          item.category || item.item_name || item.itemName,
+        );
+        const itemRequestId = readOptionalString(
+          item.request_id || item.requestId || filters.requestId,
+        ) || "product-request";
         const initialRequirement = normalizeProductRequirement({
           ...item,
+          request_id: itemRequestId,
           look_id: lookId,
+          slot_key: readOptionalString(item.slot_key || item.slotKey) ||
+            `${itemRequestId}:${lookId}:${category || "item"}:${itemIndex}`,
           gender: Object.prototype.hasOwnProperty.call(item, "gender")
             ? item.gender
             : lookGender,
@@ -3790,8 +4444,21 @@ function productRecommendationRequest(input = {}, requestId = "") {
     if (!item || typeof item !== "object" || Array.isArray(item)) {
       throw new TypeError(`items[${index}] must be an object`);
     }
+    const category = normalizeProductCategory(
+      item.category || item.item_name || item.itemName,
+    );
+    const requestId = readOptionalString(
+      item.request_id || item.requestId || filters.requestId,
+    ) || "product-request";
+    const lookId = readOptionalString(item.look_id || item.lookId) || "look-1";
     const requirement = finalizeBlueprintSearchRequirement(
-      normalizeProductRequirement(item, filters),
+      normalizeProductRequirement({
+        ...item,
+        request_id: requestId,
+        look_id: lookId,
+        slot_key: readOptionalString(item.slot_key || item.slotKey) ||
+          `${requestId}:${lookId}:${category || "item"}:${index}`,
+      }, filters),
       outfitBlueprint,
       index,
       {preserveExistingKeywords: true},
@@ -4159,6 +4826,616 @@ function intentPhaseFromCachedInterpretation(value, sourceText = "") {
   });
 }
 
+function normalizeKnowledgeSources(value) {
+  if (!Array.isArray(value)) return Object.freeze([]);
+  return Object.freeze(value.flatMap((source) => {
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
+      return [];
+    }
+    const type = readOptionalString(source.type);
+    const id = readOptionalString(source.id);
+    const name = readOptionalString(source.name);
+    if (!type || !id || !name) return [];
+    const score = Number(source.score);
+    return [Object.freeze({
+      type,
+      id,
+      name,
+      ...(Number.isFinite(score) ? {score} : {}),
+    })];
+  }));
+}
+
+function attachKnowledgeSourcesToBlueprint(blueprint, knowledgeSources) {
+  return Object.freeze({
+    ...blueprint,
+    knowledge_sources: normalizeKnowledgeSources(knowledgeSources),
+  });
+}
+
+const GENERIC_BLUEPRINT_ITEM_PATTERNS = Object.freeze([
+  /^(?:合身上衣|简单单鞋|普通下装|经典款式|基础上衣|基础下装|基础鞋履)$/u,
+  /(?:作为整体造型的核心单品|提供.+视觉焦点|与.+形成和谐|整体造型的核心|和谐的色彩搭配)/u,
+]);
+
+function isGenericBlueprintItem(value) {
+  const text = readOptionalString(value);
+  return !text || GENERIC_BLUEPRINT_ITEM_PATTERNS.some((pattern) =>
+    pattern.test(text));
+}
+
+function knowledgeStringList(value) {
+  if (Array.isArray(value)) {
+    return [...new Set(value.flatMap(knowledgeStringList))];
+  }
+  const text = readOptionalString(value);
+  return text ? [text] : [];
+}
+
+function relevantFashionKnowledge(knowledgeContext) {
+  const context = knowledgeContext && typeof knowledgeContext === "object" &&
+      !Array.isArray(knowledgeContext)
+    ? knowledgeContext
+    : {};
+  const knowledge = Array.isArray(context.knowledge) ? context.knowledge : [];
+  const sources = normalizeKnowledgeSources(context.knowledge_sources);
+  const entries = knowledge.flatMap((record, index) => {
+    if (!record || typeof record !== "object" || Array.isArray(record)) return [];
+    const source = sources[index];
+    return source ? [{record, source}] : [];
+  });
+  const bestByType = new Map();
+  for (const {source} of entries) {
+    const score = Number(source.score);
+    const current = bestByType.get(source.type);
+    if (!current || (Number.isFinite(score) && score > current)) {
+      bestByType.set(source.type, Number.isFinite(score) ? score : 0);
+    }
+  }
+  return entries.filter(({source}) => {
+    const score = Number(source.score);
+    const best = bestByType.get(source.type) || 0;
+    if (!Number.isFinite(score)) return true;
+    if (score === best) return true;
+    return score >= Math.max(18, best * 0.25);
+  });
+}
+
+function appendKnowledgeItem(collected, value) {
+  for (const itemName of knowledgeStringList(value)) {
+    const category = normalizeProductCategory(itemName);
+    if (!category || !Object.prototype.hasOwnProperty.call(collected, category)) {
+      continue;
+    }
+    collected[category].push(itemName);
+  }
+}
+
+function preserveFashionBrainKnowledge(blueprint, knowledgeContext, options = {}) {
+  const entries = relevantFashionKnowledge(knowledgeContext);
+  if (entries.length === 0) return blueprint;
+
+  const coreElements = [...blueprint.core_elements];
+  const silhouettes = [...blueprint.silhouette_strategy];
+  const colors = [...blueprint.color_palette];
+  const materials = [...blueprint.material_direction];
+  const avoidItems = [...blueprint.avoid_items];
+  const mustHaveItems = Object.fromEntries(Object.entries(
+    blueprint.must_have_items,
+  ).map(([category, items]) => [category, [...items]]));
+
+  for (const {record, source} of entries) {
+    if (source.type === "style_reference") {
+      coreElements.push(
+        ...knowledgeStringList(record.visual_identity),
+        ...knowledgeStringList(record.preferred_materials),
+        ...knowledgeStringList(record.preferred_items),
+        ...knowledgeStringList(record.preferred_shoes),
+      );
+      silhouettes.push(...knowledgeStringList(record.silhouette_preferences));
+      colors.push(...knowledgeStringList(record.preferred_colors));
+      materials.push(...knowledgeStringList(record.preferred_materials));
+      avoidItems.push(...knowledgeStringList(record.avoid_elements));
+      for (const item of [
+        record.preferred_items,
+        record.preferred_shoes,
+        record.preferred_accessories,
+      ]) {
+        knowledgeStringList(item).forEach((value) =>
+          appendKnowledgeItem(mustHaveItems, value));
+      }
+    } else if (source.type === "item_reference") {
+      const itemName = record.item_name || record.itemName || record.name;
+      coreElements.push(...knowledgeStringList(itemName));
+      appendKnowledgeItem(mustHaveItems, itemName);
+      materials.push(...knowledgeStringList(record.material_preferences));
+      silhouettes.push(
+        ...knowledgeStringList(record.silhouette_effect),
+        ...knowledgeStringList(record.body_effect),
+      );
+    } else if (source.type === "material_reference") {
+      const material = record.material || record.name;
+      coreElements.push(...knowledgeStringList(material));
+      materials.push(...knowledgeStringList(material));
+    } else if (source.type === "body_reference") {
+      silhouettes.push(
+        ...knowledgeStringList(record.visual_goal),
+        ...knowledgeStringList(record.recommended_strategy),
+      );
+      knowledgeStringList(record.recommended_items).forEach((value) =>
+        appendKnowledgeItem(mustHaveItems, value));
+      avoidItems.push(...knowledgeStringList(record.avoid_items));
+    }
+  }
+
+  for (const [category, values] of Object.entries(mustHaveItems)) {
+    const concreteKnowledge = values.filter((value) =>
+      !isGenericBlueprintItem(value));
+    mustHaveItems[category] = concreteKnowledge.length > 0
+      ? concreteKnowledge
+      : values;
+  }
+
+  const repaired = normalizeOutfitBlueprint({
+    ...blueprint,
+    core_elements: coreElements,
+    silhouette_strategy: silhouettes,
+    color_palette: colors,
+    material_direction: materials,
+    must_have_items: mustHaveItems,
+    avoid_items: avoidItems,
+  }, options);
+  const preservedEvidence = JSON.stringify({
+    core_elements: repaired.core_elements,
+    silhouette_strategy: repaired.silhouette_strategy,
+    color_palette: repaired.color_palette,
+    material_direction: repaired.material_direction,
+    must_have_items: repaired.must_have_items,
+    avoid_items: repaired.avoid_items,
+  });
+  const requiredSources = entries.filter(({source}) =>
+    source.type === "style_reference" || source.type === "item_reference");
+  const preservedSources = requiredSources.filter(({record}) =>
+    knowledgeStringList([
+      record.item_name,
+      record.visual_identity,
+      record.preferred_items,
+      record.preferred_shoes,
+      record.preferred_materials,
+    ]).some((value) => preservedEvidence.includes(value)));
+  if (requiredSources.length > 0 && preservedSources.length === 0) {
+    throw new Error("AI Blueprint 未保留 Fashion Brain 核心知识");
+  }
+  return repaired;
+}
+
+function fashionBrainQueryParts(value, output = []) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => fashionBrainQueryParts(item, output));
+  } else if (typeof value === "string" && value.trim()) {
+    output.push(value.trim());
+  }
+  return output;
+}
+
+function removeAvoidedQueryTerms(value, avoidTerms) {
+  let result = readOptionalString(value);
+  for (const term of fashionBrainQueryParts(avoidTerms)) {
+    result = result.split(term).join(" ");
+  }
+  return result;
+}
+
+function buildFashionBrainContext({
+  brain = fashionBrain,
+  sourceText,
+  intentPhase,
+  outfitRequest,
+  requestId,
+  logger = console,
+}) {
+  const semanticIntent = intentPhase?.semantic_intent || {};
+  const styleProfile = intentPhase?.style_profile || {};
+  const avoidTerms = [
+    ...fashionBrainQueryParts(semanticIntent.must_avoid),
+    ...fashionBrainQueryParts(styleProfile.must_avoid),
+    ...fashionBrainQueryParts(styleProfile.negative_keywords),
+  ];
+  const query = [
+    removeAvoidedQueryTerms(sourceText, avoidTerms),
+    ...fashionBrainQueryParts(semanticIntent.identity_impression),
+    ...fashionBrainQueryParts(semanticIntent.emotional_tone),
+    ...fashionBrainQueryParts(semanticIntent.style_direction),
+    ...fashionBrainQueryParts(semanticIntent.must_express),
+    ...fashionBrainQueryParts(styleProfile.interpretation),
+    ...fashionBrainQueryParts(styleProfile.primary_style),
+    ...fashionBrainQueryParts(styleProfile.secondary_styles),
+    ...fashionBrainQueryParts(styleProfile.silhouette),
+    ...fashionBrainQueryParts(styleProfile.preferred_items),
+    ...fashionBrainQueryParts(styleProfile.preferred_colors),
+    ...fashionBrainQueryParts(styleProfile.preferred_materials),
+    ...fashionBrainQueryParts(styleProfile.must_have),
+    ...fashionBrainQueryParts(styleProfile.positive_keywords),
+    ...fashionBrainQueryParts(outfitRequest?.scene),
+    ...(Number.isFinite(Number(outfitRequest?.height))
+      ? [`${Number(outfitRequest.height)}cm`]
+      : []),
+  ].filter(Boolean).join(" ");
+  const generalContext = brain.retrieve(query);
+  // Body facts must come from explicit user/body evidence, not from desired
+  // effects such as "延长腿线", which could otherwise match the opposite
+  // "腿长" rule. Style/item retrieval still uses the full semantic intent.
+  const bodyQuery = [
+    removeAvoidedQueryTerms(sourceText, avoidTerms),
+    ...(Number.isFinite(Number(outfitRequest?.height))
+      ? [`${Number(outfitRequest.height)}cm`]
+      : []),
+  ].filter(Boolean).join(" ");
+  const bodyContext = brain.retrieve(bodyQuery);
+  const nonBodyMatches = Object.values(KNOWLEDGE_KINDS)
+    .filter((kind) => kind !== KNOWLEDGE_KINDS.BODY)
+    .flatMap((kind) => generalContext.ofKind(kind));
+  const context = new FashionContext(
+    query,
+    [...nonBodyMatches, ...bodyContext.ofKind(KNOWLEDGE_KINDS.BODY)],
+    {
+      ...(generalContext.semanticSignals || {}),
+      ...(bodyContext.semanticSignals || {}),
+    },
+  );
+  const hitNames = (kind) => context.ofKind(kind)
+    .map((match) => match.record.name);
+  const summary = Object.freeze({
+    style_hits: Object.freeze(hitNames(KNOWLEDGE_KINDS.STYLE)),
+    item_hits: Object.freeze(hitNames(KNOWLEDGE_KINDS.ITEM)),
+    body_hits: Object.freeze(hitNames(KNOWLEDGE_KINDS.BODY)),
+    occasion_hits: Object.freeze(hitNames(KNOWLEDGE_KINDS.OCCASION)),
+  });
+  logger.info("fashion_brain_context", {
+    requestId,
+    ...summary,
+  });
+  return Object.freeze({
+    knowledge_context: Object.freeze(context.knowledgeContext),
+    knowledge_sources: normalizeKnowledgeSources(context.knowledgeSources),
+    summary,
+  });
+}
+
+function styleFactsFromBlueprint(blueprint, compactProfile, sourceText) {
+  const itemNames = Object.values(blueprint.must_have_items || {})
+    .flatMap((items) => Array.isArray(items) ? items : [])
+    .map(readOptionalString)
+    .filter(Boolean);
+  const express = [...new Set([
+    ...(blueprint.visual_keywords || []),
+    ...(blueprint.core_elements || []),
+    ...itemNames,
+  ].map(readOptionalString).filter(Boolean))];
+  const avoid = [...new Set((blueprint.avoid_items || [])
+    .map(readOptionalString)
+    .filter(Boolean))];
+  const styleSemantics = normalizeStyleSemantics({
+    identity_impression: [
+      blueprint.style_identity,
+      blueprint.character_impression,
+    ],
+    emotional_tone: blueprint.visual_keywords,
+    visual_personality: [
+      ...(blueprint.core_elements || []),
+      ...(blueprint.silhouette_strategy || []),
+    ],
+    social_signal: [
+      blueprint.character_impression,
+      blueprint.occasion_strategy,
+    ],
+    must_express: express,
+    must_avoid: avoid,
+    style_atoms: [
+      ...(blueprint.core_elements || []),
+      ...(blueprint.material_direction || []),
+      ...(blueprint.silhouette_strategy || []),
+    ],
+    confidence: 0.9,
+    interpretation_summary:
+      blueprint.character_impression || blueprint.style_identity,
+  });
+  const styleProfile = normalizeStyleProfile({
+    ...(compactProfile && typeof compactProfile === "object"
+      ? compactProfile
+      : {}),
+    source_text: sourceText,
+    interpretation:
+      blueprint.character_impression || blueprint.style_identity,
+    primary_style: blueprint.style_identity,
+    secondary_styles: blueprint.visual_keywords,
+    blend_rationale: blueprint.occasion_strategy,
+    silhouette: (blueprint.silhouette_strategy || []).join("；"),
+    preferred_items: itemNames,
+    preferred_colors: blueprint.color_palette,
+    preferred_materials: blueprint.material_direction,
+    must_have: express,
+    must_avoid: avoid,
+    positive_keywords: express,
+    negative_keywords: avoid,
+  }, {sourceText});
+  return {styleSemantics, styleProfile};
+}
+
+const GENERIC_BLUEPRINT_REPAIR_ITEM = /^(?:上衣|下装|鞋履|服装|合身上衣|简单单鞋|普通下装|经典单品)$/u;
+
+function blueprintPreservationCounts(blueprint = {}) {
+  const items = blueprint.must_have_items || {};
+  return Object.freeze({
+    top: items.top?.length || 0,
+    bottom: items.bottom?.length || 0,
+    dress: items.dress?.length || 0,
+    shoes: items.shoes?.length || 0,
+    accessory: items.accessory?.length || 0,
+  });
+}
+
+function collectBlueprintKnowledgeStrings(...values) {
+  const collected = [];
+  const visit = (value) => {
+    if (typeof value === "string") {
+      const text = value.trim();
+      if (text) collected.push(text);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    for (const [key, nested] of Object.entries(value)) {
+      if (["category", "type", "item_category", "itemCategory"].includes(key)) {
+        continue;
+      }
+      visit(nested);
+    }
+  };
+  values.forEach(visit);
+  return [...new Set(collected)];
+}
+
+function preserveBlueprintKnowledge(outfitBlueprint, {
+  rawOutfitBlueprint,
+  styleProfile = {},
+  styleSemantics = {},
+  knowledgeContext = {},
+} = {}) {
+  const normalized = normalizeOutfitBlueprint(outfitBlueprint, {
+    styleProfile,
+    styleSemantics,
+    defaultSource: "ai_generated",
+  });
+  const rawCounts = blueprintPreservationCounts(normalized);
+  if (blueprintHasCoreItems(normalized)) {
+    return Object.freeze({
+      blueprint: normalized,
+      summary: Object.freeze({
+        raw_counts: rawCounts,
+        knowledge_repair_used: false,
+        repaired_categories: Object.freeze([]),
+        final_counts: rawCounts,
+        validation_passed: true,
+      }),
+    });
+  }
+  const collected = Object.fromEntries(Object.entries(
+    normalized.must_have_items,
+  ).map(([category, items]) => [category, [...items]]));
+  const repairedCategories = [];
+  const addItem = (category, itemName) => {
+    const text = readOptionalString(itemName);
+    if (!text || GENERIC_BLUEPRINT_REPAIR_ITEM.test(text) ||
+        !Object.prototype.hasOwnProperty.call(collected, category) ||
+        collected[category].includes(text)) {
+      return false;
+    }
+    collected[category].push(text);
+    if (!repairedCategories.includes(category)) repairedCategories.push(category);
+    return true;
+  };
+
+  const knowledgeStrings = collectBlueprintKnowledgeStrings(
+    rawOutfitBlueprint?.must_have_items || rawOutfitBlueprint?.mustHaveItems,
+    rawOutfitBlueprint?.preferred_items || rawOutfitBlueprint?.preferredItems,
+    normalized.core_elements,
+    normalized.material_direction,
+    normalized.silhouette_strategy,
+    styleProfile.preferred_items,
+    styleProfile.must_have,
+    styleSemantics.must_express,
+    styleSemantics.style_atoms,
+    knowledgeContext,
+  );
+  for (const itemName of knowledgeStrings) {
+    const category = normalizeProductCategory(itemName);
+    if (["top", "bottom", "dress", "shoes", "outerwear"].includes(category) &&
+        collected[category]?.length === 0) {
+      addItem(category, itemName);
+    }
+  }
+
+  const concrete = (values) => [...new Set((Array.isArray(values) ? values : [])
+    .map(readOptionalString)
+    .filter((value) => value && !GENERIC_BLUEPRINT_REPAIR_ITEM.test(value)))];
+  const materials = concrete([
+    ...(normalized.material_direction || []),
+    ...(Array.isArray(styleProfile.preferred_materials)
+      ? styleProfile.preferred_materials
+      : []),
+  ]);
+  const designEvidence = concrete([
+    ...(normalized.core_elements || []),
+    ...(normalized.silhouette_strategy || []),
+    ...(Array.isArray(styleSemantics.must_express)
+      ? styleSemantics.must_express
+      : []),
+    ...knowledgeStrings,
+  ]).filter((value) => !normalizeProductCategory(value));
+  const material = materials[0] || "";
+  const structure = designEvidence.find((value) =>
+    /结构|利落|剪裁|垂坠|修身|收腰|蝴蝶结|荷叶边/u.test(value)) || "";
+  const waistEvidence = designEvidence.find((value) => /高腰|腰线|收腰/u.test(value)) || "";
+
+  if (collected.top.length === 0 && material && structure) {
+    const topType = /结构|利落|剪裁|垂坠/u.test(structure) ? "衬衫" : "上衣";
+    addItem("top", `${material}${structure}${topType}`);
+  }
+  if (collected.bottom.length === 0 && waistEvidence && structure) {
+    const waist = /高腰/u.test(waistEvidence) ? "高腰" : "高腰线";
+    addItem("bottom", `${waist}${structure}西装裤`);
+  }
+
+  const repaired = normalizeOutfitBlueprint({
+    ...normalized,
+    must_have_items: collected,
+  }, {
+    styleProfile,
+    styleSemantics,
+    defaultSource: "ai_generated",
+  });
+  const validationPassed = blueprintHasCoreItems(repaired);
+  return Object.freeze({
+    blueprint: repaired,
+    summary: Object.freeze({
+      raw_counts: rawCounts,
+      knowledge_repair_used: repairedCategories.length > 0,
+      repaired_categories: Object.freeze(repairedCategories),
+      final_counts: blueprintPreservationCounts(repaired),
+      validation_passed: validationPassed,
+    }),
+  });
+}
+
+function normalizeIntentList(value, field) {
+  const values = [...new Set((Array.isArray(value) ? value : [])
+    .map(readOptionalString)
+    .filter(Boolean))].slice(0, 12);
+  if (values.length === 0) {
+    throw new Error(`AI Intent 缺少 ${field}`);
+  }
+  return Object.freeze(values);
+}
+
+function buildIntentPhaseResult({
+  semanticIntent,
+  styleProfile,
+  sourceText = "",
+}) {
+  const identityImpression = normalizeIntentList(
+    semanticIntent?.identity_impression || semanticIntent?.identityImpression,
+    "identity_impression",
+  );
+  const emotionalTone = normalizeIntentList(
+    semanticIntent?.emotional_tone || semanticIntent?.emotionalTone,
+    "emotional_tone",
+  );
+  const styleDirection = readOptionalString(
+    semanticIntent?.style_direction || semanticIntent?.styleDirection,
+  );
+  if (!styleDirection) throw new Error("AI Intent 缺少 style_direction");
+  const mustExpress = normalizeIntentList(
+    semanticIntent?.must_express || semanticIntent?.mustExpress,
+    "must_express",
+  );
+  const mustAvoid = normalizeIntentList(
+    semanticIntent?.must_avoid || semanticIntent?.mustAvoid,
+    "must_avoid",
+  );
+  const normalizedIntent = Object.freeze({
+    identity_impression: identityImpression,
+    emotional_tone: emotionalTone,
+    style_direction: styleDirection,
+    must_express: mustExpress,
+    must_avoid: mustAvoid,
+  });
+  const styleSemantics = normalizeStyleSemantics({
+    identity_impression: identityImpression,
+    emotional_tone: emotionalTone,
+    visual_personality: [styleDirection],
+    social_signal: identityImpression,
+    must_express: mustExpress,
+    must_avoid: mustAvoid,
+    style_atoms: [...mustExpress, styleDirection],
+    confidence: 0.9,
+    interpretation_summary: styleDirection,
+  });
+  const profileSource = styleProfile && typeof styleProfile === "object"
+    ? styleProfile
+    : {};
+  const normalizedProfile = normalizeStyleProfile({
+    ...profileSource,
+    source_text: sourceText,
+    interpretation: readOptionalString(profileSource.interpretation) ||
+      styleDirection,
+    primary_style: readOptionalString(
+      profileSource.primary_style || profileSource.primaryStyle,
+    ) || styleDirection,
+    secondary_styles: profileSource.secondary_styles ||
+      profileSource.secondaryStyles || emotionalTone,
+    blend_rationale: readOptionalString(
+      profileSource.blend_rationale || profileSource.blendRationale,
+    ) || styleDirection,
+    silhouette: readOptionalString(profileSource.silhouette) || styleDirection,
+    preferred_items: profileSource.preferred_items ||
+      profileSource.preferredItems || mustExpress,
+    must_have: profileSource.must_have || profileSource.mustHave || mustExpress,
+    must_avoid: profileSource.must_avoid || profileSource.mustAvoid || mustAvoid,
+    positive_keywords: profileSource.positive_keywords ||
+      profileSource.positiveKeywords || mustExpress,
+    negative_keywords: profileSource.negative_keywords ||
+      profileSource.negativeKeywords || mustAvoid,
+  }, {sourceText});
+  assertValidStyleInterpretation({
+    style_semantics: styleSemantics,
+    style_profile: normalizedProfile,
+  }, {sourceText});
+  return Object.freeze({
+    semantic_intent: normalizedIntent,
+    style_semantics: styleSemantics,
+    style_profile: normalizedProfile,
+    style_expression: resolveStyleExpression({styleProfile: normalizedProfile}),
+  });
+}
+
+function parseIntentPhase(content, context = {}) {
+  const parsed = parseAiPayloadBestEffort(content);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("AI Intent 返回内容不是有效 JSON 对象");
+  }
+  return buildIntentPhaseResult({
+    semanticIntent: parsed.semantic_intent || parsed.semanticIntent,
+    styleProfile: parsed.style_profile || parsed.styleProfile,
+    sourceText: context.sourceText,
+  });
+}
+
+function intentPhaseFromCachedInterpretation(value, sourceText = "") {
+  const styleSemantics = normalizeStyleSemantics(
+    value?.style_semantics || value?.styleSemantics,
+  );
+  const styleProfile = normalizeStyleProfile(
+    value?.style_profile || value?.styleProfile,
+    {sourceText},
+  );
+  return buildIntentPhaseResult({
+    semanticIntent: {
+      identity_impression: styleSemantics.identity_impression,
+      emotional_tone: styleSemantics.emotional_tone,
+      style_direction: styleSemantics.interpretation_summary ||
+        styleProfile.interpretation || styleProfile.primary_style,
+      must_express: styleSemantics.must_express,
+      must_avoid: styleSemantics.must_avoid,
+    },
+    styleProfile,
+    sourceText,
+  });
+}
+
 function parseBlueprintPhase(content, context = {}) {
   const parsedPayload = parseAiPayloadBestEffort(content);
   if (!parsedPayload || typeof parsedPayload !== "object" ||
@@ -4184,11 +5461,11 @@ function parseBlueprintPhase(content, context = {}) {
   const gender = contextGender === "unisex"
     ? returnedGender
     : assertContextGender(context, returnedGender, "blueprint_phase");
-  const styleSemantics = normalizeStyleSemantics(
+  let styleSemantics = normalizeStyleSemantics(
     context.styleSemantics || context.style_semantics ||
       parsed.style_semantics || parsed.styleSemantics,
   );
-  const styleProfile = normalizeStyleProfile(
+  let styleProfile = normalizeStyleProfile(
     context.styleProfile || context.style_profile ||
       parsed.style_profile || parsed.styleProfile,
     {sourceText: context.userInput || style},
@@ -4217,53 +5494,47 @@ function parseBlueprintPhase(content, context = {}) {
       defaultSource: "ai_generated",
     },
   );
-  if (!blueprintHasCoreItems(outfitBlueprint)) {
-    const collected = Object.fromEntries(Object.entries(
-      outfitBlueprint.must_have_items,
-    ).map(([category, items]) => [category, [...items]]));
-    const evidence = [];
-    const collectEvidence = (value) => {
-      if (typeof value === "string") {
-        const text = value.trim();
-        if (text) evidence.push(text);
-        return;
-      }
-      if (Array.isArray(value)) {
-        value.forEach(collectEvidence);
-        return;
-      }
-      if (!value || typeof value !== "object") return;
-      for (const [key, nested] of Object.entries(value)) {
-        if (["category", "type", "item_category", "itemCategory"].includes(key)) {
-          continue;
-        }
-        collectEvidence(nested);
-      }
-    };
-    collectEvidence(rawOutfitBlueprint?.must_have_items ||
-      rawOutfitBlueprint?.mustHaveItems);
-    collectEvidence(rawOutfitBlueprint?.preferred_items ||
-      rawOutfitBlueprint?.preferredItems);
-    collectEvidence(rawOutfitBlueprint?.core_elements ||
-      rawOutfitBlueprint?.coreElements);
-    collectEvidence(styleProfile.preferred_items);
-    for (const itemName of [...new Set(evidence)]) {
-      const category = normalizeProductCategory(itemName);
-      if (!Object.prototype.hasOwnProperty.call(collected, category)) continue;
-      if (!collected[category].includes(itemName)) {
-        collected[category].push(itemName);
-      }
-    }
-    outfitBlueprint = normalizeOutfitBlueprint({
-      ...outfitBlueprint,
-      must_have_items: collected,
-    }, {
+  outfitBlueprint = preserveFashionBrainKnowledge(
+    outfitBlueprint,
+    context.knowledgeContext || context.knowledge_context,
+    {
+      styleProfile,
+      styleSemantics,
+      defaultSource: "ai_generated",
+    },
+  );
+  const hasCanonicalStyleFacts = Boolean(
+    context.styleSemantics || context.style_semantics ||
+    parsed.style_semantics || parsed.styleSemantics,
+  );
+  if (!hasCanonicalStyleFacts) {
+    const derived = styleFactsFromBlueprint(
+      outfitBlueprint,
+      parsed.style_profile || parsed.styleProfile,
+      context.userInput || style,
+    );
+    styleSemantics = derived.styleSemantics;
+    styleProfile = derived.styleProfile;
+    outfitBlueprint = normalizeOutfitBlueprint(outfitBlueprint, {
       styleProfile,
       styleSemantics,
       defaultSource: "ai_generated",
     });
   }
-  if (!blueprintHasCoreItems(outfitBlueprint)) {
+  const preservation = preserveBlueprintKnowledge(outfitBlueprint, {
+    rawOutfitBlueprint,
+    styleProfile,
+    styleSemantics,
+    knowledgeContext: context.knowledge_context || context.knowledgeContext ||
+      parsed.knowledge_context || parsed.knowledgeContext ||
+      parsed.fashion_brain_context || parsed.fashionBrainContext,
+  });
+  outfitBlueprint = preservation.blueprint;
+  console.info("blueprint_preservation_summary", {
+    requestId: context.requestId,
+    ...preservation.summary,
+  });
+  if (!preservation.summary.validation_passed) {
     console.warn("ai_blueprint_validation", {
       requestId: context.requestId,
       blueprintSource: outfitBlueprint.blueprint_source,
@@ -4280,6 +5551,10 @@ function parseBlueprintPhase(content, context = {}) {
     });
     throw new Error("AI Blueprint 缺少可执行的核心单品");
   }
+  outfitBlueprint = attachKnowledgeSourcesToBlueprint(
+    outfitBlueprint,
+    context.knowledgeSources || context.knowledge_sources,
+  );
   const stylingStrategy = normalizeStylingStrategy(
     parsed.styling_strategy || parsed.stylingStrategy,
     {bodyProfile, scene: context.scene},
@@ -4325,10 +5600,15 @@ function mergeBlueprintAndLookPhase(blueprintPhase, content, context = {}) {
     styleSemantics: blueprintPhase.style_semantics,
     styleProfile: blueprintPhase.style_profile,
     outfitBlueprint: blueprintPhase.outfit_blueprint,
+    nativeExecutableLookContract: true,
   });
   return {
     ...analysis,
     semantic_intent: blueprintPhase.semantic_intent,
+    outfit_blueprint: attachKnowledgeSourcesToBlueprint(
+      analysis.outfit_blueprint,
+      blueprintPhase.outfit_blueprint.knowledge_sources,
+    ),
   };
 }
 
@@ -4359,7 +5639,7 @@ function createBlueprintPartialAnalysis(blueprintPhase, requestId) {
 }
 
 function shouldRepairStyleInterpretation(analysis = {}) {
-  return analysis.analysisMode !== "blueprint_partial";
+  return !["blueprint_partial", "phased_ai"].includes(analysis.analysisMode);
 }
 
 async function requestStructuredAiPhase({
@@ -4376,12 +5656,15 @@ async function requestStructuredAiPhase({
   const startedAt = Date.now();
   activeAiRequests += 1;
   try {
+    const outputBudget = Number.isInteger(maxTokens) && maxTokens > 0
+      ? maxTokens
+      : null;
     const response = await client.chat.completions.create(
       {
         model: config.model,
         ...structuredJsonRequestOptions(),
-        ...(Number.isInteger(maxTokens) && maxTokens > 0
-          ? {max_tokens: maxTokens}
+        ...(outputBudget !== null
+          ? {max_tokens: outputBudget}
           : {}),
         messages,
       },
@@ -4391,23 +5674,62 @@ async function requestStructuredAiPhase({
         maxRetries: config.aiMaxRetries,
       },
     );
+    const finishReason = response?.choices?.[0]?.finish_reason ?? null;
+    const contentLength = Buffer.byteLength(extractAiText(response), "utf8");
+    if (phase === "look" && finishReason === "length") {
+      const error = new Error("AI Look output was truncated before JSON completed");
+      error.code = "LOOK_OUTPUT_TRUNCATED";
+      error.finishReason = finishReason;
+      error.contentLength = contentLength;
+      error.maxTokens = outputBudget;
+      error.maxCompletionTokens = null;
+      error.phaseLogged = true;
+      console.warn("ai_outfit_phase", {
+        requestId,
+        phase,
+        duration_ms: Date.now() - startedAt,
+        success: false,
+        source: "ai_error",
+        errorCode: error.code,
+        finish_reason: finishReason,
+        content_length: contentLength,
+        max_tokens: outputBudget,
+        max_completion_tokens: null,
+        output_truncated: true,
+      });
+      throw error;
+    }
     console.info("ai_outfit_phase", {
       requestId,
       phase,
       duration_ms: Date.now() - startedAt,
       success: true,
       source: "ai_generated",
+      finish_reason: finishReason,
+      content_length: contentLength,
+      max_tokens: outputBudget,
+      max_completion_tokens: null,
+      output_truncated: false,
     });
     return response;
   } catch (error) {
-    console.warn("ai_outfit_phase", {
-      requestId,
-      phase,
-      duration_ms: Date.now() - startedAt,
-      success: false,
-      source: "ai_error",
-      errorCode: resolveAiFallbackReason(error),
-    });
+    if (!error?.phaseLogged) {
+      console.warn("ai_outfit_phase", {
+        requestId,
+        phase,
+        duration_ms: Date.now() - startedAt,
+        success: false,
+        source: "ai_error",
+        errorCode: resolveAiFallbackReason(error),
+        finish_reason: error?.finishReason ?? null,
+        content_length: error?.contentLength ?? null,
+        max_tokens: Number.isInteger(maxTokens) && maxTokens > 0
+          ? maxTokens
+          : null,
+        max_completion_tokens: null,
+        output_truncated: error?.code === "LOOK_OUTPUT_TRUNCATED",
+      });
+    }
     throw error;
   } finally {
     clearTimeout(timeout);
@@ -4458,6 +5780,8 @@ style_profile must contain intent_priority_score (explicit style requests >=85),
 function compactBlueprintPhaseSystemPrompt() {
   return `You are a senior personal stylist and visual-proportion analyst.
 This phase only analyzes the supplied body photos and executes the immutable semantic_intent to create BodyAnalysis and Outfit Blueprint. semantic_intent is the one and only aesthetic source; do not reinterpret, rename, broaden, or replace it. Do not generate Looks, products, search keywords, recommendations, or styling_strategy.
+knowledge_context contains optional local fashion references retrieved after Intent parsing. Use only relevant evidence to ground garments, materials, proportions, and occasion decisions. It is advisory context and MUST NOT override, replace, or weaken semantic_intent.
+When knowledge_context contains relevant evidence, concretize that evidence in at least one applicable Blueprint field among core_elements, must_have_items, material_direction, and silhouette_strategy. Ignore irrelevant or conflicting evidence. Never copy reference IDs or treat the references as mandatory rules.
 ${partialViewSafetyInstruction}
 All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.
 Use body information, photographed proportions, scene, and budget only to make the immutable intent wearable. They may not override its must_express or introduce anything in must_avoid. Never infer proportions from height alone.
@@ -4467,14 +5791,35 @@ The Blueprint must contain concrete purchasable core items for top+bottom+shoes 
 }
 
 function phasedLookSystemPrompt() {
-  return `You are a senior personal stylist. This is Phase 2 only. Execute the immutable Outfit Blueprint using the supplied BodyAnalysis, scene, and budget to create styling_strategy and three complete Looks.
-The Outfit Blueprint is the one and only aesthetic source. Do not infer, reinterpret, expand, or debate what the user's original requested style means. Do not invent a second style direction outside the Blueprint. All user-facing natural-language values MUST be Simplified Chinese; English is allowed only for enum values and identifiers.
+  return `You are a senior personal stylist. This is Phase 2 only. Execute the immutable Outfit Blueprint using the supplied BodyAnalysis, scene, and budget to create styling_strategy and exactly three complete Looks.
+The Outfit Blueprint is the one and only aesthetic source. Do not reinterpret the raw requested style. All user-facing natural-language values MUST be Simplified Chinese; English is allowed only for enum values and identifiers.
+
+First create three independent look_direction objects. They must differ materially, not merely by color. Each look_direction must contain name, core_structure (top_bottom_shoes, dress_shoes, or outerwear_bottom_shoes), silhouette, waistline, length_strategy, and shoe_shape. Every item in that Look must match its own look_direction; never borrow a slot from another Look.
+
 styling_strategy must contain body_strengths[], proportion_issues[], visual_goals[], waistline_strategy, top_length_strategy, bottom_strategy, shoe_strategy, color_strategy, silhouette_strategy, skin_exposure_strategy, accessory_strategy, and weather_strategy.
-Each Look must visibly express the Blueprint and differ materially in silhouette, waistline, garment length, shoe shape, skin exposure, or color continuity—not merely color. A complete Look is top+bottom+shoes, dress+shoes, or outerwear+bottom+shoes; accessories may be empty.
-Each Look must contain unique look_id, gender, style, style_direction, styling_goal, proportion_strategy, why_this_changes_the_body_proportion, scene, accessories_decision[], and items[].
-Each item must contain only category, gender, item_name, color, fit, material, style, season, and scene. Do not generate search_keywords or negative_keywords in this phase; Phase 3 derives marketplace search requirements from the completed Look and immutable Blueprint.
-recommendations must contain top, bottom, shoes, accessories, and summary, naming the concrete garments, silhouettes, materials, shoe shapes, and details that express the Blueprint. Never use an item that conflicts with outfit_blueprint.avoid_items.
-Return exactly one JSON object with only these top-level keys: styling_strategy, recommendations, looks, style_upgrade_level.`;
+Convert styling_strategy into executable slot constraints. For example, when top_length_strategy requires short/cropped or above-hip length, the top item must declare required_attributes such as ["短款或不过胯"] and must actually contain 短款/不过胯 in product_type, fit, or design_elements. When the waist strategy requires a raised waist, bottom/dress must declare and implement ["高腰"]. Shoe-shape preferences belong in preferred_attributes; prohibited heavy shapes belong in avoid_attributes. Do not leave body strategy only in style_role, reason, or proportion_strategy.
+
+Each Look must contain style_direction, look_direction, styling_goal, proportion_strategy, why_this_changes_the_body_proportion, accessories_decision[], and items[]. Each Look must independently contain top+bottom+shoes, dress+shoes, or outerwear+bottom+shoes. Accessories may be empty.
+
+Every item is a Semantic Look Spec with only styling fields:
+{
+  "slot_role":"top|bottom|dress|shoes|outerwear|bag|hat|accessory|jewelry|belt|scarf|socks|watch|glasses",
+  "product_type":"one concrete purchasable Simplified-Chinese product type",
+  "style_role":"concise Simplified-Chinese styling role",
+  "fit":"concrete fit or silhouette",
+  "colors":[],
+  "materials":[],
+  "design_elements":[],
+  "required_attributes":[],
+  "preferred_attributes":[],
+  "avoid_attributes":[]
+}
+Do not output request_id, look_id, category, slot_key, product_family, or item_name; the server deterministically compiles them from request context and slot_role. Use separate array elements for alternative colors/materials. product_type must never contain English translations, explanations, strategy prose, multiple alternatives joined by 或/或者, or abstract names. Do not generate search_keywords or negative_keywords; Phase 3 derives them from the compiled contract.
+
+Output compact JSON only. Do not include Markdown, code fences, prefaces, summaries, comments, or fields outside the required object. Keep style_role to at most 16 Chinese characters. Keep styling_goal, proportion_strategy, why_this_changes_the_body_proportion, and accessory reasons to at most 32 Chinese characters each. Array values such as design_elements and attributes must be short terms, never explanation sentences. Do not repeat the same explanation in multiple fields.
+
+Before returning, verify: all three core combinations are complete; each product_type belongs to its declared slot_role and agrees with fit and look_direction; every required_attribute appears in product_type/fit/design_elements; no avoid_attribute is present; and the three Looks are not copies of the same core combination.
+recommendations must contain top, bottom, shoes, accessories, and summary. Return exactly one JSON object with only these top-level keys: styling_strategy, recommendations, looks, style_upgrade_level.`;
 }
 
 async function generatePhasedOutfitAnalysis({
@@ -4484,6 +5829,7 @@ async function generatePhasedOutfitAnalysis({
   cachedStyleInterpretation,
   sourceText,
   client = aiClient,
+  fashionBrainInstance = fashionBrain,
   intentTimeoutMs = config.intentTimeoutMs,
   blueprintTimeoutMs = config.blueprintTimeoutMs,
   lookTimeoutMs = config.lookTimeoutMs,
@@ -4527,6 +5873,13 @@ async function generatePhasedOutfitAnalysis({
   const intentDurationMs = Date.now() - intentStartedAt;
 
   const profile = intentPhase.style_profile;
+  const fashionBrainResult = buildFashionBrainContext({
+    brain: fashionBrainInstance,
+    sourceText,
+    intentPhase,
+    outfitRequest,
+    requestId: outfitRequest.requestId,
+  });
   const blueprintSemanticIntent = {
     ...intentPhase.semantic_intent,
     intent_priority_score: profile.intent_priority_score,
@@ -4538,6 +5891,7 @@ async function generatePhasedOutfitAnalysis({
   };
   const blueprintInput = {
     semantic_intent: blueprintSemanticIntent,
+    knowledge_context: fashionBrainResult.knowledge_context,
     body_analysis: {
       height: outfitRequest.height,
       weight: outfitRequest.weight,
@@ -4578,12 +5932,18 @@ async function generatePhasedOutfitAnalysis({
     semanticIntent: intentPhase.semantic_intent,
     styleSemantics: intentPhase.style_semantics,
     styleProfile: intentPhase.style_profile,
+    knowledgeContext: fashionBrainResult.knowledge_context,
+    knowledgeSources: fashionBrainResult.knowledge_sources,
   });
   const blueprintDurationMs = Date.now() - blueprintStartedAt;
 
   const lookStartedAt = Date.now();
+  const {
+    knowledge_sources: _knowledgeSources,
+    ...lookBlueprintInput
+  } = blueprintPhase.outfit_blueprint;
   const lookInput = {
-    outfit_blueprint: blueprintPhase.outfit_blueprint,
+    outfit_blueprint: lookBlueprintInput,
     body_analysis: {
       summary: blueprintPhase.bodyProfile,
       gender: blueprintPhase.gender,
@@ -4602,7 +5962,6 @@ async function generatePhasedOutfitAnalysis({
       phase: "look",
       client,
       timeoutMs: lookTimeoutMs,
-      maxTokens: LOOK_PHASE_MAX_TOKENS,
       requestId: outfitRequest.requestId,
       messages: [
         {role: "system", content: phasedLookSystemPrompt()},
@@ -4667,7 +6026,10 @@ async function generatePhasedOutfitAnalysis({
   };
 }
 
-app.post("/outfit", outfitRateLimiter, async (req, res) => {
+app.post(
+  "/outfit",
+  outfitRateLimiter,
+  async (req, res) => {
   let outfitRequest;
   let aiRequestStartedAt;
   let fallbackStyleInterpretation;
@@ -5402,7 +6764,8 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       errorDetails,
     );
   }
-});
+  },
+);
 
 app.use((req, res) => {
   return sendError(res, 404, "NOT_FOUND", "接口不存在");
@@ -5581,6 +6944,7 @@ module.exports = {
   productAestheticReranker,
   taobaoService,
   productClickStore,
+  fashionBrain,
   config,
   createBasicFallbackOutfitAnalysis,
   generateSemanticFallbackInterpretation,
@@ -5592,13 +6956,18 @@ module.exports = {
   normalizeAiOutfitPayload,
   parseOutfitAnalysis,
   parseIntentPhase,
+  buildFashionBrainContext,
+  preserveFashionBrainKnowledge,
   parseBlueprintPhase,
+  preserveBlueprintKnowledge,
   mergeBlueprintAndLookPhase,
   createBlueprintPartialAnalysis,
   shouldRepairStyleInterpretation,
   requestStructuredAiPhase,
   generatePhasedOutfitAnalysis,
   repairAndValidateAiLooks,
+  repairLookItemNameFromEvidence,
+  validateExecutableLookItems,
   parseStyleRepairPatch,
   repairStyleInterpretationAndLooks,
   buildAiRequestUrl,
