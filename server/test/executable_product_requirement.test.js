@@ -380,6 +380,90 @@ test("family inference covers the executable contract examples", () => {
   assert.equal(inferProductFamily("shoes", "尖头浅口低跟鞋"), "pointed_flat");
 });
 
+test("shoe taxonomy prioritizes explicit heel signals over pointed toe shape", () => {
+  const compileShoe = (productType, fit) => compileExecutableProductContract({
+    slot_role: "shoes",
+    product_type: productType,
+    style_role: "完成成熟鞋履造型",
+    fit,
+    colors: [],
+    materials: [],
+    design_elements: [],
+    required_attributes: [],
+    preferred_attributes: [],
+    avoid_attributes: [],
+  }, {
+    requestId: "golden-002-shoe-taxonomy",
+    lookId: "look-1",
+    category: "shoes",
+    itemIndex: 0,
+  });
+
+  for (const productType of ["尖头细高跟鞋", "尖头猫跟单鞋", "尖头高跟鞋"]) {
+    const result = compileShoe(productType, "heels");
+    assert.equal(result.product_family, "heels");
+    assert.doesNotThrow(() => validateExecutableProductContract(result));
+  }
+
+  assert.equal(
+    compileShoe("尖头平底单鞋", "尖头平底").product_family,
+    "pointed_flat",
+  );
+  assert.equal(
+    compileShoe("平底芭蕾鞋", "平底芭蕾鞋").product_family,
+    "flats",
+  );
+});
+
+test("fit-family conflict exposes only safe contract diagnostics", () => {
+  assert.throws(() => validateExecutableProductContract({
+    request_id: "diagnostic-request",
+    look_id: "look-1",
+    category: "shoes",
+    slot_key: "diagnostic-request:look-1:shoes:0",
+    product_type: "尖头细高跟鞋",
+    product_family: "heels",
+    item_name: "尖头细高跟鞋",
+    style_role: "成熟鞋型",
+    fit: "平底芭蕾鞋",
+    colors: [],
+    materials: [],
+    design_elements: [],
+  }), (error) => {
+    assert.match(error.message, /fit 与 product_family 冲突/u);
+    assert.deepEqual(error.contractDiagnostics, {
+      request_id: "diagnostic-request",
+      look_id: "look-1",
+      slot_key: "diagnostic-request:look-1:shoes:0",
+      category: "shoes",
+      product_type: "尖头细高跟鞋",
+      fit: "平底芭蕾鞋",
+      product_family: "heels",
+    });
+    return true;
+  });
+});
+
+test("dress slot still rejects a non-dress product type", () => {
+  assert.throws(() => compileExecutableProductContract({
+    slot_role: "dress",
+    product_type: "短款针织衫",
+    style_role: "成熟约会造型",
+    fit: "短款修身",
+    colors: [],
+    materials: [],
+    design_elements: [],
+    required_attributes: [],
+    preferred_attributes: [],
+    avoid_attributes: [],
+  }, {
+    requestId: "golden-002-dress-slot",
+    lookId: "look-2",
+    category: "dress",
+    itemIndex: 0,
+  }), /product_type 与 dress slot 冲突/u);
+});
+
 test("Native Look requires body attributes to be executable, not explanatory", () => {
   const base = {
     request_id: "native-request",

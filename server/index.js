@@ -2901,6 +2901,7 @@ function repairAndValidateAiLooks({
           requestId: readOptionalString(context.requestId),
           lookId: `look-${lookIndex + 1}`,
           reason: error.message,
+          ...(error.contractDiagnostics || {}),
         });
       }
       removedLooks += 1;

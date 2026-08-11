@@ -25,8 +25,9 @@ const FAMILY_RULES = Object.freeze({
     ["loafers", /(?:乐福|loafers?)/iu],
     ["boots", /靴/u],
     ["sneakers", /(?:运动鞋|跑鞋|训练鞋|篮球鞋|德训鞋|板鞋|sneakers?)/iu],
-    ["pointed_flat", /(?=.*(?:尖头|浅口))(?=.*(?:平底|低跟|单鞋|鞋))/u],
-    ["heels", /(?:高跟|中跟|低跟|猫跟|细跟|粗跟)/u],
+    ["heels", /(?:细高跟|高跟|中跟|猫跟|细跟|粗跟|(?<!低)跟鞋|heels?)/iu],
+    ["pointed_flat", /(?=.*(?:尖头|浅口))(?=.*(?:平底|低跟|单鞋))/u],
+    ["heels", /低跟/u],
     ["flats", /(?:芭蕾鞋|平底鞋|单鞋|凉鞋)/u],
     ["shoes", /鞋/u],
   ]),
@@ -823,9 +824,19 @@ function validateExecutableProductContract(contract = {}) {
   }
   const fitFamily = inferProductFamily(contract.category, contract.fit);
   if (fitFamily && fitFamily !== contract.product_family) {
-    throw new TypeError(
+    const error = new TypeError(
       "Executable Product Contract 的 fit 与 product_family 冲突",
     );
+    error.contractDiagnostics = {
+      request_id: cleanText(contract.request_id),
+      look_id: cleanText(contract.look_id),
+      slot_key: cleanText(contract.slot_key),
+      category: cleanText(contract.category),
+      product_type: cleanText(contract.product_type),
+      fit: cleanText(contract.fit),
+      product_family: cleanText(contract.product_family),
+    };
+    throw error;
   }
   return contract;
 }
