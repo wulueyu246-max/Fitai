@@ -131,7 +131,7 @@ const DEFAULT_AI_MODEL = "qwen3.7-plus";
 const DEFAULT_AI_TIMEOUT_MS = 60_000;
 const DEFAULT_INTENT_TIMEOUT_MS = 20_000;
 const DEFAULT_BLUEPRINT_TIMEOUT_MS = 120_000;
-const DEFAULT_LOOK_TIMEOUT_MS = 60_000;
+const DEFAULT_LOOK_TIMEOUT_MS = 90_000;
 const INTENT_PHASE_MAX_TOKENS = 1_400;
 // Manual rollback only: set AI_MODEL=qwen-vl-plus in the environment.
 // The server never switches to this legacy model automatically.
@@ -685,6 +685,7 @@ function resolveAiFallbackReason(error) {
     return "LOOK_OUTPUT_TRUNCATED";
   }
   if (
+    error?.code === "LOOK_TIMEOUT" ||
     error?.name === "AbortError" ||
     error?.name === "APIUserAbortError" ||
     error?.code === "ETIMEDOUT" ||
@@ -5946,7 +5947,11 @@ function mergeBlueprintAndLookPhase(blueprintPhase, content, context = {}) {
   };
 }
 
-function createBlueprintPartialAnalysis(blueprintPhase, requestId) {
+function createBlueprintPartialAnalysis(
+  blueprintPhase,
+  requestId,
+  lookErrorCode = "AI_REQUEST_FAILED",
+) {
   const style = blueprintPhase.style;
   return {
     ...blueprintPhase,
@@ -5966,6 +5971,12 @@ function createBlueprintPartialAnalysis(blueprintPhase, requestId) {
       repaired_looks: 0,
       removed_looks: 0,
       fallback_used: false,
+      blueprint_preserved: true,
+    },
+    look_generation_status: {
+      state: "retryable",
+      error_code: lookErrorCode,
+      can_retry: true,
       blueprint_preserved: true,
     },
     analysisMode: "blueprint_partial",
@@ -6048,6 +6059,7 @@ async function requestStructuredAiPhase({
       max_tokens: outputBudget,
       max_completion_tokens: null,
       output_truncated: false,
+      timeout_ms: timeoutMs,
     });
     return response;
   } catch (error) {
@@ -6058,6 +6070,12 @@ async function requestStructuredAiPhase({
           ))) {
       if (error?.code) error.originalCode = error.code;
       error.code = "BLUEPRINT_STRUCTURED_OUTPUT_FAILED";
+    }
+    const timedOut = resolveAiFallbackReason(error) === "AI_TIMEOUT";
+    if (phase === "look" && timedOut) {
+      error.code = error.code || "LOOK_TIMEOUT";
+      error.phase = "look";
+      error.timeoutMs = timeoutMs;
     }
     if (!error?.phaseLogged) {
       const resolvedResponseFormat = responseFormat?.type || "json_object";
@@ -6077,6 +6095,7 @@ async function requestStructuredAiPhase({
           : null,
         max_completion_tokens: null,
         output_truncated: error?.code === "LOOK_OUTPUT_TRUNCATED",
+        timeout_ms: timeoutMs,
       });
     }
     throw error;
@@ -6140,35 +6159,20 @@ The Blueprint must contain concrete purchasable core items for top+bottom+shoes 
 }
 
 function phasedLookSystemPrompt() {
-  return `You are a senior personal stylist. This is Phase 2 only. Execute the immutable Outfit Blueprint using the supplied BodyAnalysis, scene, and budget to create styling_strategy and exactly three complete Looks.
-The Outfit Blueprint is the one and only aesthetic source. Do not reinterpret the raw requested style. All user-facing natural-language values MUST be Simplified Chinese; English is allowed only for enum values and identifiers.
+  return `You are a senior personal stylist. This is Phase 2 only. Execute the supplied immutable Outfit Blueprint; it is the one and only aesthetic source. Do not reinterpret the requested style or change the Blueprint. Return Simplified Chinese user-facing text and compact JSON only.
 
-First create three independent look_direction objects. They must differ materially, not merely by color. Each look_direction must contain name, core_structure (top_bottom_shoes, dress_shoes, or outerwear_bottom_shoes), silhouette, waistline, length_strategy, and shoe_shape. Every item in that Look must match its own look_direction; never borrow a slot from another Look.
+Create exactly three materially different Looks. Each look_direction contains: name, core_structure (top_bottom_shoes, dress_shoes, or outerwear_bottom_shoes), silhouette, waistline, length_strategy, shoe_shape. Each Look contains: style_direction, look_direction, styling_goal, proportion_strategy, why_this_changes_the_body_proportion, accessories_decision[], items[]. Every Look independently contains top+bottom+shoes, dress+shoes, or outerwear+bottom+shoes. Accessories are optional and never replace core items.
 
-styling_strategy must contain body_strengths[], proportion_issues[], visual_goals[], waistline_strategy, top_length_strategy, bottom_strategy, shoe_strategy, color_strategy, silhouette_strategy, skin_exposure_strategy, accessory_strategy, and weather_strategy.
-Convert styling_strategy into executable slot constraints. For example, when top_length_strategy requires short/cropped or above-hip length, the top item must declare required_attributes such as ["短款或不过胯"] and must actually contain 短款/不过胯 in product_type, fit, or design_elements. When the waist strategy requires a raised waist, bottom/dress must declare and implement ["高腰"]. Shoe-shape preferences belong in preferred_attributes; prohibited heavy shapes belong in avoid_attributes. Do not leave body strategy only in style_role, reason, or proportion_strategy.
-
-Each Look must contain style_direction, look_direction, styling_goal, proportion_strategy, why_this_changes_the_body_proportion, accessories_decision[], and items[]. Each Look must independently contain top+bottom+shoes, dress+shoes, or outerwear+bottom+shoes. Accessories may be empty.
+styling_strategy must contain body_strengths[], proportion_issues[], visual_goals[], waistline_strategy, top_length_strategy, bottom_strategy, shoe_strategy, color_strategy, silhouette_strategy, skin_exposure_strategy, accessory_strategy, weather_strategy. Required body constraints must appear in the relevant item's product_type, fit, or design_elements. Keep secondary tactics preferred, not required.
 
 Every item is a Semantic Look Spec with only styling fields:
-{
-  "slot_role":"top|bottom|dress|shoes|outerwear|bag|hat|accessory|jewelry|belt|scarf|socks|watch|glasses",
-  "product_type":"one concrete purchasable Simplified-Chinese product type",
-  "style_role":"concise Simplified-Chinese styling role",
-  "fit":"concrete fit or silhouette",
-  "colors":[],
-  "materials":[],
-  "design_elements":[],
-  "required_attributes":[],
-  "preferred_attributes":[],
-  "avoid_attributes":[]
-}
-Do not output request_id, look_id, category, slot_key, product_family, or item_name; the server deterministically compiles them from request context and slot_role. Use separate array elements for alternative colors/materials. product_type must never contain English translations, explanations, strategy prose, multiple alternatives joined by 或/或者, or abstract names. Do not generate search_keywords or negative_keywords; Phase 3 derives them from the compiled contract.
+{"slot_role":"top|bottom|dress|shoes|outerwear|bag|hat|accessory|jewelry|belt|scarf|socks|watch|glasses","product_type":"单一具体可购买商品","style_role":"简短造型作用","fit":"具体版型","colors":[],"materials":[],"design_elements":[],"required_attributes":[],"preferred_attributes":[],"avoid_attributes":[]}
 
-Output compact JSON only. Do not include Markdown, code fences, prefaces, summaries, comments, or fields outside the required object. Keep style_role to at most 16 Chinese characters. Keep styling_goal, proportion_strategy, why_this_changes_the_body_proportion, and accessory reasons to at most 32 Chinese characters each. Array values such as design_elements and attributes must be short terms, never explanation sentences. Do not repeat the same explanation in multiple fields.
+Do not output request_id, look_id, category, slot_key, product_family, or item_name; the server compiles them. Do not generate search_keywords or negative_keywords. Use separate short array values for colors, materials, design elements, and attributes. product_type must contain no English translation, explanation, strategy sentence, abstract name, or alternatives joined by “或/或者”.
 
-Before returning, verify: all three core combinations are complete; each product_type belongs to its declared slot_role and agrees with fit and look_direction; every required_attribute appears in product_type/fit/design_elements; no avoid_attribute is present; and the three Looks are not copies of the same core combination.
-recommendations must contain top, bottom, shoes, accessories, and summary. Return exactly one JSON object with only these top-level keys: styling_strategy, recommendations, looks, style_upgrade_level.`;
+Keep style_role within 16 Chinese characters. Keep styling_goal, proportion_strategy, why_this_changes_the_body_proportion, and accessory reasons within 24 Chinese characters. Do not repeat explanations. recommendations must contain concise top, bottom, shoes, accessories, summary strings.
+
+Before returning, verify core completeness, slot/product agreement, required-attribute evidence, avoid conflicts, and three independent directions. Return exactly one JSON object with only: styling_strategy, recommendations, looks, style_upgrade_level. No Markdown, preface, comments, or extra fields.`;
 }
 
 async function generatePhasedOutfitAnalysis({
@@ -6345,6 +6349,7 @@ async function generatePhasedOutfitAnalysis({
     analysis = createBlueprintPartialAnalysis(
       blueprintPhase,
       outfitRequest.requestId,
+      resolveAiFallbackReason(error),
     );
   }
   const lookDurationMs = Date.now() - lookStartedAt;

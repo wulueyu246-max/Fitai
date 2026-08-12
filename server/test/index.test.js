@@ -28,6 +28,7 @@ const {
   parseBlueprintPhase,
   mergeBlueprintAndLookPhase,
   generatePhasedOutfitAnalysis,
+  requestStructuredAiPhase,
   finalizeOutfitResponseIntegrity,
   repairLookItemNameFromEvidence,
   validateExecutableLookItems,
@@ -2106,9 +2107,9 @@ test("uses qwen3.7-plus by default and keeps legacy rollback explicit", () => {
   assert.equal(DEFAULT_BLUEPRINT_TIMEOUT_MS, 120_000);
   assert.equal(resolveBlueprintTimeoutMs("90000"), 90_000);
   assert.equal(resolveBlueprintTimeoutMs("180000"), 120_000);
-  assert.equal(DEFAULT_LOOK_TIMEOUT_MS, 60_000);
+  assert.equal(DEFAULT_LOOK_TIMEOUT_MS, 90_000);
   assert.equal(resolveLookTimeoutMs("45000"), 45_000);
-  assert.equal(resolveLookTimeoutMs("120000"), 60_000);
+  assert.equal(resolveLookTimeoutMs("120000"), 90_000);
   assert.equal(LEGACY_AI_MODEL, "qwen-vl-plus");
   assert.equal(resolveAiConfig({
     DASHSCOPE_API_KEY: "dashscope-test-key",
@@ -2135,6 +2136,70 @@ test("uses strict JSON Schema for Blueprint structured output", () => {
   );
   assert.equal(OUTFIT_BLUEPRINT_JSON_SCHEMA.type, "object");
   assert.equal(OUTFIT_BLUEPRINT_JSON_SCHEMA.additionalProperties, false);
+});
+
+test("a normal Look request completes inside the dedicated phase timeout", async () => {
+  let capturedOptions;
+  const response = await requestStructuredAiPhase({
+    phase: "look",
+    client: {
+      chat: {
+        completions: {
+          create: async (_request, options) => {
+            capturedOptions = options;
+            return {
+              choices: [{
+                finish_reason: "stop",
+                message: {content: "{\"looks\":[]}"},
+              }],
+            };
+          },
+        },
+      },
+    },
+    messages: [{role: "user", content: "JSON"}],
+    timeoutMs: 90_000,
+    requestId: "look-normal-timeout-test",
+  });
+
+  assert.equal(response.choices[0].finish_reason, "stop");
+  assert.equal(capturedOptions.timeout, 90_000);
+  assert.equal(capturedOptions.signal.aborted, false);
+});
+
+test("a Look phase abort is classified as a retryable AI timeout", async () => {
+  const client = {
+    chat: {
+      completions: {
+        create: async (_request, {signal}) => new Promise((resolve, reject) => {
+          const keepAlive = setTimeout(resolve, 100);
+          signal.addEventListener("abort", () => {
+            clearTimeout(keepAlive);
+            const error = new Error("Request was aborted");
+            error.name = "AbortError";
+            reject(error);
+          }, {once: true});
+        }),
+      },
+    },
+  };
+
+  await assert.rejects(
+    requestStructuredAiPhase({
+      phase: "look",
+      client,
+      messages: [{role: "user", content: "JSON"}],
+      timeoutMs: 10,
+      requestId: "look-abort-classification-test",
+    }),
+    (error) => {
+      assert.equal(error.code, "LOOK_TIMEOUT");
+      assert.equal(error.phase, "look");
+      assert.equal(error.timeoutMs, 10);
+      assert.equal(resolveAiFallbackReason(error), "AI_TIMEOUT");
+      return true;
+    },
+  );
 });
 
 function phasedBlueprintFixture() {
@@ -3066,6 +3131,12 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
   assert.equal(result.analysis.outfit_blueprint.blueprint_source, "ai_generated");
   assert.equal(result.analysis.look_validation_summary.blueprint_preserved, true);
   assert.equal(result.analysis.look_validation_summary.fallback_used, false);
+  assert.deepEqual(result.analysis.look_generation_status, {
+    state: "retryable",
+    error_code: "AI_TIMEOUT",
+    can_retry: true,
+    blueprint_preserved: true,
+  });
   assert.match(requests[0].messages[0].content, /Style Intent Parser/);
   assert.equal(requests[0].max_tokens, 1400);
   const intentInput = JSON.parse(requests[0].messages[1].content);
@@ -3123,6 +3194,10 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
   );
   assert.match(requests[2].messages[0].content, /Semantic Look Spec/);
   assert.match(requests[2].messages[0].content, /product_type/);
+  assert.ok(
+    Buffer.byteLength(requests[2].messages[0].content, "utf8") < 3_000,
+    "Look prompt should stay compact without dropping the contract",
+  );
   const lookInput = JSON.parse(requests[2].messages[1].content);
   assert.deepEqual(Object.keys(lookInput).sort(), [
     "body_analysis",
