@@ -46,6 +46,7 @@ const {
   normalizeProductRequirement,
 } = require("./product_relevance");
 const {ProductAestheticReranker} = require("./product_aesthetic_reranker");
+const {VisualProductVerifier} = require("./visual_product_verification");
 const {
   BLUEPRINT_ITEM_KEYS,
   applyBlueprintToRequirement,
@@ -86,6 +87,10 @@ const {
   FashionContext,
   KNOWLEDGE_KINDS,
 } = require("./fashion_brain");
+const {
+  buildStyleAnchor,
+  styleAnchorMatchAssessment,
+} = require("./style_anchor");
 const {
   LOOK_INTENT_WEIGHTS,
   MIN_LOOK_STYLE_SCORE,
@@ -342,6 +347,14 @@ const config = Object.freeze({
   productRerankCacheTtlMs: readPositiveInteger(
     process.env.PRODUCT_RERANK_CACHE_TTL_MS,
     15 * 60 * 1000,
+  ),
+  productVisualMaxCandidatesPerSlot: Math.min(
+    readPositiveInteger(process.env.PRODUCT_VISUAL_MAX_CANDIDATES_PER_SLOT, 10),
+    12,
+  ),
+  productVisualVerificationTimeoutMs: Math.min(
+    readPositiveInteger(process.env.PRODUCT_VISUAL_VERIFICATION_TIMEOUT_MS, 20_000),
+    20_000,
   ),
   fallbackOnAiError: readBoolean(process.env.AI_FALLBACK_ON_ERROR, false),
   useProxy: proxyConfig.useProxy,
@@ -658,11 +671,19 @@ const productAestheticReranker = new ProductAestheticReranker({
   model: config.productRerankModel,
   timeoutMs: config.productRerankTimeoutMs,
   cacheTtlMs: config.productRerankCacheTtlMs,
+  visualEvaluationEnabled: false,
+});
+const visualProductVerifier = new VisualProductVerifier({
+  client: shouldUseMockAi(config, aiClient) ? null : aiClient,
+  model: config.productRerankModel,
+  maxCandidatesPerSlot: config.productVisualMaxCandidatesPerSlot,
+  timeoutMs: config.productVisualVerificationTimeoutMs,
 });
 const productProvider = createProductProvider({
   environment: process.env,
   catalog: productCatalog,
   reranker: productAestheticReranker,
+  visualVerifier: visualProductVerifier,
 });
 const taobaoService = new TaobaoService({provider: productProvider});
 
@@ -1430,11 +1451,22 @@ function parseOutfitAnalysis(content, context = {}) {
       context.styleExpression,
     styleProfile,
   });
-  const outfitBlueprint = normalizeOutfitBlueprint(
+  let outfitBlueprint = normalizeOutfitBlueprint(
     context.outfitBlueprint || context.outfit_blueprint ||
       parsed.outfit_blueprint || parsed.outfitBlueprint,
     {styleProfile, styleSemantics},
   );
+  const styleAnchor = buildStyleAnchor({
+    semanticIntent: context.semanticIntent || context.semantic_intent,
+    styleSemantics,
+    styleProfile,
+    blueprint: outfitBlueprint,
+    knowledgeContext: context.knowledgeContext || context.knowledge_context,
+  });
+  outfitBlueprint = normalizeOutfitBlueprint({
+    ...outfitBlueprint,
+    style_anchor: styleAnchor,
+  }, {styleProfile, styleSemantics});
 
   const stylingStrategy = normalizeStylingStrategy(
     parsed.styling_strategy || parsed.stylingStrategy,
@@ -1553,6 +1585,7 @@ function parseOutfitAnalysis(content, context = {}) {
       styleProfile,
       styleSemantics,
       outfitBlueprint,
+      styleAnchor,
       nativeExecutableLookContract:
         context.nativeExecutableLookContract === true,
     })
@@ -2530,6 +2563,7 @@ function repairAndValidateAiLooks({
   styleProfile,
   styleSemantics,
   outfitBlueprint,
+  styleAnchor,
   nativeExecutableLookContract = false,
 }) {
   const looks = [];
@@ -2624,6 +2658,16 @@ function repairAndValidateAiLooks({
           rawLook.look_direction || rawLook.lookDirection,
           lookId,
         );
+        const anchorAssessment = styleAnchorMatchAssessment({
+          ...rawLook,
+          style: rawLook.style || look.style,
+          look_direction: lookDirection,
+        }, styleAnchor || outfitBlueprint?.style_anchor);
+        if (!anchorAssessment.allowed) {
+          throw new Error(
+            `Native Look ${lookId} style anchor drift: ${anchorAssessment.conflict_drift.join(", ") || "core anchor missing"}`,
+          );
+        }
         const lookWarnings = [];
         const nativeItems = [];
         rawLook.items.forEach((rawItem, itemIndex) => {
@@ -2757,6 +2801,8 @@ function repairAndValidateAiLooks({
               .test(warning)),
           warnings: [...new Set(lookWarnings)],
           items: nativeItems,
+          style_anchor_status: anchorAssessment.status,
+          style_anchor_match_score: anchorAssessment.score,
           style_match_score: finalStyleScore,
           intent_score: lookIntentScore({
             styleMatch: finalStyleScore,
@@ -4400,6 +4446,7 @@ app.get("/health", (req, res) => {
     product_provider_status: productProvider.status || productProvider.name,
     product_provider_configured: Boolean(productProvider.configured),
     product_ai_reranker: productAestheticReranker.getStats(),
+    product_visual_verifier: visualProductVerifier.getStats(),
   });
 });
 
@@ -5857,6 +5904,23 @@ function parseBlueprintPhase(content, context = {}) {
       parsed.fashion_brain_context || parsed.fashionBrainContext,
   });
   outfitBlueprint = preservation.blueprint;
+  const styleAnchor = buildStyleAnchor({
+    semanticIntent: context.semanticIntent || context.semantic_intent,
+    styleSemantics,
+    styleProfile,
+    blueprint: outfitBlueprint,
+    knowledgeContext: context.knowledge_context || context.knowledgeContext ||
+      parsed.knowledge_context || parsed.knowledgeContext ||
+      parsed.fashion_brain_context || parsed.fashionBrainContext,
+  });
+  outfitBlueprint = normalizeOutfitBlueprint({
+    ...outfitBlueprint,
+    style_anchor: styleAnchor,
+  }, {
+    styleProfile,
+    styleSemantics,
+    defaultSource: "ai_generated",
+  });
   console.info("blueprint_preservation_summary", {
     requestId: context.requestId,
     ...preservation.summary,
@@ -7300,6 +7364,7 @@ module.exports = {
   productCatalog,
   productProvider,
   productAestheticReranker,
+  visualProductVerifier,
   taobaoService,
   productClickStore,
   fashionBrain,
@@ -7319,6 +7384,8 @@ module.exports = {
   preserveFashionBrainKnowledge,
   parseBlueprintPhase,
   preserveBlueprintKnowledge,
+  buildStyleAnchor,
+  styleAnchorMatchAssessment,
   mergeBlueprintAndLookPhase,
   createBlueprintPartialAnalysis,
   shouldRepairStyleInterpretation,

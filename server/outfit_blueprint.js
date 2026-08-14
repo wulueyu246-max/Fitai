@@ -33,6 +33,69 @@ function cleanList(value, limit = 16) {
   return [...new Set(values.map(cleanText).filter(Boolean))].slice(0, limit);
 }
 
+function normalizeStyleAnchorSignature(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
+  const rawDimensions = source.dimensions &&
+    typeof source.dimensions === "object" &&
+    !Array.isArray(source.dimensions)
+    ? source.dimensions
+    : {};
+  const dimensions = Object.fromEntries(Object.entries(rawDimensions)
+    .flatMap(([name, value]) => {
+      const score = Number(value);
+      return Number.isFinite(score)
+        ? [[name, Math.round(Math.max(0, Math.min(100, score)))]]
+        : [];
+    }));
+  return Object.freeze({
+    style_traits: Object.freeze(cleanList(
+      source.style_traits || source.styleTraits,
+      48,
+    )),
+    silhouette_tendencies: Object.freeze(cleanList(
+      source.silhouette_tendencies || source.silhouetteTendencies,
+      32,
+    )),
+    material_tendencies: Object.freeze(cleanList(
+      source.material_tendencies || source.materialTendencies,
+      32,
+    )),
+    design_directions: Object.freeze(cleanList(
+      source.design_directions || source.designDirections,
+      48,
+    )),
+    dimensions: Object.freeze(dimensions),
+    anti_drift: Object.freeze(cleanList(
+      source.anti_drift || source.antiDrift,
+      48,
+    )),
+  });
+}
+
+function normalizeStyleAnchor(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
+  const strength = cleanText(source.anchor_strength || source.anchorStrength);
+  return Object.freeze({
+    core_style_anchor: cleanText(
+      source.core_style_anchor || source.coreStyleAnchor,
+    ),
+    anchor_strength: strength === "strong" ? "strong" : "weak",
+    allowed_style_variants: Object.freeze(cleanList(
+      source.allowed_style_variants || source.allowedStyleVariants,
+    )),
+    disallowed_style_drift: Object.freeze(cleanList(
+      source.disallowed_style_drift || source.disallowedStyleDrift,
+    )),
+    style_anchor_signature: normalizeStyleAnchorSignature(
+      source.style_anchor_signature || source.styleAnchorSignature,
+    ),
+  });
+}
+
 const CONCRETE_PRODUCT_ITEM_PATTERN =
   /(?:上衣|衬衫|针织衫|毛衣|背心|吊带|T恤|Polo|卫衣|裤|半身裙|连衣裙|裙装|裙|鞋|靴|凉鞋|单鞋|外套|西装|风衣|大衣|夹克|开衫|包|手袋|帽|袜|耳环|耳饰|项链|手链|戒指|胸针|腰带|皮带|丝巾|围巾|手表|眼镜)/iu;
 
@@ -229,6 +292,9 @@ function normalizeOutfitBlueprint(value, {
     avoid_items: Object.freeze(avoidItems),
     occasion_strategy: cleanText(
       source.occasion_strategy || source.occasionStrategy,
+    ),
+    style_anchor: normalizeStyleAnchor(
+      source.style_anchor || source.styleAnchor,
     ),
   });
 }

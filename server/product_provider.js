@@ -9,6 +9,7 @@ const {
 const {
   SUPPORTED_PRODUCT_CATEGORIES,
   buildTaobaoSearchPlan,
+  categoryPriority,
   normalizeGender,
   normalizeProductCategory,
   normalizeProductRequirement,
@@ -34,12 +35,26 @@ const {
 const {
   bodyStrategyMatchAssessment,
 } = require("./body_strategy_match");
+const {
+  NO_PRODUCT_MEETS_CORE_SPEC,
+  compilePurchaseSpecification,
+  gateCandidates,
+} = require("./purchase_specification");
+const {
+  compareProductPurchaseAesthetic,
+  scoreAndSortProducts,
+} = require("./product_aesthetic_match");
+const {
+  DEFAULT_MAX_CANDIDATES_PER_SLOT,
+} = require("./visual_product_verification");
 
 const PRODUCT_CATEGORIES = SUPPORTED_PRODUCT_CATEGORIES;
 const DEFAULT_SAMPLE_MATERIAL_ID = "28029";
 const PRODUCT_PIPELINE_BUDGET_MS = 45_000;
 const TAOBAO_STAGE_BUDGET_MS = 15_000;
 const PRODUCT_RERANK_BUDGET_MS = 20_000;
+const PRODUCT_VISUAL_VERIFICATION_BUDGET_MS = 20_000;
+const MAX_VISUAL_CANDIDATES_PER_SLOT = 12;
 const DEFAULT_RECOMMENDATION_CACHE_TTL_MS = 7 * 60 * 1000;
 const DEFAULT_RECOMMENDATION_CACHE_ENTRIES = 150;
 
@@ -121,6 +136,9 @@ class TaobaoProductProvider extends ProductProvider {
     maxRetries,
     sampleMaterialId = DEFAULT_SAMPLE_MATERIAL_ID,
     reranker = null,
+    visualVerifier = null,
+    visualVerificationBudgetMs = PRODUCT_VISUAL_VERIFICATION_BUDGET_MS,
+    visualCandidateLimit = DEFAULT_MAX_CANDIDATES_PER_SLOT,
     recommendationCacheTtlMs = DEFAULT_RECOMMENDATION_CACHE_TTL_MS,
     recommendationCacheEntries = DEFAULT_RECOMMENDATION_CACHE_ENTRIES,
     pipelineBudgetMs = PRODUCT_PIPELINE_BUDGET_MS,
@@ -135,6 +153,18 @@ class TaobaoProductProvider extends ProductProvider {
     this.adzoneId = placement.adzoneId;
     this.sampleMaterialId = String(sampleMaterialId || DEFAULT_SAMPLE_MATERIAL_ID);
     this.reranker = reranker;
+    this.visualVerifier = visualVerifier;
+    this.visualVerificationBudgetMs = Math.min(
+      positiveInteger(
+        visualVerificationBudgetMs,
+        PRODUCT_VISUAL_VERIFICATION_BUDGET_MS,
+      ),
+      PRODUCT_VISUAL_VERIFICATION_BUDGET_MS,
+    );
+    this.visualCandidateLimit = Math.min(
+      positiveInteger(visualCandidateLimit, DEFAULT_MAX_CANDIDATES_PER_SLOT),
+      MAX_VISUAL_CANDIDATES_PER_SLOT,
+    );
     this.logger = logger;
     this.recommendationCacheTtlMs = positiveInteger(
       recommendationCacheTtlMs,
@@ -292,7 +322,9 @@ class TaobaoProductProvider extends ProductProvider {
           return {
             requirement,
             prefilterCount: candidates.length,
-            candidates: candidates.slice(0, 4),
+            candidates: candidates.slice(0, this.visualVerifier
+              ? this.visualCandidateLimit
+              : 4),
             metrics,
             error: null,
           };
@@ -312,7 +344,7 @@ class TaobaoProductProvider extends ProductProvider {
           };
         }
       }));
-      const groups = groupOutcomes.map(({error: _error, metrics: _metrics, ...group}) =>
+      let groups = groupOutcomes.map(({error: _error, metrics: _metrics, ...group}) =>
         group);
       const taobaoMs = Date.now() - pipelineStartedAt;
       const taobaoCount = groupOutcomes.reduce(
@@ -324,6 +356,20 @@ class TaobaoProductProvider extends ProductProvider {
         0,
       );
       const ruleStartedAt = Date.now();
+      let visualVerificationSummary = null;
+      if (this.visualVerifier && groups.some((group) => group.candidates.length > 0)) {
+        const verification = await this.visualVerifier.verifyGroups({
+          groups,
+          context,
+          requestId: context.requestId || "",
+          timeoutMs: Math.max(1, Math.min(
+            this.visualVerificationBudgetMs,
+            pipelineDeadline - Date.now(),
+          )),
+        });
+        groups = verification.groups;
+        visualVerificationSummary = verification.summary;
+      }
       const baseProducts = uniqueProducts(sortProductsByCategoryPriority(
         groups.flatMap((group) => group.candidates.slice(0, 4)),
       )).slice(0, values.length * 4);
@@ -337,6 +383,7 @@ class TaobaoProductProvider extends ProductProvider {
 
       let products = baseProducts;
       let aiRerankSuccess = false;
+      const visualFallbackUsed = visualVerificationSummary?.fallback_used === true;
       let fallbackUsed = baseProducts.length > 0;
       const productAiStartedAt = Date.now();
       if (this.reranker && baseProducts.length > 0) {
@@ -356,9 +403,10 @@ class TaobaoProductProvider extends ProductProvider {
           );
           if (reranked.length > 0) {
             products = reranked;
-            fallbackUsed = reranked.some((product) =>
+            const rerankFallbackUsed = reranked.some((product) =>
               product.ai_rerank_fallback === true);
-            aiRerankSuccess = !fallbackUsed;
+            fallbackUsed = visualFallbackUsed || rerankFallbackUsed;
+            aiRerankSuccess = !rerankFallbackUsed;
           } else {
             products = markRerankFallback(baseProducts);
             fallbackUsed = true;
@@ -478,13 +526,22 @@ class TaobaoProductProvider extends ProductProvider {
         taobao_ms: taobaoMs,
         rule_rank_ms: ruleRankMs,
         ai_rerank_ms: productAiMs,
+        visual_candidate_count: visualVerificationSummary?.candidate_count || 0,
+        visual_call_count: visualVerificationSummary?.visual_call_count || 0,
+        visual_total_ms: visualVerificationSummary?.total_visual_ms || 0,
+        visual_fallback_used: visualFallbackUsed,
         cache_hit: false,
         total_ms: Date.now() - pipelineStartedAt,
         result_status: products.length > 0
           ? (fallbackUsed ? "fallback_success" : "success")
           : "empty",
       });
-      const finalProducts = uniqueProducts(sortProductsByCategoryPriority(products))
+      const finalProducts = uniqueProducts(products)
+        .sort((left, right) =>
+          compareProductPurchaseAesthetic(left, right) ||
+          categoryPriority(right?.category) - categoryPriority(left?.category) ||
+          Number(right?.final_score || right?.relevance_score || 0) -
+            Number(left?.final_score || left?.relevance_score || 0))
         .slice(0, values.length * 4);
       logProductBlueprintSummaries(
         this.logger,
@@ -529,13 +586,29 @@ class TaobaoProductProvider extends ProductProvider {
 
   async #candidatePool(filters, metrics = null) {
     const requirement = normalizeProductRequirement(filters, filters);
+    const basePurchaseSpecification = compilePurchaseSpecification(requirement, filters);
     const outfitBlueprint = filters.outfit_blueprint || filters.outfitBlueprint ||
       filters.recommendation_context?.outfit_blueprint || {};
-    const searchPlan = expandBlueprintSearchPlan(
+    const translatedSearchPlan = expandBlueprintSearchPlan(
       requirement,
       outfitBlueprint,
       buildTaobaoSearchPlan(requirement),
     );
+    // Translation happens once at the Purchase Specification boundary. Every
+    // downstream search stage reads the frozen, executable query list.
+    const purchaseSpecification = Object.freeze({
+      ...basePurchaseSpecification,
+      search_queries: Object.freeze([
+        translatedSearchPlan.exact,
+        ...translatedSearchPlan.fallbacks,
+      ].filter(Boolean).slice(0, 3)),
+    });
+    const searchPlan = {
+      ...translatedSearchPlan,
+      exact: purchaseSpecification.search_queries[0] || "",
+      fallbacks: purchaseSpecification.search_queries.slice(1, 3),
+      expanded_queries: purchaseSpecification.search_queries,
+    };
     this.logger.info?.("淘宝商品搜索需求", {
       requestId: filters.requestId || undefined,
       look_id: requirement.look_id || undefined,
@@ -548,6 +621,7 @@ class TaobaoProductProvider extends ProductProvider {
       item_name: requirement.item_name,
       query_reason: requirement.query_reason || undefined,
       source_elements: requirement.source_elements,
+      purchase_specification: purchaseSpecification,
     });
     const candidateLimit = Math.min(positiveInteger(filters.limit, 20), 20);
     let products = [];
@@ -598,6 +672,18 @@ class TaobaoProductProvider extends ProductProvider {
       successful_query: successfulQuery || null,
       candidate_count: products.length,
     });
+    const gatedProducts = gateCandidates(products, purchaseSpecification);
+    if (products.length > 0 && gatedProducts.length === 0) {
+      this.logger.info?.("purchase_specification_no_match", {
+        request_id: filters.requestId || undefined,
+        look_id: requirement.look_id || undefined,
+        slot_key: requirement.slot_key || undefined,
+        category: requirement.category,
+        reason: NO_PRODUCT_MEETS_CORE_SPEC,
+        candidate_count: products.length,
+      });
+    }
+    products = scoreAndSortProducts(gatedProducts, purchaseSpecification);
     const styleProfile = filters.style_profile || filters.styleProfile ||
       filters.recommendation_context?.style_profile || {};
     const styleSemantics = filters.style_semantics || filters.styleSemantics ||
@@ -693,6 +779,7 @@ class TaobaoProductProvider extends ProductProvider {
         enforce: enforceStyleThreshold,
       }))
       .sort((left, right) =>
+        compareProductPurchaseAesthetic(left, right) ||
         right.blueprint_match_score - left.blueprint_match_score ||
         right.body_strategy_match_score - left.body_strategy_match_score ||
         right.style_match_score - left.style_match_score ||
@@ -909,6 +996,7 @@ function createProductProvider({
   logger = console,
   client,
   reranker = null,
+  visualVerifier = null,
 } = {}) {
   const mode = String(environment.PRODUCT_PROVIDER || "auto").trim().toLowerCase();
   if (!new Set(["mock", "taobao", "auto"]).has(mode)) {
@@ -968,6 +1056,15 @@ function createProductProvider({
       maxRetries: positiveInteger(environment.TAOBAO_MAX_RETRIES, 1),
       sampleMaterialId: environment.TAOBAO_SAMPLE_MATERIAL_ID || DEFAULT_SAMPLE_MATERIAL_ID,
       reranker,
+      visualVerifier,
+      visualVerificationBudgetMs: positiveInteger(
+        environment.PRODUCT_VISUAL_VERIFICATION_TIMEOUT_MS,
+        PRODUCT_VISUAL_VERIFICATION_BUDGET_MS,
+      ),
+      visualCandidateLimit: positiveInteger(
+        environment.PRODUCT_VISUAL_MAX_CANDIDATES_PER_SLOT,
+        visualVerifier?.maxCandidatesPerSlot || DEFAULT_MAX_CANDIDATES_PER_SLOT,
+      ),
       recommendationCacheTtlMs: positiveInteger(
         environment.PRODUCT_RECOMMENDATION_CACHE_TTL_MS,
         DEFAULT_RECOMMENDATION_CACHE_TTL_MS,
