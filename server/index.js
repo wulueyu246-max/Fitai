@@ -935,6 +935,64 @@ function itemBudgetCeiling(value) {
   }[value] || 0;
 }
 
+function normalizeOutfitContextRecord(value, field) {
+  if (value == null) return {};
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new RequestValidationError(`${field} 必须是对象`);
+  }
+  const result = {};
+  for (const [key, rawValue] of Object.entries(value).slice(0, 32)) {
+    if (typeof rawValue === "string") {
+      result[key] = rawValue.trim().slice(0, 500);
+    } else if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+      result[key] = rawValue;
+    } else if (typeof rawValue === "boolean") {
+      result[key] = rawValue;
+    }
+  }
+  return result;
+}
+
+function normalizeOutfitStructuredContext(value, {
+  scene,
+  gender,
+  height,
+  weight,
+} = {}) {
+  if (value != null && (typeof value !== "object" || Array.isArray(value))) {
+    throw new RequestValidationError("context 必须是对象");
+  }
+  const source = value || {};
+  const weatherConstraints = [...new Set((Array.isArray(
+    source.weather_constraints || source.weatherConstraints,
+  ) ? source.weather_constraints || source.weatherConstraints : [])
+    .map(readOptionalString)
+    .filter(Boolean))].slice(0, 16);
+  const bodyProfile = normalizeOutfitContextRecord(
+    source.body_profile || source.bodyProfile,
+    "context.body_profile",
+  );
+  return Object.freeze({
+    scene: readOptionalString(scene),
+    location: Object.freeze(normalizeOutfitContextRecord(
+      source.location,
+      "context.location",
+    )),
+    weather: Object.freeze(normalizeOutfitContextRecord(
+      source.weather,
+      "context.weather",
+    )),
+    weather_constraints: Object.freeze(weatherConstraints),
+    body_profile: Object.freeze({
+      ...bodyProfile,
+      height,
+      weight,
+      gender,
+    }),
+    gender,
+  });
+}
+
 function validateOutfitRequest(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new RequestValidationError("请求体必须是 JSON 对象");
@@ -1009,6 +1067,12 @@ function validateOutfitRequest(body) {
     itemBudget,
     outfitBudget,
     images: normalizedImages,
+    context: normalizeOutfitStructuredContext(body.context, {
+      scene,
+      gender,
+      height,
+      weight,
+    }),
   };
 }
 
@@ -3635,7 +3699,8 @@ function normalizeAnalysisLooks(analysis, outfitRequest = {}, gender = "unisex")
       styleSemantics: analysis.style_semantics,
     },
   );
-  const sourceLooks = Array.isArray(analysis.looks) && analysis.looks.length > 0
+  const hasExplicitLookCollection = Array.isArray(analysis.looks);
+  const sourceLooks = hasExplicitLookCollection
     ? analysis.looks
     : [{
       request_id: outfitRequest.requestId || "",
@@ -3903,11 +3968,15 @@ async function buildOutfitApiResponse(
     styleProfile: analysis.style_profile,
     outfitBlueprint: analysis.outfit_blueprint,
     bodyProfile: {
+      ...(outfitRequest.context?.body_profile || {}),
       height: outfitRequest.height,
       weight: outfitRequest.weight,
       analysis: analysis.bodyProfile,
     },
-    weather: {},
+    weather: {
+      ...(outfitRequest.context?.weather || {}),
+      constraints: outfitRequest.context?.weather_constraints || [],
+    },
     budget: {
       item: outfitRequest.itemBudget,
       outfit: outfitRequest.outfitBudget,
@@ -4864,10 +4933,12 @@ Return Simplified-Chinese user-facing text and exactly one JSON object with styl
           {
             role: "user",
             content: JSON.stringify({
+              user_input: sourceText,
               requested_style: sourceText,
               original_user_description: outfitRequest.request,
               gender: outfitRequest.gender,
               scene: outfitRequest.scene,
+              structured_context: outfitRequest.context,
               body_information: {
                 height: outfitRequest.height,
                 weight: outfitRequest.weight,
@@ -4959,9 +5030,11 @@ All user-facing natural-language values MUST be Simplified Chinese. Preserve gen
           {
             role: "user",
             content: JSON.stringify({
+              user_input: sourceText,
               requested_style: sourceText,
               scene: outfitRequest.scene,
               gender: requestContext.gender,
+              structured_context: outfitRequest.context,
               body_information: {
                 height: outfitRequest.height,
                 weight: outfitRequest.weight,
@@ -6237,7 +6310,7 @@ recommendations 必须包含 top、bottom、shoes、accessories、summary，且�
 
 function intentPhaseSystemPrompt() {
   return `You are the lightweight Style Intent Parser for a personal styling system.
-Interpret the user's unrestricted natural-language request exactly once. Do not analyze images, body proportions, weather, products, or generate an Outfit Blueprint or Look. Never use a style-name dictionary, whitelist, hard-coded style branch, or generic-casual fallback.
+Interpret user_input exactly once as the highest-priority source of core style. structured_context contains UI-selected scene, location, weather, weather constraints, body profile, and gender; it is auxiliary evidence and must never be treated as words the user said or used to replace the core style. Weather may only affect material, thickness, comfort, and safety. Do not analyze images, body proportions, products, or generate an Outfit Blueprint or Look. Never use a style-name dictionary, whitelist, hard-coded style branch, or generic-casual fallback.
 All natural-language values MUST be Simplified Chinese. English is allowed only for internal identifiers and the 11 dimension keys.
 Return exactly one JSON object with only semantic_intent and style_profile.
 semantic_intent must contain exactly identity_impression[], emotional_tone[], style_direction, must_express[], and must_avoid[]. Preserve compound, unknown, and future style descriptions without reducing them to one familiar label. must_express and must_avoid must be concrete enough to guide garments, silhouettes, materials, details, and shoes.
@@ -6253,7 +6326,7 @@ knowledge_context contains optional local fashion references retrieved after Int
 When knowledge_context contains relevant evidence, concretize that evidence in at least one applicable Blueprint field among core_elements, must_have_items, material_direction, and silhouette_strategy. Ignore irrelevant or conflicting evidence. Never copy reference IDs or treat the references as mandatory rules.
 ${partialViewSafetyInstruction}
 All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.
-Use body information, photographed proportions, scene, and budget only to make the immutable intent wearable. They may not override its must_express or introduce anything in must_avoid. Never infer proportions from height alone.
+Use structured_context, body information, photographed proportions, scene, and budget only to make the immutable intent wearable. The explicit user intent has priority over scene and weather. Weather may adjust only material, thickness, comfort, and safety; it may not rewrite the core style. These context fields may not override must_express or introduce anything in must_avoid. Never infer proportions from height alone.
 Return exactly one JSON object with only gender, bodyProfile, style, style_expression, and outfit_blueprint.
 outfit_blueprint must set blueprint_source="ai_generated" and contain style_identity, character_impression, visual_keywords[], core_elements[], silhouette_strategy[], color_palette[], material_direction[], must_have_items{}, avoid_items[], and occasion_strategy.
 The Blueprint must contain concrete purchasable core items for top+bottom+shoes or dress+shoes. It decides what the user should wear before any marketplace search.`;
@@ -6315,9 +6388,11 @@ async function generatePhasedOutfitAnalysis({
         {
           role: "user",
           content: JSON.stringify({
+            user_input: sourceText,
             requested_style: sourceText,
             scene: outfitRequest.scene,
             gender: requestContext.gender,
+            structured_context: outfitRequest.context,
           }),
         },
       ],
@@ -6354,6 +6429,7 @@ async function generatePhasedOutfitAnalysis({
       supplied_photo_roles: Object.keys(outfitRequest.images || {}),
     },
     scene: outfitRequest.scene,
+    structured_context: outfitRequest.context,
     budget: {
       item: outfitRequest.itemBudget,
       outfit: outfitRequest.outfitBudget,
@@ -6381,6 +6457,7 @@ async function generatePhasedOutfitAnalysis({
   const blueprintPhase = parseBlueprintPhase(extractAiText(blueprintResponse), {
     gender: requestContext.gender,
     scene: outfitRequest.scene,
+    structured_context: outfitRequest.context,
     requestId: outfitRequest.requestId,
     userInput: sourceText,
     style_expression: intentPhase.style_expression,
@@ -6412,6 +6489,7 @@ async function generatePhasedOutfitAnalysis({
       gender: blueprintPhase.gender,
     },
     scene: outfitRequest.scene,
+    structured_context: outfitRequest.context,
     budget: {
       item: outfitRequest.itemBudget,
       outfit: outfitRequest.outfitBudget,
@@ -6518,7 +6596,11 @@ app.post(
         height: outfitRequest.height,
         weight: outfitRequest.weight,
       },
-      weather: {},
+      location: outfitRequest.context.location,
+      weather: {
+        ...outfitRequest.context.weather,
+        constraints: outfitRequest.context.weather_constraints,
+      },
       budget: {
         item: outfitRequest.itemBudget,
         outfit: outfitRequest.outfitBudget,
@@ -6535,8 +6617,15 @@ app.post(
       requestedStyle: outfitRequest.request,
       styleSemantics: cachedStyleInterpretation?.style_semantics,
       styleProfile: cachedStyleInterpretation?.style_profile,
-      bodyProfile: {height: outfitRequest.height, weight: outfitRequest.weight},
-      weather: {},
+      bodyProfile: {
+        ...outfitRequest.context.body_profile,
+        height: outfitRequest.height,
+        weight: outfitRequest.weight,
+      },
+      weather: {
+        ...outfitRequest.context.weather,
+        constraints: outfitRequest.context.weather_constraints,
+      },
       budget: {item: outfitRequest.itemBudget, outfit: outfitRequest.outfitBudget},
       userInput: outfitRequest.request,
     });
@@ -6590,10 +6679,9 @@ app.post(
       });
     }
 
-    if (cachedStyleInterpretation) {
-      outfitRequest.request =
-        `Canonical style_semantics and style_profile; do not reinterpret: ${JSON.stringify(cachedStyleInterpretation)}`;
-    }
+    const aiRequestedStyle = cachedStyleInterpretation
+      ? `Canonical style_semantics and style_profile; do not reinterpret: ${JSON.stringify(cachedStyleInterpretation)}`
+      : outfitRequest.request;
     const userContent = [
       {
         type: "text",
@@ -6605,8 +6693,8 @@ app.post(
           `体重：${outfitRequest.weight} kg`,
           `用户性别：${outfitRequest.gender}`,
           `固定风格表达：${requestContext.style_expression}`,
-          `场景：${outfitRequest.scene}`,
-          `穿搭需求：${outfitRequest.request || "无额外要求"}`,
+          `用户原话：${aiRequestedStyle || "无额外要求"}`,
+          `结构化上下文（仅辅助场景、材质、厚薄、舒适性与安全性，不得改写核心风格）：${JSON.stringify(outfitRequest.context)}`,
           `实际提供照片：${Object.keys(outfitRequest.images)
             .map((role) => imageRoleLabels[role])
             .join("、")}`,

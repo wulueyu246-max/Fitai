@@ -82,6 +82,8 @@ void main() {
       advisor.buildPrompt(weather: weather, scene: '日常'),
       contains('高温时优先短袖'),
     );
+    expect(advisor.constraintsFor(weather), contains('高温时优先短袖、透气或速干材质，减少厚重层次'));
+    expect(advisor.constraintsFor(weather), contains('高湿度时避免闷热面料，优先透气和速干单品'));
   });
 
   testWidgets('unfinished try-on entry stays hidden on product cards', (

@@ -8,6 +8,10 @@ class OutfitRequest {
     this.gender = 'unisex',
     this.itemBudget = '200-500',
     this.outfitBudget = '800-1500',
+    this.location = const {},
+    this.weather = const {},
+    this.weatherConstraints = const [],
+    this.bodyProfile = const {},
   });
 
   final double height;
@@ -18,6 +22,10 @@ class OutfitRequest {
   final String gender;
   final String itemBudget;
   final String outfitBudget;
+  final Map<String, dynamic> location;
+  final Map<String, dynamic> weather;
+  final List<String> weatherConstraints;
+  final Map<String, dynamic> bodyProfile;
 
   Map<String, dynamic> toJson() {
     final normalizedImages = <String, String>{};
@@ -29,15 +37,36 @@ class OutfitRequest {
       }
     }
 
+    final normalizedGender = gender.trim().isEmpty ? 'unisex' : gender.trim();
+    final normalizedScene = scene.trim();
+    final normalizedWeatherConstraints = weatherConstraints
+        .map((value) => value.trim())
+        .where((value) => value.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+
     return {
       'height': height,
       'weight': weight,
-      'scene': scene.trim(),
+      'scene': normalizedScene,
       'request': request.trim(),
-      'gender': gender.trim().isEmpty ? 'unisex' : gender.trim(),
+      'gender': normalizedGender,
       'item_budget': itemBudget,
       'outfit_budget': outfitBudget,
       'images': normalizedImages,
+      'context': {
+        'scene': normalizedScene,
+        'location': Map<String, dynamic>.from(location),
+        'weather': Map<String, dynamic>.from(weather),
+        'weather_constraints': normalizedWeatherConstraints,
+        'body_profile': {
+          ...bodyProfile,
+          'height': height,
+          'weight': weight,
+          'gender': normalizedGender,
+        },
+        'gender': normalizedGender,
+      },
     };
   }
 }

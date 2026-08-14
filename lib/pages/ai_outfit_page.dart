@@ -700,16 +700,6 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         ),
       );
       final userRequest = _requestController.text.trim();
-      final weatherInstruction = _weather == null
-          ? (_location == null
-              ? ''
-              : '用户地区：${_location!.country} ${_location!.city}；'
-                  '场景：$_scene。请结合当地气候生成建议。')
-          : _weatherAdvisor.buildPrompt(
-              weather: _weather!,
-              scene: _scene,
-              location: _location,
-            );
       final outfitRequest = OutfitRequest(
         height: height,
         weight: weight,
@@ -717,9 +707,17 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         gender: _resolvedProfileGender,
         itemBudget: _itemBudget,
         outfitBudget: _outfitBudget,
-        request: [userRequest, weatherInstruction]
-            .where((value) => value.isNotEmpty)
-            .join(' '),
+        request: userRequest,
+        location: _location?.toJson() ?? const {},
+        weather: _weather?.toJson() ?? const {},
+        weatherConstraints: _weather == null
+            ? const []
+            : _weatherAdvisor.constraintsFor(_weather!),
+        bodyProfile: {
+          'height': height,
+          'weight': weight,
+          'gender': _resolvedProfileGender,
+        },
         images: images,
       );
       _setGenerationState(OutfitGenerationState.wakingServer);

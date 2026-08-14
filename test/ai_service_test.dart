@@ -141,6 +141,18 @@ void main() {
       'images': {
         'front': 'data:image/jpeg;base64,AA==',
       },
+      'context': {
+        'scene': '工作',
+        'location': <String, dynamic>{},
+        'weather': <String, dynamic>{},
+        'weather_constraints': <String>[],
+        'body_profile': {
+          'height': 173.0,
+          'weight': 55.0,
+          'gender': 'unisex',
+        },
+        'gender': 'unisex',
+      },
     });
 
     final client = MockClient((_) async {
@@ -190,6 +202,39 @@ void main() {
     );
 
     expect(femaleRequest.toJson()['gender'], 'female');
+  });
+
+  test('keeps user input separate from structured scene and weather context',
+      () {
+    const userInput = '我想出去玩，帮我搭一套';
+    const request = OutfitRequest(
+      height: 160,
+      weight: 48,
+      scene: '约会',
+      request: userInput,
+      gender: 'female',
+      location: {'country': '中国', 'city': '绍兴'},
+      weather: {'temperature': 33, 'humidity': 82, 'condition': '晴'},
+      weatherConstraints: ['高温时优先轻薄透气材质', '避免闷热面料'],
+      bodyProfile: {'body_type': '纤细'},
+      images: {'front': 'data:image/jpeg;base64,AA=='},
+    );
+
+    final payload = request.toJson();
+    final context = payload['context']! as Map<String, dynamic>;
+    expect(payload['request'], userInput);
+    expect(payload['request'], isNot(contains('用户地区')));
+    expect(payload['request'], isNot(contains('当前实时天气')));
+    expect(payload['request'], isNot(contains('场景：')));
+    expect(context['scene'], '约会');
+    expect(context['location'], {'country': '中国', 'city': '绍兴'});
+    expect((context['weather'] as Map<String, dynamic>)['temperature'], 33);
+    expect(context['weather_constraints'], [
+      '高温时优先轻薄透气材质',
+      '避免闷热面料',
+    ]);
+    expect(
+        (context['body_profile'] as Map<String, dynamic>)['gender'], 'female');
   });
 
   test('preserves male AI gender when a product omits gender', () async {

@@ -33,6 +33,34 @@ function cleanList(value, limit = 16) {
   return [...new Set(values.map(cleanText).filter(Boolean))].slice(0, limit);
 }
 
+function normalizeTypedAnchorEvidence(value, limit = 48) {
+  const source = Array.isArray(value) ? value : [];
+  const allowedDomains = new Set([
+    "style",
+    "persona",
+    "aesthetic_direction",
+    "explicit_user_avoid_style",
+  ]);
+  const result = [];
+  const seen = new Set();
+  for (const item of source) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const evidence = cleanText(item.value || item.term);
+    const domain = cleanText(item.evidence_domain || item.evidenceDomain);
+    if (!evidence || !allowedDomains.has(domain)) continue;
+    const key = `${domain}\u0000${evidence}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(Object.freeze({
+      value: evidence,
+      evidence_domain: domain,
+      source: cleanText(item.source),
+    }));
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
 function normalizeStyleAnchorSignature(value) {
   const source = value && typeof value === "object" && !Array.isArray(value)
     ? value
@@ -71,6 +99,9 @@ function normalizeStyleAnchorSignature(value) {
       source.anti_drift || source.antiDrift,
       48,
     )),
+    anti_drift_evidence: Object.freeze(normalizeTypedAnchorEvidence(
+      source.anti_drift_evidence || source.antiDriftEvidence,
+    )),
   });
 }
 
@@ -89,6 +120,9 @@ function normalizeStyleAnchor(value) {
     )),
     disallowed_style_drift: Object.freeze(cleanList(
       source.disallowed_style_drift || source.disallowedStyleDrift,
+    )),
+    anti_drift_evidence: Object.freeze(normalizeTypedAnchorEvidence(
+      source.anti_drift_evidence || source.antiDriftEvidence,
     )),
     style_anchor_signature: normalizeStyleAnchorSignature(
       source.style_anchor_signature || source.styleAnchorSignature,

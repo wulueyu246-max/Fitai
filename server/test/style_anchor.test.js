@@ -66,6 +66,8 @@ test("Style Anchor keeps cute academic and French variants", () => {
     anchor.disallowed_style_drift,
     ["纯成熟极简", "商务", "运动休闲"],
   );
+  assert.ok(anchor.anti_drift_evidence.every((entry) =>
+    entry.evidence_domain === "explicit_user_avoid_style"));
   assert.ok(anchor.style_anchor_signature.style_traits.includes("可爱"));
   assert.deepEqual(
     styleAnchorMatchAssessment(look("学院可爱"), anchor).status,
@@ -99,6 +101,45 @@ test("Style Anchor rejects cute intent drifting to mature minimalism", () => {
   assert.equal(unlistedDrift.allowed, true);
   assert.equal(unlistedDrift.status, STYLE_ANCHOR_STATUS.NEUTRAL);
   assert.ok(unlistedDrift.score >= 60);
+});
+
+test("Style Anchor ignores material and weather avoids as drift evidence", () => {
+  const anchor = buildStyleAnchor({
+    semanticIntent: {
+      style_direction: "可爱",
+      must_express: ["可爱"],
+      must_avoid: ["成熟商务"],
+    },
+    styleProfile: {
+      source_text: "可爱穿搭",
+      primary_style: "可爱",
+      must_avoid: ["皮革", "闷热", "高温", "黑色"],
+      negative_keywords: ["棉", "真丝"],
+    },
+    blueprint: {
+      style_identity: "可爱",
+      avoid_items: ["皮革", "闷热", "高温", "透气", "棉", "真丝", "黑色"],
+    },
+  });
+  const materialLook = structuredLook({
+    direction: "轻盈日常",
+    items: [{
+      product_type: "黑色真丝上衣",
+      product_family: "blouse",
+      fit: "透气合身",
+      materials: ["真丝", "皮革拼接"],
+      design_elements: ["轻薄", "高温舒适"],
+      style_role: "避免闷热",
+    }],
+  });
+  const assessment = styleAnchorMatchAssessment(materialLook, anchor);
+  assert.notEqual(assessment.status, STYLE_ANCHOR_STATUS.DRIFT);
+  assert.equal(assessment.allowed, true);
+  assert.deepEqual(assessment.conflict_drift, []);
+  assert.deepEqual(
+    anchor.anti_drift_evidence.map((entry) => entry.value),
+    ["成熟商务"],
+  );
 });
 
 test("Style Anchor accepts mature structured boss style and rejects student sweet", () => {
@@ -302,7 +343,7 @@ test("Style Anchor signature includes existing Fashion Brain evidence", () => {
         silhouette_preferences: ["强调腰线"],
         preferred_materials: ["真丝"],
         preferred_items: ["结构感衬衫"],
-        avoid_elements: ["学生感"],
+        avoid_styles: ["学生感"],
         dimensions: {maturity: 90, sportiness: 10},
       }],
     },

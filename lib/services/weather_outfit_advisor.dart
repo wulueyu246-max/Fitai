@@ -23,6 +23,9 @@ class WeatherOutfitAdvisor {
         '穿搭方案必须遵循：${rules.join('；')}。';
   }
 
+  List<String> constraintsFor(WeatherSnapshot weather) =>
+      List<String>.unmodifiable(_rules(weather));
+
   List<Product> adaptProducts({
     required List<Product> products,
     required WeatherSnapshot weather,

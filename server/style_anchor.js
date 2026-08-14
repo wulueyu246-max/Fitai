@@ -25,6 +25,13 @@ const STYLE_ANCHOR_STATUS = Object.freeze({
   NEUTRAL: "NEUTRAL",
   DRIFT: "DRIFT",
 });
+const STYLE_ANCHOR_DRIFT_DOMAINS = Object.freeze([
+  "style",
+  "persona",
+  "aesthetic_direction",
+  "explicit_user_avoid_style",
+]);
+const STYLE_ANCHOR_DRIFT_DOMAIN_SET = new Set(STYLE_ANCHOR_DRIFT_DOMAINS);
 
 function text(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -37,6 +44,45 @@ function list(value) {
 
 function mergeLists(...values) {
   return [...new Set(values.flatMap(list))];
+}
+
+function typedEvidence(values, evidenceDomain, source) {
+  if (!STYLE_ANCHOR_DRIFT_DOMAIN_SET.has(evidenceDomain)) return [];
+  return list(values).map((value) => Object.freeze({
+    value,
+    evidence_domain: evidenceDomain,
+    source,
+  }));
+}
+
+function normalizeTypedEvidence(values) {
+  const source = Array.isArray(values) ? values : [];
+  const result = [];
+  const seen = new Set();
+  for (const candidate of source) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      continue;
+    }
+    const value = text(candidate.value || candidate.term);
+    const evidenceDomain = text(
+      candidate.evidence_domain || candidate.evidenceDomain,
+    );
+    const evidenceSource = text(candidate.source);
+    if (!value || !STYLE_ANCHOR_DRIFT_DOMAIN_SET.has(evidenceDomain)) continue;
+    const key = `${evidenceDomain}\u0000${value}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(Object.freeze({
+      value,
+      evidence_domain: evidenceDomain,
+      source: evidenceSource,
+    }));
+  }
+  return result;
+}
+
+function mergeTypedEvidence(...values) {
+  return normalizeTypedEvidence(values.flat());
 }
 
 function normalize(value) {
@@ -250,6 +296,7 @@ function buildStyleAnchorSignature({
   coreStyleAnchor,
   allowedStyleVariants,
   disallowedStyleDrift,
+  antiDriftEvidence,
   semanticIntent = {},
   styleSemantics = {},
   styleProfile = {},
@@ -316,18 +363,9 @@ function buildStyleAnchorSignature({
       ]),
     )),
     dimensions: signatureDimensions(styleProfile, records, existing),
-    anti_drift: Object.freeze(mergeLists(
-      disallowedStyleDrift,
-      semanticIntent.must_avoid || semanticIntent.mustAvoid,
-      styleSemantics.must_avoid || styleSemantics.mustAvoid,
-      styleProfile.must_avoid || styleProfile.mustAvoid,
-      styleProfile.negative_keywords || styleProfile.negativeKeywords,
-      blueprint.avoid_items || blueprint.avoidItems,
-      existing.anti_drift || existing.antiDrift,
-      recordValues(records, [
-        "avoid_elements", "incompatible_styles", "avoid_styles",
-        "avoid_items", "avoid_contexts",
-      ]),
+    anti_drift: Object.freeze(mergeLists(disallowedStyleDrift)),
+    anti_drift_evidence: Object.freeze(normalizeTypedEvidence(
+      antiDriftEvidence,
     )),
   });
 }
@@ -366,13 +404,13 @@ function buildStyleAnchor({
     ...semanticVariants,
     ...downstreamVariants,
   ].map(stripStyleSuffix).filter(Boolean))];
-  const explicitAvoid = [...new Set([
-    ...list(semanticIntent.must_avoid || semanticIntent.mustAvoid),
-    ...list(styleSemantics.must_avoid || styleSemantics.mustAvoid),
-    ...list(styleProfile.must_avoid || styleProfile.mustAvoid),
-    ...list(styleProfile.negative_keywords || styleProfile.negativeKeywords),
-    ...list(blueprint.avoid_items || blueprint.avoidItems),
-  ].map(stripStyleSuffix).filter(Boolean))];
+  const semanticAvoid = list(
+    semanticIntent.must_avoid || semanticIntent.mustAvoid,
+  );
+  // Only the semantic intent parser's explicit user style exclusions are
+  // trusted as style drift evidence. Blueprint/style-profile avoid fields can
+  // also contain materials, weather, comfort, colours, construction, or body
+  // tactics and therefore remain downstream constraints rather than anchors.
   const anchorStrength = determineAnchorStrength({
     coreStyleAnchor,
     semanticIntent,
@@ -389,11 +427,40 @@ function buildStyleAnchor({
         containsSemanticPhrase(positive, value) ||
         containsSemanticPhrase(value, positive)))
     : [];
-  const disallowedStyleDrift = mergeLists(explicitAvoid, contradictoryDownstream);
+  const records = knowledgeRecords(knowledgeContext);
+  const existingAnchor = blueprint?.style_anchor || blueprint?.styleAnchor || {};
+  const existingSignature = existingAnchor.style_anchor_signature ||
+    existingAnchor.styleAnchorSignature || {};
+  const antiDriftEvidence = mergeTypedEvidence(
+    typedEvidence(
+      semanticAvoid,
+      "explicit_user_avoid_style",
+      "semantic_intent.must_avoid",
+    ),
+    typedEvidence(
+      contradictoryDownstream,
+      "aesthetic_direction",
+      "downstream_style_identity_conflict",
+    ),
+    typedEvidence(
+      recordValues(records, ["incompatible_styles", "avoid_styles"]),
+      "style",
+      "fashion_brain.style_relation",
+    ),
+    normalizeTypedEvidence(
+      existingAnchor.anti_drift_evidence || existingAnchor.antiDriftEvidence,
+    ),
+    normalizeTypedEvidence(
+      existingSignature.anti_drift_evidence ||
+      existingSignature.antiDriftEvidence,
+    ),
+  );
+  const disallowedStyleDrift = antiDriftEvidence.map(({value}) => value);
   const styleAnchorSignature = buildStyleAnchorSignature({
     coreStyleAnchor,
     allowedStyleVariants,
     disallowedStyleDrift,
+    antiDriftEvidence,
     semanticIntent,
     styleSemantics,
     styleProfile,
@@ -406,6 +473,7 @@ function buildStyleAnchor({
     anchor_strength: anchorStrength,
     allowed_style_variants: Object.freeze(allowedStyleVariants),
     disallowed_style_drift: Object.freeze(disallowedStyleDrift),
+    anti_drift_evidence: Object.freeze(antiDriftEvidence),
     style_anchor_signature: styleAnchorSignature,
   });
 }
@@ -489,9 +557,6 @@ function styleAnchorMatchAssessment(look = {}, anchor = {}) {
   const allowed = list(
     anchor.allowed_style_variants || anchor.allowedStyleVariants,
   );
-  const disallowed = list(
-    anchor.disallowed_style_drift || anchor.disallowedStyleDrift,
-  );
   const signature = normalizeSignature(anchor);
   const configured = Boolean(core || allowed.length > 0 ||
     Object.keys(signature).length > 0);
@@ -510,12 +575,17 @@ function styleAnchorMatchAssessment(look = {}, anchor = {}) {
   }
 
   const evidence = lookStyleEvidence(look);
-  const antiDrift = mergeLists(
-    disallowed,
-    signature.anti_drift || signature.antiDrift,
+  const antiDriftEvidence = mergeTypedEvidence(
+    normalizeTypedEvidence(
+      anchor.anti_drift_evidence || anchor.antiDriftEvidence,
+    ),
+    normalizeTypedEvidence(
+      signature.anti_drift_evidence || signature.antiDriftEvidence,
+    ),
   );
-  const conflicts = list(antiDrift).filter((value) =>
+  const conflictEvidence = antiDriftEvidence.filter(({value}) =>
     containsExplicitConflict(evidence.text, value));
+  const conflicts = conflictEvidence.map(({value}) => value);
   const coreMatched = core && containsSemanticPhrase(evidence.text, core);
   const matchedVariant = allowed.find((value) => {
     const normalized = normalize(stripStyleSuffix(value));
@@ -564,11 +634,13 @@ function styleAnchorMatchAssessment(look = {}, anchor = {}) {
     matched_variant: matchedVariant,
     matched_signature: matchedSignature,
     conflict_drift: Object.freeze(conflicts),
+    conflict_drift_evidence: Object.freeze(conflictEvidence),
   });
 }
 
 module.exports = {
   STYLE_ANCHOR_STATUS,
+  STYLE_ANCHOR_DRIFT_DOMAINS,
   buildStyleAnchor,
   buildStyleAnchorSignature,
   lookStyleEvidence,

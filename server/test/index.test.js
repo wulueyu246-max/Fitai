@@ -245,6 +245,38 @@ test("validates a complete outfit request with three images", () => {
   assert.deepEqual(Object.keys(result.images), ["front", "side", "back"]);
 });
 
+test("keeps user input verbatim and validates weather and scene as structured context", () => {
+  const userInput = "我想出去玩，帮我搭一套";
+  const result = validateOutfitRequest({
+    height: 160,
+    weight: 48,
+    scene: "约会",
+    request: userInput,
+    gender: "female",
+    context: {
+      scene: "约会",
+      location: {country: "中国", city: "绍兴"},
+      weather: {temperature: 33, humidity: 82, condition: "晴"},
+      weather_constraints: ["高温时优先轻薄透气材质", "避免闷热面料"],
+      body_profile: {body_type: "纤细"},
+      gender: "female",
+    },
+    images: {front: imageDataUrl},
+  });
+
+  assert.equal(result.request, userInput);
+  assert.equal(result.context.scene, "约会");
+  assert.deepEqual(result.context.location, {country: "中国", city: "绍兴"});
+  assert.equal(result.context.weather.temperature, 33);
+  assert.deepEqual(result.context.weather_constraints, [
+    "高温时优先轻薄透气材质",
+    "避免闷热面料",
+  ]);
+  assert.equal(result.context.body_profile.body_type, "纤细");
+  assert.equal(result.context.body_profile.gender, "female");
+  assert.doesNotMatch(result.request, /用户地区|当前实时天气|场景|穿搭方案必须遵循/u);
+});
+
 test("accepts a front-only outfit request without optional photo fields", () => {
   const result = validateOutfitRequest({
     height: 170,
@@ -3115,6 +3147,14 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
       itemBudget: "200-500",
       outfitBudget: "800-1500",
       images: {front: imageDataUrl},
+      context: {
+        scene: "约会",
+        location: {country: "中国", city: "绍兴"},
+        weather: {temperature: 33, humidity: 82},
+        weather_constraints: ["高温时优先轻薄透气材质"],
+        body_profile: {height: 168, weight: 55, gender: "female"},
+        gender: "female",
+      },
     },
     requestContext: {gender: "female", style_expression: "feminine"},
     userContent: [{type: "text", text: "甜妹穿搭"}],
@@ -3144,8 +3184,12 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
     "gender",
     "requested_style",
     "scene",
+    "structured_context",
+    "user_input",
   ]);
   assert.equal(intentInput.requested_style, "甜妹穿搭");
+  assert.equal(intentInput.user_input, "甜妹穿搭");
+  assert.equal(intentInput.structured_context.weather.temperature, 33);
 
   assert.match(requests[1].messages[0].content, /semantic_intent/);
   assert.equal(Object.hasOwn(requests[1], "max_tokens"), false);
@@ -3169,6 +3213,7 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
     "knowledge_context",
     "scene",
     "semantic_intent",
+    "structured_context",
   ]);
   assert.equal(Object.hasOwn(blueprintInput, "requested_style"), false);
   assert.equal(blueprintInput.semantic_intent.must_avoid.length > 0, true);
@@ -3205,6 +3250,7 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
     "outfit_blueprint",
     "persona_contract",
     "scene",
+    "structured_context",
   ]);
   assert.equal(lookInput.outfit_blueprint.blueprint_source, "ai_generated");
   assert.equal(
@@ -3217,6 +3263,7 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
   assert.equal(Object.hasOwn(lookInput, "style_profile"), false);
   assert.equal(Object.hasOwn(lookInput, "style_semantics"), false);
   assert.equal(Object.hasOwn(lookInput, "styling_strategy"), false);
+  assert.equal(lookInput.structured_context.weather.temperature, 33);
 });
 
 test("respects explicit compatible API configuration", () => {
@@ -4024,6 +4071,62 @@ test("recomputes usable Looks from the final response payload", () => {
     response.recommendations.products.map((entry) => entry.product_id),
     ["kept-1", "kept-2"],
   );
+});
+
+test("does not synthesize a usable placeholder when every generated Look failed", async () => {
+  const response = await buildOutfitApiResponse({
+    gender: "female",
+    style: "女性化出游",
+    style_expression: "feminine",
+    style_semantics: {},
+    style_profile: {},
+    outfit_blueprint: {},
+    bodyProfile: "已完成身体分析",
+    recommendations: {
+      top: "",
+      bottom: "",
+      shoes: "",
+      accessories: "",
+      summary: "",
+    },
+    looks: [],
+    products: [],
+    look_validation_summary: {
+      request_id: "all-looks-dropped",
+      total_looks: 3,
+      valid_looks: 0,
+      repaired_looks: 0,
+      removed_looks: 3,
+      fallback_used: false,
+    },
+    look_quality_summary: {
+      generated: 3,
+      usable: 0,
+      dropped: 3,
+      warnings: 0,
+    },
+  }, [], {
+    requestId: "all-looks-dropped",
+    request: "我想出去玩，帮我搭一套",
+    gender: "female",
+    scene: "旅行",
+    height: 160,
+    weight: 48,
+    itemBudget: "200-500",
+    outfitBudget: "800-1500",
+    context: {
+      weather: {},
+      weather_constraints: [],
+      body_profile: {height: 160, weight: 48, gender: "female"},
+    },
+  });
+
+  assert.deepEqual(response.looks, []);
+  assert.deepEqual(response.products, []);
+  assert.equal(response.look_quality_summary.generated, 3);
+  assert.equal(response.look_quality_summary.usable, 0);
+  assert.equal(response.look_quality_summary.dropped, 3);
+  assert.equal(response.look_validation_summary.final_usable_looks, 0);
 });
 
 test("aggregates daily V1.3 user and commerce metrics", () => {
