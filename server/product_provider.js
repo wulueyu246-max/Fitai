@@ -37,6 +37,7 @@ const {
 } = require("./body_strategy_match");
 const {
   NO_PRODUCT_MEETS_CORE_SPEC,
+  SPEC_CONSISTENCY_STATUS,
   compilePurchaseSpecification,
   gateCandidates,
 } = require("./purchase_specification");
@@ -587,6 +588,18 @@ class TaobaoProductProvider extends ProductProvider {
   async #candidatePool(filters, metrics = null) {
     const requirement = normalizeProductRequirement(filters, filters);
     const basePurchaseSpecification = compilePurchaseSpecification(requirement, filters);
+    if (basePurchaseSpecification.spec_consistency_status !==
+        SPEC_CONSISTENCY_STATUS.PASS) {
+      this.logger.info?.("purchase_specification_inconsistent", {
+        request_id: filters.requestId || undefined,
+        look_id: requirement.look_id || undefined,
+        slot_key: requirement.slot_key || undefined,
+        category: requirement.category,
+        spec_consistency_status: basePurchaseSpecification.spec_consistency_status,
+        spec_conflicts: basePurchaseSpecification.spec_conflicts,
+      });
+      return [];
+    }
     const outfitBlueprint = filters.outfit_blueprint || filters.outfitBlueprint ||
       filters.recommendation_context?.outfit_blueprint || {};
     const translatedSearchPlan = expandBlueprintSearchPlan(

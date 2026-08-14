@@ -177,6 +177,48 @@ test("successful empty Taobao responses do not silently become Mock products", a
   assert.deepEqual(products, []);
 });
 
+test("an inconsistent Purchase Specification never reaches Taobao or visual verification", async () => {
+  let taobaoCalls = 0;
+  let visualCalls = 0;
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client: {
+      call: async (method) => {
+        taobaoCalls += 1;
+        return response(method, []);
+      },
+    },
+    visualVerifier: {
+      maxCandidatesPerSlot: 8,
+      async verifyGroups({groups}) {
+        visualCalls += 1;
+        return {groups, summary: {}};
+      },
+    },
+    logger: {info() {}, warn() {}},
+  });
+  const products = await provider.recommendForQueries([{
+    request_id: "request-inconsistent-spec",
+    look_id: "look-1",
+    slot_key: "request-inconsistent-spec:look-1:shoes:0",
+    category: "shoes",
+    gender: "female",
+    product_type: "白色透气老爹鞋",
+    product_family: "sneakers",
+    item_name: "白色透气老爹鞋",
+    required_attributes: ["尖头", "浅口"],
+    constraint_sources: [
+      {value: "尖头", level: "required", source: "body_strategy"},
+      {value: "浅口", level: "required", source: "body_strategy"},
+    ],
+  }], {requestId: "request-inconsistent-spec", gender: "female"});
+
+  assert.deepEqual(products, []);
+  assert.equal(taobaoCalls, 0);
+  assert.equal(visualCalls, 0);
+});
+
 test("Taobao API exceptions are returned explicitly without Mock products", async () => {
   const provider = providerWithClient({
     call: async () => {

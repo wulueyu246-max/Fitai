@@ -70,8 +70,10 @@ const {
 const {TaobaoService} = require("./taobao_service");
 const {
   assertContextGender,
+  createPersonaContract,
   createRecommendationContext,
   logRecommendationStage,
+  personaConsistencyAssessment,
   resolveStyleExpression,
 } = require("./recommendation_context");
 const {
@@ -1586,6 +1588,11 @@ function parseOutfitAnalysis(content, context = {}) {
       styleSemantics,
       outfitBlueprint,
       styleAnchor,
+      personaContract: context.personaContract || context.persona_contract ||
+        createPersonaContract({
+          gender: analysisGender,
+          styleExpression,
+        }),
       nativeExecutableLookContract:
         context.nativeExecutableLookContract === true,
     })
@@ -2564,6 +2571,7 @@ function repairAndValidateAiLooks({
   styleSemantics,
   outfitBlueprint,
   styleAnchor,
+  personaContract,
   nativeExecutableLookContract = false,
 }) {
   const looks = [];
@@ -2749,6 +2757,19 @@ function repairAndValidateAiLooks({
           throw new Error(`Native Look ${lookId} 缺少完整核心组合`);
         }
         assertNativeLookDirection(lookDirection, nativeItems, lookId);
+        const personaAssessment = personaConsistencyAssessment({
+          ...look,
+          look_direction: lookDirection,
+          items: nativeItems,
+        }, personaContract || createPersonaContract({
+          gender: analysisGender,
+          styleExpression: context.style_expression,
+        }));
+        if (!personaAssessment.allowed) {
+          throw new Error(
+            `Native Look ${lookId} persona conflict: ${personaAssessment.conflicts.join(", ")}`,
+          );
+        }
         const signature = nativeLookCoreSignature(nativeItems);
         if (!signature || nativeCoreSignatures.has(signature)) {
           throw new Error(`Native Look ${lookId} 与已有 Look 核心组合重复`);
@@ -2801,6 +2822,8 @@ function repairAndValidateAiLooks({
               .test(warning)),
           warnings: [...new Set(lookWarnings)],
           items: nativeItems,
+          persona_consistency_status: personaAssessment.status,
+          persona_consistency_conflicts: personaAssessment.conflicts,
           style_anchor_status: anchorAssessment.status,
           style_anchor_match_score: anchorAssessment.score,
           style_match_score: finalStyleScore,
@@ -2928,10 +2951,24 @@ function repairAndValidateAiLooks({
       }
       repaired ||= initialCoreRepair.repaired || styleRepair.repaired ||
         finalCoreRepair.repaired;
+      const personaAssessment = personaConsistencyAssessment({
+        ...look,
+        items: finalItems,
+      }, personaContract || createPersonaContract({
+        gender: analysisGender,
+        styleExpression: context.style_expression,
+      }));
+      if (!personaAssessment.allowed) {
+        throw new Error(
+          `Look ${look.look_id} persona conflict: ${personaAssessment.conflicts.join(", ")}`,
+        );
+      }
       looks.push({
         ...look,
         accessories_decision: decisions,
         items: finalItems,
+        persona_consistency_status: personaAssessment.status,
+        persona_consistency_conflicts: personaAssessment.conflicts,
         style_match_score: finalStyleScore,
         intent_score: lookIntentScore({
           styleMatch: finalStyleScore,
@@ -6309,6 +6346,7 @@ async function generatePhasedOutfitAnalysis({
   const blueprintInput = {
     semantic_intent: blueprintSemanticIntent,
     knowledge_context: fashionBrainResult.knowledge_context,
+    persona_contract: requestContext.persona_contract,
     body_analysis: {
       height: outfitRequest.height,
       weight: outfitRequest.weight,
@@ -6365,6 +6403,10 @@ async function generatePhasedOutfitAnalysis({
   } = blueprintPhase.outfit_blueprint;
   const lookInput = {
     outfit_blueprint: lookBlueprintInput,
+    persona_contract: createPersonaContract({
+      gender: blueprintPhase.gender,
+      styleExpression: blueprintPhase.style_expression,
+    }),
     body_analysis: {
       summary: blueprintPhase.bodyProfile,
       gender: blueprintPhase.gender,
@@ -6401,6 +6443,10 @@ async function generatePhasedOutfitAnalysis({
         requestId: outfitRequest.requestId,
         userInput: sourceText,
         style_expression: blueprintPhase.style_expression,
+        personaContract: createPersonaContract({
+          gender: blueprintPhase.gender,
+          styleExpression: blueprintPhase.style_expression,
+        }),
       },
     );
   } catch (error) {

@@ -3203,6 +3203,7 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
     "body_analysis",
     "budget",
     "outfit_blueprint",
+    "persona_contract",
     "scene",
   ]);
   assert.equal(lookInput.outfit_blueprint.blueprint_source, "ai_generated");
@@ -3211,6 +3212,7 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
     false,
   );
   assert.equal(lookInput.body_analysis.gender, "female");
+  assert.equal(lookInput.persona_contract.gender, "female");
   assert.equal(Object.hasOwn(lookInput, "requested_style"), false);
   assert.equal(Object.hasOwn(lookInput, "style_profile"), false);
   assert.equal(Object.hasOwn(lookInput, "style_semantics"), false);

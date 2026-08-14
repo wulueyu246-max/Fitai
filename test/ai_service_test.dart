@@ -179,6 +179,19 @@ void main() {
     await service.generateOutfit(unnormalizedRequest);
   });
 
+  test('preserves an explicit female profile gender in the outfit payload', () {
+    const femaleRequest = OutfitRequest(
+      height: 160,
+      weight: 48,
+      scene: '出游',
+      request: '我想出去玩，帮我搭一套',
+      gender: 'female',
+      images: {'front': 'data:image/jpeg;base64,AA=='},
+    );
+
+    expect(femaleRequest.toJson()['gender'], 'female');
+  });
+
   test('preserves male AI gender when a product omits gender', () async {
     final client = MockClient((_) async {
       return http.Response(

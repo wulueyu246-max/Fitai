@@ -5,6 +5,7 @@ const test = require("node:test");
 const {
   MATCH_STATE,
   NO_PRODUCT_MEETS_CORE_SPEC,
+  SPEC_CONSISTENCY_STATUS,
   compilePurchaseSpecification,
   evaluateCandidateAgainstSpecification,
   procurementResult,
@@ -178,4 +179,55 @@ test("an explicit sneaker specification does not reject sport shoes", () => {
   }, spec);
   assert.notEqual(assessment.state, MATCH_STATE.FAIL);
   assert.deepEqual(assessment.report.matched_conflict, []);
+});
+
+test("old-dad sneakers conflict with pointed low-vamp hard requirements", () => {
+  const spec = compilePurchaseSpecification({
+    ...maryJaneRequirement(),
+    product_type: "白色透气老爹鞋",
+    product_family: "sneakers",
+    item_name: "白色透气老爹鞋",
+    required_attributes: ["尖头", "浅口"],
+    constraint_sources: [
+      {value: "尖头", level: "required", source: "body_strategy"},
+      {value: "浅口", level: "required", source: "body_strategy"},
+    ],
+  });
+  assert.equal(spec.spec_consistency_status, SPEC_CONSISTENCY_STATUS.FAIL);
+  assert.deepEqual(spec.search_queries, []);
+  assert.ok(spec.spec_conflicts.some((conflict) =>
+    conflict.code === "PRODUCT_TYPE_MUST_CONFLICT" &&
+      conflict.attribute === "尖头"));
+  assert.ok(spec.spec_conflicts.some((conflict) =>
+    conflict.code === "PRODUCT_TYPE_MUST_CONFLICT" &&
+      conflict.attribute === "浅口"));
+});
+
+test("pointed low-vamp shoes pass compatible hard requirements", () => {
+  const spec = compilePurchaseSpecification({
+    ...maryJaneRequirement(),
+    product_type: "尖头浅口低跟单鞋",
+    product_family: "pointed_flat",
+    item_name: "尖头浅口低跟单鞋",
+    required_attributes: ["尖头", "浅口"],
+  });
+  assert.equal(spec.spec_consistency_status, SPEC_CONSISTENCY_STATUS.PASS);
+  assert.deepEqual(spec.spec_conflicts, []);
+  assert.ok(spec.search_queries.length > 0);
+});
+
+test("a high-waist jogger contract is internally consistent", () => {
+  const spec = compilePurchaseSpecification({
+    ...maryJaneRequirement(),
+    category: "bottom",
+    product_type: "高腰束脚运动裤",
+    product_family: "pants",
+    item_name: "高腰束脚运动裤",
+    fit: "高腰锥形束脚",
+    required_attributes: ["高腰"],
+    preferred_attributes: ["九分"],
+    avoid_attributes: ["低腰"],
+  });
+  assert.equal(spec.spec_consistency_status, SPEC_CONSISTENCY_STATUS.PASS);
+  assert.deepEqual(spec.spec_conflicts, []);
 });

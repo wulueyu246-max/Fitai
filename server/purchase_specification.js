@@ -6,8 +6,15 @@ const {
   normalizeProductRequirement,
   semanticCategoryMatch,
 } = require("./product_relevance");
+const {
+  canonicalizeAttribute,
+  categoryForFamily,
+  extractCanonicalAttributeValues,
+  inferProductFamily,
+} = require("./executable_product_requirement");
 
 const MATCH_STATE = Object.freeze({PASS: "PASS", FAIL: "FAIL", UNKNOWN: "UNKNOWN"});
+const SPEC_CONSISTENCY_STATUS = Object.freeze({PASS: "PASS", FAIL: "FAIL"});
 const NO_PRODUCT_MEETS_CORE_SPEC = "NO_PRODUCT_MEETS_CORE_SPEC";
 
 const SPORT_TERMS = Object.freeze([
@@ -99,6 +106,111 @@ function classifyAttributes(requirement) {
   };
 }
 
+const SPEC_ATTRIBUTE_CONFLICTS = Object.freeze({
+  short_length: /(?:盖臀|过胯|长款|超长|常规长度)/u,
+  high_waist: /(?:低腰|中低腰|普通腰线)/u,
+  low_vamp: /(?:高帮|高鞋口|老爹鞋|运动鞋|跑鞋|训练鞋)/u,
+  pointed_toe: /(?:圆头|方头|老爹鞋|运动鞋|跑鞋|训练鞋)/u,
+  low_heel: /(?:超高跟|厚重高跟)/u,
+});
+
+function specificationEvidence(requirement) {
+  return [
+    requirement.product_type,
+    requirement.product_family,
+    requirement.fit,
+    ...list(requirement.design_elements),
+  ].filter(Boolean).join(" ");
+}
+
+function constraintSource(input, attribute) {
+  const target = canonicalizeAttribute(attribute);
+  const sources = Array.isArray(input.constraint_sources)
+    ? input.constraint_sources
+    : Array.isArray(input.constraintSources) ? input.constraintSources : [];
+  const matched = sources.find((entry) => entry && typeof entry === "object" &&
+    String(entry.level || "").toLowerCase() === "required" &&
+    canonicalizeAttribute(entry.value) === target);
+  return text(matched?.source) || "executable_contract";
+}
+
+function specificationConstraintSatisfied(attribute, evidence) {
+  const target = canonicalizeAttribute(attribute);
+  const canonicalEvidence = new Set(
+    extractCanonicalAttributeValues(evidence).map(canonicalizeAttribute),
+  );
+  return normalized(evidence).includes(normalized(attribute)) ||
+    canonicalEvidence.has(target) ||
+    (normalized(attribute) === "玛丽珍结构" && isMaryJane(evidence));
+}
+
+function specificationConstraintContradicted(attribute, evidence, requirement) {
+  const target = canonicalizeAttribute(attribute);
+  const conflictPattern = SPEC_ATTRIBUTE_CONFLICTS[target];
+  if (conflictPattern?.test(evidence)) return true;
+  if (normalized(attribute) === "非明显运动" && hasAny(evidence, SPORT_TERMS)) {
+    return true;
+  }
+  if (requirement.category === "shoes" &&
+      ["pointed_toe", "low_vamp"].includes(target) &&
+      requirement.product_family === "sneakers") {
+    return true;
+  }
+  return false;
+}
+
+function assessPurchaseSpecificationConsistency(requirement, attributes, input = {}) {
+  const evidence = specificationEvidence(requirement);
+  const conflicts = [];
+  const inferredFamily = inferProductFamily(
+    requirement.category,
+    requirement.product_type,
+  );
+  const familyCategory = categoryForFamily(requirement.product_family);
+  if (familyCategory && familyCategory !== requirement.category) {
+    conflicts.push({
+      code: "CATEGORY_FAMILY_CONFLICT",
+      product_family: requirement.product_family,
+      category: requirement.category,
+    });
+  }
+  if (inferredFamily && requirement.product_family &&
+      inferredFamily !== requirement.product_family) {
+    conflicts.push({
+      code: "PRODUCT_TYPE_FAMILY_CONFLICT",
+      product_type: requirement.product_type,
+      product_family: requirement.product_family,
+      inferred_family: inferredFamily,
+    });
+  }
+  for (const attribute of attributes.must) {
+    if (specificationConstraintSatisfied(attribute, evidence)) continue;
+    if (!specificationConstraintContradicted(attribute, evidence, requirement)) continue;
+    conflicts.push({
+      code: "PRODUCT_TYPE_MUST_CONFLICT",
+      attribute,
+      source: constraintSource(input, attribute),
+      product_type: requirement.product_type,
+      fit: requirement.fit || "",
+    });
+  }
+  for (const attribute of attributes.avoid) {
+    if (!specificationConstraintSatisfied(attribute, evidence)) continue;
+    conflicts.push({
+      code: "PRODUCT_TYPE_AVOID_CONFLICT",
+      attribute,
+      product_type: requirement.product_type,
+      fit: requirement.fit || "",
+    });
+  }
+  return Object.freeze({
+    status: conflicts.length > 0
+      ? SPEC_CONSISTENCY_STATUS.FAIL
+      : SPEC_CONSISTENCY_STATUS.PASS,
+    conflicts: Object.freeze(conflicts.map((conflict) => Object.freeze(conflict))),
+  });
+}
+
 function queryTokens(specification, {includeShould = true, includePreferred = true} = {}) {
   const gender = specification.gender === "female" ? "女士" :
     specification.gender === "male" ? "男士" : "";
@@ -123,6 +235,11 @@ function buildSpecificationSearchQueries(specification) {
 function compilePurchaseSpecification(input = {}, context = {}) {
   const requirement = normalizeProductRequirement(input, context);
   const attributes = classifyAttributes(requirement);
+  const consistency = assessPurchaseSpecificationConsistency(
+    requirement,
+    attributes,
+    input,
+  );
   const specification = {
     request_id: requirement.request_id || text(context.requestId || context.request_id),
     look_id: requirement.look_id,
@@ -135,6 +252,8 @@ function compilePurchaseSpecification(input = {}, context = {}) {
     should_attributes: attributes.should,
     preferred_attributes: attributes.preferred,
     avoid_attributes: attributes.avoid,
+    spec_consistency_status: consistency.status,
+    spec_conflicts: consistency.conflicts,
     style_roles: list(requirement.style_role),
     search_queries: [],
     relaxation_policy: {
@@ -144,7 +263,9 @@ function compilePurchaseSpecification(input = {}, context = {}) {
       maximum_level: 2,
     },
   };
-  specification.search_queries = buildSpecificationSearchQueries(specification);
+  specification.search_queries = consistency.status === SPEC_CONSISTENCY_STATUS.PASS
+    ? buildSpecificationSearchQueries(specification)
+    : [];
   return Object.freeze(specification);
 }
 
@@ -258,6 +379,8 @@ function procurementResult(products, specification) {
 module.exports = {
   MATCH_STATE,
   NO_PRODUCT_MEETS_CORE_SPEC,
+  SPEC_CONSISTENCY_STATUS,
+  assessPurchaseSpecificationConsistency,
   buildSpecificationSearchQueries,
   compilePurchaseSpecification,
   evaluateCandidateAgainstSpecification,
