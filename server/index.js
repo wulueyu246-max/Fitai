@@ -59,6 +59,7 @@ const {
 } = require("./blueprint_search_translator");
 const {
   canonicalizeAttribute,
+  blueprintConstraintScope,
   categoryForSlotRole,
   compileExecutableProductContract,
   extractCanonicalAttributeValues,
@@ -91,8 +92,14 @@ const {
 } = require("./fashion_brain");
 const {
   buildStyleAnchor,
+  styleAnchorSelfContradictions,
   styleAnchorMatchAssessment,
 } = require("./style_anchor");
+const {
+  assessLookAgainstStylingConstitution,
+  buildStylingConstitution,
+  normalizeStylingConstitution,
+} = require("./styling_constitution");
 const {
   LOOK_INTENT_WEIGHTS,
   MIN_LOOK_STYLE_SCORE,
@@ -1522,13 +1529,25 @@ function parseOutfitAnalysis(content, context = {}) {
       parsed.outfit_blueprint || parsed.outfitBlueprint,
     {styleProfile, styleSemantics},
   );
-  const styleAnchor = buildStyleAnchor({
-    semanticIntent: context.semanticIntent || context.semantic_intent,
-    styleSemantics,
-    styleProfile,
-    blueprint: outfitBlueprint,
-    knowledgeContext: context.knowledgeContext || context.knowledge_context,
-  });
+  const semanticIntent = context.semanticIntent || context.semantic_intent ||
+    parsed.semantic_intent || parsed.semanticIntent || {};
+  const stylingConstitution = context.stylingConstitution ||
+    context.styling_constitution || parsed.styling_constitution ||
+    parsed.stylingConstitution || {};
+  const existingStyleAnchor = outfitBlueprint.style_anchor ||
+    outfitBlueprint.styleAnchor;
+  const styleAnchor = configuredStyleAnchor(existingStyleAnchor) ||
+      context.nativeExecutableLookContract === true
+    ? resolveAuthoritativeStyleAnchor({
+      outfitBlueprint,
+      semanticIntent,
+      stylingConstitution,
+      styleSemantics,
+      styleProfile,
+      knowledgeContext: context.knowledgeContext || context.knowledge_context,
+      requestId: context.requestId,
+    })
+    : existingStyleAnchor;
   outfitBlueprint = normalizeOutfitBlueprint({
     ...outfitBlueprint,
     style_anchor: styleAnchor,
@@ -2509,28 +2528,149 @@ function assertNativeBodyConstraints(item, stylingStrategy) {
   }
 }
 
-function blueprintConstraintSources(outfitBlueprint = {}, category = "") {
-  const mustHave = outfitBlueprint.must_have_items ||
-    outfitBlueprint.mustHaveItems || {};
-  const values = Array.isArray(mustHave?.[category])
-    ? mustHave[category]
-    : mustHave?.[category] == null ? [] : [mustHave[category]];
-  return [...new Set(values.flatMap((value) => {
-    const text = value && typeof value === "object"
-      ? value.product_type || value.item_name || value.itemName || ""
-      : value;
-    return extractCanonicalAttributeValues(text);
-  }))].map((value) => ({
-    value,
-    level: "required",
-    source: "blueprint",
-  }));
+function blueprintConstraintSources(
+  outfitBlueprint = {},
+  category = "",
+  semanticItem = {},
+) {
+  const scope = blueprintConstraintScope(
+    outfitBlueprint,
+    category,
+    semanticItem,
+  );
+  return [
+    ...scope.shared_constraints.map((value) => ({
+      value,
+      level: "required",
+      source: "blueprint_shared",
+    })),
+    ...scope.candidate_constraints.map((value) => ({
+      value,
+      level: "required",
+      source: "blueprint_candidate",
+    })),
+  ];
+}
+
+function configuredStyleAnchor(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const signature = value.style_anchor_signature || value.styleAnchorSignature;
+  const signatureConfigured = signature && typeof signature === "object" &&
+    !Array.isArray(signature) && (
+      [
+        signature.style_traits || signature.styleTraits,
+        signature.silhouette_tendencies || signature.silhouetteTendencies,
+        signature.material_tendencies || signature.materialTendencies,
+        signature.design_directions || signature.designDirections,
+        signature.anti_drift || signature.antiDrift,
+        signature.anti_drift_evidence || signature.antiDriftEvidence,
+      ].some((entries) => Array.isArray(entries) && entries.length > 0) ||
+      (signature.dimensions && typeof signature.dimensions === "object" &&
+        Object.keys(signature.dimensions).length > 0)
+    );
+  return Boolean(
+    readOptionalString(value.core_style_anchor || value.coreStyleAnchor) ||
+    readOptionalString(
+      value.selected_aesthetic_direction || value.selectedAestheticDirection,
+    ) ||
+    (Array.isArray(value.allowed_style_variants || value.allowedStyleVariants) &&
+      (value.allowed_style_variants || value.allowedStyleVariants).length > 0) ||
+    signatureConfigured,
+  );
+}
+
+function sourcedStyleAnchor(anchor, source) {
+  return Object.freeze({
+    ...anchor,
+    style_anchor_source: source,
+  });
+}
+
+function assertStyleAnchorInvariant({
+  styleAnchor,
+  semanticIntent = {},
+  stylingConstitution = {},
+  requestId,
+} = {}) {
+  const selectedDirection = readOptionalString(
+    stylingConstitution.selected_aesthetic_direction ||
+    stylingConstitution.selectedAestheticDirection ||
+    semanticIntent.selected_aesthetic_direction ||
+    semanticIntent.selectedAestheticDirection ||
+    styleAnchor?.selected_aesthetic_direction ||
+    styleAnchor?.selectedAestheticDirection,
+  );
+  const contradictions = styleAnchorSelfContradictions(
+    styleAnchor,
+    selectedDirection,
+  );
+  if (contradictions.length === 0) return styleAnchor;
+  const error = new Error("STYLE_ANCHOR_SELF_CONTRADICTION");
+  error.code = "STYLE_ANCHOR_SELF_CONTRADICTION";
+  error.styleAnchorConflicts = contradictions;
+  console.error("STYLE_ANCHOR_SELF_CONTRADICTION", {
+    requestId: readOptionalString(requestId),
+    selected_aesthetic_direction: selectedDirection,
+    conflicts: contradictions.map(({value, evidence_domain, source}) => ({
+      value,
+      evidence_domain,
+      source,
+    })),
+  });
+  throw error;
+}
+
+function resolveAuthoritativeStyleAnchor({
+  outfitBlueprint = {},
+  semanticIntent = {},
+  stylingConstitution = {},
+  styleSemantics = {},
+  styleProfile = {},
+  knowledgeContext = {},
+  requestId,
+} = {}) {
+  const existing = outfitBlueprint.style_anchor || outfitBlueprint.styleAnchor;
+  let styleAnchor;
+  if (configuredStyleAnchor(existing)) {
+    styleAnchor = sourcedStyleAnchor(existing, "blueprint_authoritative");
+  } else {
+    const selectedDirection = readOptionalString(
+      stylingConstitution.selected_aesthetic_direction ||
+      stylingConstitution.selectedAestheticDirection,
+    );
+    const hasSemanticIntent = semanticIntent &&
+      typeof semanticIntent === "object" && !Array.isArray(semanticIntent) &&
+      Object.keys(semanticIntent).length > 0;
+    const hasBlueprintStyleContext = Boolean(readOptionalString(
+      outfitBlueprint.style_identity || outfitBlueprint.styleIdentity,
+    ));
+    if (!hasSemanticIntent || !selectedDirection || !hasBlueprintStyleContext) {
+      const error = new Error("Style Anchor fallback context is incomplete");
+      error.code = "STYLE_ANCHOR_FALLBACK_CONTEXT_INCOMPLETE";
+      throw error;
+    }
+    styleAnchor = sourcedStyleAnchor(buildStyleAnchor({
+      semanticIntent,
+      stylingConstitution,
+      styleSemantics,
+      styleProfile,
+      blueprint: outfitBlueprint,
+      knowledgeContext,
+    }), "fallback_rebuilt");
+  }
+  return assertStyleAnchorInvariant({
+    styleAnchor,
+    semanticIntent,
+    stylingConstitution,
+    requestId,
+  });
 }
 
 function executableConstraintSources(
   stylingStrategy = {},
   outfitBlueprint = {},
   category = "",
+  semanticItem = {},
 ) {
   const body = executableBodyConstraints(stylingStrategy, category);
   const bodySources = [
@@ -2549,7 +2689,7 @@ function executableConstraintSources(
       level: "avoid",
       source: "body_strategy",
     })),
-    ...blueprintConstraintSources(outfitBlueprint, category),
+    ...blueprintConstraintSources(outfitBlueprint, category, semanticItem),
   ];
   const seen = new Set();
   return bodySources.filter((entry) => {
@@ -2740,6 +2880,18 @@ function repairAndValidateAiLooks({
             `Native Look ${lookId} style anchor drift: ${anchorAssessment.conflict_drift.join(", ") || "core anchor missing"}`,
           );
         }
+        const constitutionAssessment = assessLookAgainstStylingConstitution({
+          ...rawLook,
+          style: rawLook.style || look.style,
+          look_direction: lookDirection,
+        }, context.stylingConstitution || context.styling_constitution, {
+          styleAnchorAssessment: anchorAssessment,
+        });
+        if (!constitutionAssessment.allowed) {
+          throw new Error(
+            `Native Look ${lookId} Styling Constitution drift: ${constitutionAssessment.reason}`,
+          );
+        }
         const lookWarnings = [];
         const nativeItems = [];
         rawLook.items.forEach((rawItem, itemIndex) => {
@@ -2762,6 +2914,7 @@ function repairAndValidateAiLooks({
                 stylingStrategy,
                 outfitBlueprint,
                 category,
+                rawItem,
               ),
             });
             assertNativeBodyConstraints(compiled, stylingStrategy);
@@ -2890,6 +3043,9 @@ function repairAndValidateAiLooks({
           persona_consistency_conflicts: personaAssessment.conflicts,
           style_anchor_status: anchorAssessment.status,
           style_anchor_match_score: anchorAssessment.score,
+          styling_constitution_status: constitutionAssessment.status,
+          selected_aesthetic_direction:
+            constitutionAssessment.selected_aesthetic_direction,
           style_match_score: finalStyleScore,
           intent_score: lookIntentScore({
             styleMatch: finalStyleScore,
@@ -5100,6 +5256,7 @@ function buildIntentPhaseResult({
   semanticIntent,
   styleProfile,
   sourceText = "",
+  structuredContext = {},
 }) {
   const identityImpression = normalizeIntentList(
     semanticIntent?.identity_impression || semanticIntent?.identityImpression,
@@ -5121,7 +5278,7 @@ function buildIntentPhaseResult({
     semanticIntent?.must_avoid || semanticIntent?.mustAvoid,
     "must_avoid",
   );
-  const normalizedIntent = Object.freeze({
+  const baseIntent = Object.freeze({
     identity_impression: identityImpression,
     emotional_tone: emotionalTone,
     style_direction: styleDirection,
@@ -5165,6 +5322,28 @@ function buildIntentPhaseResult({
     negative_keywords: profileSource.negative_keywords ||
       profileSource.negativeKeywords || mustAvoid,
   }, {sourceText});
+  const stylingConstitution = buildStylingConstitution({
+    userInput: sourceText,
+    semanticIntent: {
+      ...baseIntent,
+      style_selection_mode: semanticIntent?.style_selection_mode ||
+        semanticIntent?.styleSelectionMode,
+      selected_aesthetic_direction:
+        semanticIntent?.selected_aesthetic_direction ||
+        semanticIntent?.selectedAestheticDirection || styleDirection,
+      selection_reason: semanticIntent?.selection_reason ||
+        semanticIntent?.selectionReason,
+    },
+    styleProfile: normalizedProfile,
+    structuredContext,
+  });
+  const normalizedIntent = Object.freeze({
+    ...baseIntent,
+    style_selection_mode: stylingConstitution.style_selection_mode,
+    selected_aesthetic_direction:
+      stylingConstitution.selected_aesthetic_direction,
+    selection_reason: stylingConstitution.selection_reason,
+  });
   assertValidStyleInterpretation({
     style_semantics: styleSemantics,
     style_profile: normalizedProfile,
@@ -5174,6 +5353,7 @@ function buildIntentPhaseResult({
     style_semantics: styleSemantics,
     style_profile: normalizedProfile,
     style_expression: resolveStyleExpression({styleProfile: normalizedProfile}),
+    styling_constitution: stylingConstitution,
   });
 }
 
@@ -5186,6 +5366,7 @@ function parseIntentPhase(content, context = {}) {
     semanticIntent: parsed.semantic_intent || parsed.semanticIntent,
     styleProfile: parsed.style_profile || parsed.styleProfile,
     sourceText: context.sourceText,
+    structuredContext: context.structuredContext || context.structured_context,
   });
 }
 
@@ -5710,6 +5891,7 @@ function buildIntentPhaseResult({
   semanticIntent,
   styleProfile,
   sourceText = "",
+  structuredContext = {},
 }) {
   const identityImpression = normalizeIntentList(
     semanticIntent?.identity_impression || semanticIntent?.identityImpression,
@@ -5731,7 +5913,7 @@ function buildIntentPhaseResult({
     semanticIntent?.must_avoid || semanticIntent?.mustAvoid,
     "must_avoid",
   );
-  const normalizedIntent = Object.freeze({
+  const baseIntent = Object.freeze({
     identity_impression: identityImpression,
     emotional_tone: emotionalTone,
     style_direction: styleDirection,
@@ -5775,6 +5957,28 @@ function buildIntentPhaseResult({
     negative_keywords: profileSource.negative_keywords ||
       profileSource.negativeKeywords || mustAvoid,
   }, {sourceText});
+  const stylingConstitution = buildStylingConstitution({
+    userInput: sourceText,
+    semanticIntent: {
+      ...baseIntent,
+      style_selection_mode: semanticIntent?.style_selection_mode ||
+        semanticIntent?.styleSelectionMode,
+      selected_aesthetic_direction:
+        semanticIntent?.selected_aesthetic_direction ||
+        semanticIntent?.selectedAestheticDirection || styleDirection,
+      selection_reason: semanticIntent?.selection_reason ||
+        semanticIntent?.selectionReason,
+    },
+    styleProfile: normalizedProfile,
+    structuredContext,
+  });
+  const normalizedIntent = Object.freeze({
+    ...baseIntent,
+    style_selection_mode: stylingConstitution.style_selection_mode,
+    selected_aesthetic_direction:
+      stylingConstitution.selected_aesthetic_direction,
+    selection_reason: stylingConstitution.selection_reason,
+  });
   assertValidStyleInterpretation({
     style_semantics: styleSemantics,
     style_profile: normalizedProfile,
@@ -5784,6 +5988,7 @@ function buildIntentPhaseResult({
     style_semantics: styleSemantics,
     style_profile: normalizedProfile,
     style_expression: resolveStyleExpression({styleProfile: normalizedProfile}),
+    styling_constitution: stylingConstitution,
   });
 }
 
@@ -5796,6 +6001,7 @@ function parseIntentPhase(content, context = {}) {
     semanticIntent: parsed.semantic_intent || parsed.semanticIntent,
     styleProfile: parsed.style_profile || parsed.styleProfile,
     sourceText: context.sourceText,
+    structuredContext: context.structuredContext || context.structured_context,
   });
 }
 
@@ -6014,14 +6220,30 @@ function parseBlueprintPhase(content, context = {}) {
       parsed.fashion_brain_context || parsed.fashionBrainContext,
   });
   outfitBlueprint = preservation.blueprint;
-  const styleAnchor = buildStyleAnchor({
+  const stylingConstitution = context.stylingConstitution ||
+      context.styling_constitution
+    ? normalizeStylingConstitution(
+      context.stylingConstitution || context.styling_constitution,
+    )
+    : buildStylingConstitution({
+      userInput: context.userInput || style,
+      semanticIntent: context.semanticIntent || context.semantic_intent || {},
+      styleProfile,
+    });
+  const styleAnchor = assertStyleAnchorInvariant({
+    styleAnchor: sourcedStyleAnchor(buildStyleAnchor({
+      semanticIntent: context.semanticIntent || context.semantic_intent,
+      stylingConstitution,
+      styleSemantics,
+      styleProfile,
+      blueprint: outfitBlueprint,
+      knowledgeContext: context.knowledge_context || context.knowledgeContext ||
+        parsed.knowledge_context || parsed.knowledgeContext ||
+        parsed.fashion_brain_context || parsed.fashionBrainContext,
+    }), "blueprint_authoritative"),
     semanticIntent: context.semanticIntent || context.semantic_intent,
-    styleSemantics,
-    styleProfile,
-    blueprint: outfitBlueprint,
-    knowledgeContext: context.knowledge_context || context.knowledgeContext ||
-      parsed.knowledge_context || parsed.knowledgeContext ||
-      parsed.fashion_brain_context || parsed.fashionBrainContext,
+    stylingConstitution,
+    requestId: context.requestId,
   });
   outfitBlueprint = normalizeOutfitBlueprint({
     ...outfitBlueprint,
@@ -6065,6 +6287,7 @@ function parseBlueprintPhase(content, context = {}) {
       bodyProfile,
       style,
       semantic_intent: context.semanticIntent || context.semantic_intent,
+      styling_constitution: stylingConstitution,
       style_expression: resolveStyleExpression({
         explicit: parsed.style_expression || parsed.styleExpression ||
           context.style_expression || context.styleExpression,
@@ -6099,6 +6322,7 @@ function mergeBlueprintAndLookPhase(blueprintPhase, content, context = {}) {
     style_expression: blueprintPhase.style_expression,
     style_semantics: blueprintPhase.style_semantics,
     style_profile: blueprintPhase.style_profile,
+    styling_constitution: blueprintPhase.styling_constitution,
     outfit_blueprint: blueprintPhase.outfit_blueprint,
     styling_strategy: lookPayload.styling_strategy ||
       blueprintPhase.styling_strategy,
@@ -6108,12 +6332,15 @@ function mergeBlueprintAndLookPhase(blueprintPhase, content, context = {}) {
     style_expression: blueprintPhase.style_expression,
     styleSemantics: blueprintPhase.style_semantics,
     styleProfile: blueprintPhase.style_profile,
+    semanticIntent: blueprintPhase.semantic_intent,
+    stylingConstitution: blueprintPhase.styling_constitution,
     outfitBlueprint: blueprintPhase.outfit_blueprint,
     nativeExecutableLookContract: true,
   });
   return {
     ...analysis,
     semantic_intent: blueprintPhase.semantic_intent,
+    styling_constitution: blueprintPhase.styling_constitution,
     outfit_blueprint: attachKnowledgeSourcesToBlueprint(
       analysis.outfit_blueprint,
       blueprintPhase.outfit_blueprint.knowledge_sources,
@@ -6313,7 +6540,8 @@ function intentPhaseSystemPrompt() {
 Interpret user_input exactly once as the highest-priority source of core style. structured_context contains UI-selected scene, location, weather, weather constraints, body profile, and gender; it is auxiliary evidence and must never be treated as words the user said or used to replace the core style. Weather may only affect material, thickness, comfort, and safety. Do not analyze images, body proportions, products, or generate an Outfit Blueprint or Look. Never use a style-name dictionary, whitelist, hard-coded style branch, or generic-casual fallback.
 All natural-language values MUST be Simplified Chinese. English is allowed only for internal identifiers and the 11 dimension keys.
 Return exactly one JSON object with only semantic_intent and style_profile.
-semantic_intent must contain exactly identity_impression[], emotional_tone[], style_direction, must_express[], and must_avoid[]. Preserve compound, unknown, and future style descriptions without reducing them to one familiar label. must_express and must_avoid must be concrete enough to guide garments, silhouettes, materials, details, and shoes.
+semantic_intent must contain exactly identity_impression[], emotional_tone[], style_direction, must_express[], must_avoid[], style_selection_mode, selected_aesthetic_direction, and selection_reason. Preserve compound, unknown, and future style descriptions without reducing them to one familiar label. must_express and must_avoid must be concrete enough to guide garments, silhouettes, materials, details, and shoes.
+Set style_selection_mode="explicit" only when the user names or clearly describes a core style. Otherwise set "stylist_selected", actively choose one definite selected_aesthetic_direction from persona, body, occasion, and current styling context, and give a concise selection_reason. Never choose a functional, athleisure, or generic-basic direction merely because of weather. Weather is not an aesthetic source.
 style_profile must contain intent_priority_score (explicit style requests >=85), interpretation, primary_style, secondary_styles[], blend_rationale, dimensions with all 11 differentiated 0-100 values (maturity, femininity, masculinity, structure, minimalism, romantic, sportiness, sexiness, youthfulness, luxury, casualness), silhouette, preferred_items[], preferred_colors[], preferred_materials[], must_have[], must_avoid[], positive_keywords[], and negative_keywords[].`;
 }
 
@@ -6326,7 +6554,8 @@ knowledge_context contains optional local fashion references retrieved after Int
 When knowledge_context contains relevant evidence, concretize that evidence in at least one applicable Blueprint field among core_elements, must_have_items, material_direction, and silhouette_strategy. Ignore irrelevant or conflicting evidence. Never copy reference IDs or treat the references as mandatory rules.
 ${partialViewSafetyInstruction}
 All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.
-Use structured_context, body information, photographed proportions, scene, and budget only to make the immutable intent wearable. The explicit user intent has priority over scene and weather. Weather may adjust only material, thickness, comfort, and safety; it may not rewrite the core style. These context fields may not override must_express or introduce anything in must_avoid. Never infer proportions from height alone.
+styling_constitution is the highest-level decision policy. Follow its priority order and selected_aesthetic_direction. In explicit mode preserve the user's style exactly. In stylist_selected mode execute the selected direction as a deliberate aesthetic choice. Do not default to functional, athleisure, or basic casual.
+Use structured_context, body information, photographed proportions, scene, and budget only to make the immutable intent wearable. The explicit user intent has priority over scene and weather. Weather may adjust only material, thickness, sleeve length, breathability, layering, comfort, and safety; it may not rewrite core_style, persona, or overall aesthetic identity. These context fields may not override must_express or introduce anything in must_avoid. Never infer proportions from height alone.
 Return exactly one JSON object with only gender, bodyProfile, style, style_expression, and outfit_blueprint.
 outfit_blueprint must set blueprint_source="ai_generated" and contain style_identity, character_impression, visual_keywords[], core_elements[], silhouette_strategy[], color_palette[], material_direction[], must_have_items{}, avoid_items[], and occasion_strategy.
 The Blueprint must contain concrete purchasable core items for top+bottom+shoes or dress+shoes. It decides what the user should wear before any marketplace search.`;
@@ -6334,6 +6563,8 @@ The Blueprint must contain concrete purchasable core items for top+bottom+shoes 
 
 function phasedLookSystemPrompt() {
   return `You are a senior personal stylist. This is Phase 2 only. Execute the supplied immutable Outfit Blueprint; it is the one and only aesthetic source. Do not reinterpret the requested style or change the Blueprint. Return Simplified Chinese user-facing text and compact JSON only.
+
+styling_constitution is binding. All three Looks must share its selected_aesthetic_direction. Diversity is allowed only through silhouette, color, item combination, and substyle; it may not cross the shared aesthetic boundary.
 
 Create exactly three materially different Looks. Each look_direction contains: name, core_structure (top_bottom_shoes, dress_shoes, or outerwear_bottom_shoes), silhouette, waistline, length_strategy, shoe_shape. Each Look contains: style_direction, look_direction, styling_goal, proportion_strategy, why_this_changes_the_body_proportion, accessories_decision[], items[]. Every Look independently contains top+bottom+shoes, dress+shoes, or outerwear+bottom+shoes. Accessories are optional and never replace core items.
 
@@ -6397,7 +6628,10 @@ async function generatePhasedOutfitAnalysis({
         },
       ],
     });
-    intentPhase = parseIntentPhase(extractAiText(intentResponse), {sourceText});
+    intentPhase = parseIntentPhase(extractAiText(intentResponse), {
+      sourceText,
+      structuredContext: outfitRequest.context,
+    });
   }
   const intentDurationMs = Date.now() - intentStartedAt;
 
@@ -6420,6 +6654,7 @@ async function generatePhasedOutfitAnalysis({
   };
   const blueprintInput = {
     semantic_intent: blueprintSemanticIntent,
+    styling_constitution: intentPhase.styling_constitution,
     knowledge_context: fashionBrainResult.knowledge_context,
     persona_contract: requestContext.persona_contract,
     body_analysis: {
@@ -6462,6 +6697,7 @@ async function generatePhasedOutfitAnalysis({
     userInput: sourceText,
     style_expression: intentPhase.style_expression,
     semanticIntent: intentPhase.semantic_intent,
+    stylingConstitution: intentPhase.styling_constitution,
     styleSemantics: intentPhase.style_semantics,
     styleProfile: intentPhase.style_profile,
     knowledgeContext: fashionBrainResult.knowledge_context,
@@ -6480,6 +6716,7 @@ async function generatePhasedOutfitAnalysis({
   } = blueprintPhase.outfit_blueprint;
   const lookInput = {
     outfit_blueprint: lookBlueprintInput,
+    styling_constitution: blueprintPhase.styling_constitution,
     persona_contract: createPersonaContract({
       gender: blueprintPhase.gender,
       styleExpression: blueprintPhase.style_expression,
@@ -6521,6 +6758,7 @@ async function generatePhasedOutfitAnalysis({
         requestId: outfitRequest.requestId,
         userInput: sourceText,
         style_expression: blueprintPhase.style_expression,
+        stylingConstitution: blueprintPhase.styling_constitution,
         personaContract: createPersonaContract({
           gender: blueprintPhase.gender,
           styleExpression: blueprintPhase.style_expression,
@@ -7520,6 +7758,8 @@ module.exports = {
   preserveBlueprintKnowledge,
   buildStyleAnchor,
   styleAnchorMatchAssessment,
+  assertStyleAnchorInvariant,
+  resolveAuthoritativeStyleAnchor,
   mergeBlueprintAndLookPhase,
   createBlueprintPartialAnalysis,
   shouldRepairStyleInterpretation,

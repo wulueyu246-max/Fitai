@@ -89,6 +89,37 @@ function normalize(value) {
   return text(value).toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/gu, "");
 }
 
+function canonicalStyleDirectionForms(value) {
+  const source = text(value).normalize("NFKC").toLowerCase();
+  if (!source) return [];
+  const parenthetical = [...source.matchAll(/\(([^()]*)\)/gu)]
+    .map((match) => match[1]);
+  const withoutParenthetical = source.replace(/\([^()]*\)/gu, " ");
+  return [...new Set([
+    source,
+    withoutParenthetical,
+    ...parenthetical,
+  ].map(stripStyleSuffix).map(normalize).filter(Boolean))];
+}
+
+function styleDirectionsEquivalent(left, right) {
+  const leftForms = canonicalStyleDirectionForms(left);
+  const rightForms = new Set(canonicalStyleDirectionForms(right));
+  return leftForms.some((value) => rightForms.has(value));
+}
+
+function styleDirectionsCompatible(left, right) {
+  if (styleDirectionsEquivalent(left, right)) return true;
+  const leftForms = canonicalStyleDirectionForms(left);
+  const rightForms = canonicalStyleDirectionForms(right);
+  return leftForms.some((leftValue) => rightForms.some((rightValue) => {
+    const shorterLength = Math.min(leftValue.length, rightValue.length);
+    return shorterLength >= 4 && (
+      leftValue.includes(rightValue) || rightValue.includes(leftValue)
+    );
+  }));
+}
+
 function stripStyleSuffix(value) {
   let result = text(value);
   for (const suffix of STYLE_SUFFIXES) {
@@ -189,6 +220,8 @@ function chooseCoreAnchor({semanticIntent, styleSemantics, styleProfile, bluepri
   if (requestedPhrase) return requestedPhrase;
 
   const candidates = [
+    semanticIntent?.selected_aesthetic_direction,
+    semanticIntent?.selectedAestheticDirection,
     semanticIntent?.style_direction,
     semanticIntent?.styleDirection,
     styleProfile?.primary_style,
@@ -210,6 +243,11 @@ function determineAnchorStrength({
   semanticIntent,
   styleProfile,
 } = {}) {
+  const selectionMode = text(
+    semanticIntent?.style_selection_mode || semanticIntent?.styleSelectionMode,
+  );
+  if (selectionMode === "explicit") return "strong";
+  if (selectionMode === "stylist_selected") return "weak";
   const sourceText = text(styleProfile?.source_text || styleProfile?.sourceText);
   if (requestedStylePhrase(sourceText)) return "strong";
   const structuredSignals = [
@@ -372,11 +410,18 @@ function buildStyleAnchorSignature({
 
 function buildStyleAnchor({
   semanticIntent = {},
+  stylingConstitution = {},
   styleSemantics = {},
   styleProfile = {},
   blueprint = {},
   knowledgeContext = {},
 } = {}) {
+  const selectedAestheticDirection = text(
+    semanticIntent.selected_aesthetic_direction ||
+    semanticIntent.selectedAestheticDirection ||
+    stylingConstitution.selected_aesthetic_direction ||
+    stylingConstitution.selectedAestheticDirection,
+  );
   const coreStyleAnchor = chooseCoreAnchor({
     semanticIntent,
     styleSemantics,
@@ -384,6 +429,7 @@ function buildStyleAnchor({
     blueprint,
   });
   const semanticVariants = [
+    ...list(selectedAestheticDirection),
     ...list(semanticIntent.identity_impression || semanticIntent.identityImpression),
     ...list(semanticIntent.emotional_tone || semanticIntent.emotionalTone),
     ...list(semanticIntent.style_direction || semanticIntent.styleDirection),
@@ -470,6 +516,7 @@ function buildStyleAnchor({
 
   return Object.freeze({
     core_style_anchor: coreStyleAnchor,
+    selected_aesthetic_direction: selectedAestheticDirection,
     anchor_strength: anchorStrength,
     allowed_style_variants: Object.freeze(allowedStyleVariants),
     disallowed_style_drift: Object.freeze(disallowedStyleDrift),
@@ -551,6 +598,34 @@ function normalizeSignature(anchor = {}) {
     : {};
 }
 
+function styleAnchorSelfContradictions(anchor = {}, selectedDirection = "") {
+  const selected = text(
+    selectedDirection ||
+    anchor.selected_aesthetic_direction ||
+    anchor.selectedAestheticDirection,
+  );
+  if (!selected) return Object.freeze([]);
+  const signature = normalizeSignature(anchor);
+  const typed = mergeTypedEvidence(
+    normalizeTypedEvidence(
+      anchor.anti_drift_evidence || anchor.antiDriftEvidence,
+    ),
+    normalizeTypedEvidence(
+      signature.anti_drift_evidence || signature.antiDriftEvidence,
+    ),
+  );
+  const typedValues = new Set(typed.map(({value}) => value));
+  const legacy = list(
+    anchor.disallowed_style_drift || anchor.disallowedStyleDrift,
+  ).filter((value) => !typedValues.has(value)).map((value) => Object.freeze({
+    value,
+    evidence_domain: "style",
+    source: "style_anchor.disallowed_style_drift",
+  }));
+  return Object.freeze([...typed, ...legacy].filter(({value}) =>
+    styleDirectionsEquivalent(selected, value)));
+}
+
 function styleAnchorMatchAssessment(look = {}, anchor = {}) {
   const core = text(anchor.core_style_anchor || anchor.coreStyleAnchor);
   const strength = text(anchor.anchor_strength || anchor.anchorStrength) || "weak";
@@ -583,14 +658,21 @@ function styleAnchorMatchAssessment(look = {}, anchor = {}) {
       signature.anti_drift_evidence || signature.antiDriftEvidence,
     ),
   );
+  const positiveDirections = mergeLists(core, allowed);
   const conflictEvidence = antiDriftEvidence.filter(({value}) =>
-    containsExplicitConflict(evidence.text, value));
+    containsExplicitConflict(evidence.text, value) &&
+    !positiveDirections.some((direction) =>
+      styleDirectionsEquivalent(direction, value)));
   const conflicts = conflictEvidence.map(({value}) => value);
-  const coreMatched = core && containsSemanticPhrase(evidence.text, core);
+  const evidenceDirections = evidence.style_traits;
+  const directionMatches = (direction) => evidenceDirections.some((candidate) =>
+    styleDirectionsCompatible(candidate, direction) ||
+    containsSemanticPhrase(candidate, direction));
+  const coreMatched = core && directionMatches(core);
   const matchedVariant = allowed.find((value) => {
     const normalized = normalize(stripStyleSuffix(value));
     if (normalized.length < 4 && normalized !== normalize(core)) return false;
-    return containsSemanticPhrase(evidence.text, value);
+    return directionMatches(value);
   }) || "";
   const matchedSignature = Object.freeze({
     style_traits: Object.freeze(matchingValues(
@@ -644,5 +726,6 @@ module.exports = {
   buildStyleAnchor,
   buildStyleAnchorSignature,
   lookStyleEvidence,
+  styleAnchorSelfContradictions,
   styleAnchorMatchAssessment,
 };

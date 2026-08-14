@@ -54,6 +54,27 @@ const FAMILY_CATEGORY = Object.freeze(Object.fromEntries(
   Object.entries(FAMILY_RULES).flatMap(([category, rules]) =>
     rules.map(([family]) => [family, category])),
 ));
+const FIT_FAMILY_STATUS = Object.freeze({
+  COMPATIBLE: "COMPATIBLE",
+  NEUTRAL: "NEUTRAL",
+  CONFLICT: "CONFLICT",
+});
+const FIT_COMPATIBLE_FAMILY_PAIRS = new Set([
+  "jeans:straight_pants",
+  "jeans:wide_leg_pants",
+  "pants:straight_pants",
+  "pants:wide_leg_pants",
+  "straight_pants:wide_leg_pants",
+  "flats:pointed_flat",
+]);
+const EXPLICIT_FIT_CONFLICT_RULES = Object.freeze({
+  skirt: /(?:阔腿|直筒裤|铅笔裤|小脚裤|牛仔裤|短裤|pants?|jeans?|shorts?)/iu,
+  wide_leg_pants: /(?:紧身|贴腿|铅笔裤|小脚裤|打底裤|skinny|leggings?)/iu,
+  straight_pants: /(?:紧身|贴腿|铅笔裤|小脚裤|打底裤|喇叭裤|skinny|leggings?|flare)/iu,
+  heels: /(?:平底|无跟|flat)/iu,
+  pointed_flat: /(?:高跟|细高跟|中跟|猫跟|细跟|粗跟|heels?)/iu,
+  flats: /(?:高跟|细高跟|中跟|猫跟|细跟|粗跟|heels?)/iu,
+});
 
 const SLOT_CATEGORY = Object.freeze({
   top: "top",
@@ -136,6 +157,9 @@ const ATTRIBUTE_CANONICAL_RULES = Object.freeze([
   ["stretch", /(?:高弹|弹力|弹性|\bstretch(?:y)?\b)/iu, "弹力"],
   ["low_vamp", /(?:浅口|低鞋口)/u, "浅口"],
   ["pointed_toe", /(?:尖头|pointed[- ]?toe)/iu, "尖头"],
+  ["round_toe", /(?:圆头|round[- ]?toe)/iu, "圆头"],
+  ["square_neck", /(?:方领|square[- ]?neck)/iu, "方领"],
+  ["v_neck", /(?:V领|V字领|v[- ]?neck)/iu, "V领"],
   ["low_heel", /(?:低跟|中低跟|猫跟|low[- ]?heel)/iu, "低跟"],
   ["cropped_length", /(?:九分|ankle[- ]?length)/iu, "九分"],
   ["light_platform", /(?:轻量增高|轻量厚底)/u, "轻量增高"],
@@ -159,6 +183,41 @@ function extractCanonicalAttributeValues(value) {
   return ATTRIBUTE_CANONICAL_RULES
     .filter(([, pattern]) => pattern.test(text))
     .map(([, , label]) => label);
+}
+
+function extractBlueprintAttributeConstraints(value) {
+  const source = cleanText(value);
+  const alternatives = uniqueStrings(source.split(/\s*(?:或者|或)\s*/u));
+  if (alternatives.length < 2) return extractCanonicalAttributeValues(source);
+  const attributesByAlternative = alternatives.map(extractCanonicalAttributeValues);
+  if (attributesByAlternative.some((attributes) => attributes.length === 0)) {
+    return extractCanonicalAttributeValues(source);
+  }
+  const common = attributesByAlternative[0].filter((attribute) =>
+    attributesByAlternative.slice(1).every((attributes) =>
+      attributes.includes(attribute)));
+  const varying = uniqueStrings(attributesByAlternative.flatMap((attributes) =>
+    attributes.filter((attribute) => !common.includes(attribute))));
+  return uniqueStrings([
+    ...common,
+    ...(varying.length > 1 ? [varying.join("或")] : varying),
+  ]);
+}
+
+function constraintScopeKey(value) {
+  return constraintAlternatives(value)
+    .map((alternative) => canonicalizeAttribute(alternative))
+    .sort()
+    .join("|");
+}
+
+function isExplicitCategoryConstraint(value) {
+  const text = cleanText(value);
+  return /^(?:必须|仅限|只限)/u.test(text) ||
+    /(?:所有|全部|每(?:件|条|双|款|套)|该类|本类).*(?:必须|均需|都要|只限|仅限)/u
+      .test(text) ||
+    /^(?:上衣|上装|下装|裤装|裙装|连衣裙|鞋履|鞋子|配饰).*(?:必须|均需|都要|只限|仅限)/u
+      .test(text);
 }
 
 function normalizeConstraintSources(value) {
@@ -370,6 +429,43 @@ function inferProductFamily(category, ...values) {
   return rules.find(([, pattern]) => pattern.test(evidence))?.[0] || "";
 }
 
+function assessFitFamilyCompatibility(category, productFamily, fit) {
+  const normalizedCategory = cleanText(category).toLowerCase();
+  const normalizedFamily = cleanText(productFamily).toLowerCase();
+  const fitText = cleanText(fit);
+  const fitFamily = inferProductFamily(normalizedCategory, fitText);
+  if (!fitText || !fitFamily) {
+    return Object.freeze({
+      status: FIT_FAMILY_STATUS.NEUTRAL,
+      fit_family: fitFamily,
+    });
+  }
+  const explicitConflict = EXPLICIT_FIT_CONFLICT_RULES[normalizedFamily];
+  if (explicitConflict?.test(fitText)) {
+    return Object.freeze({
+      status: FIT_FAMILY_STATUS.CONFLICT,
+      fit_family: fitFamily,
+    });
+  }
+  if (fitFamily === normalizedFamily) {
+    return Object.freeze({
+      status: FIT_FAMILY_STATUS.COMPATIBLE,
+      fit_family: fitFamily,
+    });
+  }
+  const pair = [normalizedFamily, fitFamily].sort().join(":");
+  if (FIT_COMPATIBLE_FAMILY_PAIRS.has(pair)) {
+    return Object.freeze({
+      status: FIT_FAMILY_STATUS.COMPATIBLE,
+      fit_family: fitFamily,
+    });
+  }
+  return Object.freeze({
+    status: FIT_FAMILY_STATUS.NEUTRAL,
+    fit_family: fitFamily,
+  });
+}
+
 function categoryForFamily(productFamily) {
   return FAMILY_CATEGORY[cleanText(productFamily).toLowerCase()] || "";
 }
@@ -564,6 +660,120 @@ function structuredBlueprintCandidates(blueprint = {}) {
         };
       });
     });
+  });
+}
+
+function blueprintCategoryConstraintCandidates(blueprint = {}, category = "") {
+  const normalizedCategory = cleanText(category).toLowerCase();
+  const items = blueprint.must_have_items || blueprint.mustHaveItems || {};
+  const rawValues = Array.isArray(items?.[normalizedCategory])
+    ? items[normalizedCategory]
+    : items?.[normalizedCategory] == null ? [] : [items[normalizedCategory]];
+  return rawValues.flatMap((rawValue) => {
+    const source = rawValue && typeof rawValue === "object"
+      ? rawValue
+      : {product_type: rawValue};
+    const rawProductType = cleanText(
+      source.product_type || source.item_name || source.itemName,
+    );
+    const alternatives = splitProductAlternatives(rawProductType);
+    const alternativesAreProducts = alternatives.length > 1 &&
+      alternatives.every((value) => isConcreteProductType(
+        value,
+        normalizedCategory,
+      ));
+    return (alternativesAreProducts ? alternatives : [rawProductType])
+      .filter(Boolean)
+      .map((value) => {
+        const separated = extractLeadingColorAlternatives(value);
+        return {
+          category: normalizedCategory,
+          product_type: separated.product_type,
+          product_family: cleanText(
+            source.product_family || source.productFamily,
+          ).toLowerCase() || inferProductFamily(
+            normalizedCategory,
+            separated.product_type,
+          ),
+        };
+      });
+  });
+}
+
+function blueprintConstraintScope(
+  blueprint = {},
+  category = "",
+  semanticItem = {},
+) {
+  const normalizedCategory = cleanText(category).toLowerCase();
+  const allCandidates = blueprintCategoryConstraintCandidates(
+    blueprint,
+    normalizedCategory,
+  );
+  const explicitShared = allCandidates
+    .filter((candidate) => isExplicitCategoryConstraint(candidate.product_type))
+    .flatMap((candidate) =>
+      extractBlueprintAttributeConstraints(candidate.product_type));
+  const candidates = allCandidates
+    .filter((candidate) => !isExplicitCategoryConstraint(candidate.product_type))
+    .map((candidate) => ({
+      ...candidate,
+      constraints: extractBlueprintAttributeConstraints(candidate.product_type),
+    }))
+    .filter((candidate) => isConcreteProductType(
+      candidate.product_type,
+      normalizedCategory,
+    ) || (candidate.product_family && candidate.constraints.length > 0));
+  const sharedFromIntersection = candidates.length === 0
+    ? []
+    : candidates[0].constraints.filter((constraint) => {
+      const key = constraintScopeKey(constraint);
+      return candidates.slice(1).every((candidate) =>
+        candidate.constraints.some((value) => constraintScopeKey(value) === key));
+    });
+  const sharedConstraints = uniqueStrings([
+    ...explicitShared,
+    ...sharedFromIntersection,
+  ]);
+  const sharedKeys = new Set(sharedConstraints.map(constraintScopeKey));
+  const productType = normalizeExecutableItemName(
+    semanticItem.product_type || semanticItem.productType ||
+      semanticItem.item_name || semanticItem.itemName,
+  );
+  const productFamily = inferProductFamily(normalizedCategory, productType);
+  const evidence = [
+    productType,
+    cleanText(semanticItem.fit),
+    ...(Array.isArray(semanticItem.design_elements)
+      ? semanticItem.design_elements
+      : []),
+  ].join(" ");
+  const matchedCandidate = candidates.map((candidate, index) => {
+    const candidateType = cleanText(candidate.product_type);
+    const exact = candidateType === productType;
+    const contains = candidateType && productType &&
+      (candidateType.includes(productType) || productType.includes(candidateType));
+    const sameFamily = productFamily &&
+      candidate.product_family === productFamily;
+    const candidateSpecific = candidate.constraints.filter(
+      (constraint) => !sharedKeys.has(constraintScopeKey(constraint)),
+    );
+    const satisfied = candidateSpecific.filter((constraint) =>
+      constraintSatisfied(constraint, evidence)).length;
+    const conflicts = candidateSpecific.filter((constraint) =>
+      !constraintSatisfied(constraint, evidence) &&
+      constraintExplicitlyContradicted(constraint, evidence)).length;
+    const score = (exact ? 100 : 0) + (contains ? 60 : 0) +
+      (sameFamily ? 30 : 0) + (satisfied * 20) - (conflicts * 100) - index / 100;
+    return {...candidate, candidateSpecific, score};
+  }).filter((candidate) => candidate.score > 0)
+    .sort((left, right) => right.score - left.score)[0];
+  return Object.freeze({
+    shared_constraints: Object.freeze(sharedConstraints),
+    candidate_constraints: Object.freeze(
+      uniqueStrings(matchedCandidate?.candidateSpecific || []),
+    ),
+    matched_candidate: matchedCandidate?.product_type || "",
   });
 }
 
@@ -822,8 +1032,12 @@ function validateExecutableProductContract(contract = {}) {
       "Executable Product Contract 的 product_type 与 product_family 冲突",
     );
   }
-  const fitFamily = inferProductFamily(contract.category, contract.fit);
-  if (fitFamily && fitFamily !== contract.product_family) {
+  const fitCompatibility = assessFitFamilyCompatibility(
+    contract.category,
+    contract.product_family,
+    contract.fit,
+  );
+  if (fitCompatibility.status === FIT_FAMILY_STATUS.CONFLICT) {
     const error = new TypeError(
       "Executable Product Contract 的 fit 与 product_family 冲突",
     );
@@ -835,6 +1049,8 @@ function validateExecutableProductContract(contract = {}) {
       product_type: cleanText(contract.product_type),
       fit: cleanText(contract.fit),
       product_family: cleanText(contract.product_family),
+      fit_family: fitCompatibility.fit_family,
+      fit_family_status: fitCompatibility.status,
     };
     throw error;
   }
@@ -843,11 +1059,15 @@ function validateExecutableProductContract(contract = {}) {
 
 module.exports = {
   FAMILY_RULES,
+  FIT_FAMILY_STATUS,
+  assessFitFamilyCompatibility,
+  blueprintConstraintScope,
   canonicalizeAttribute,
   categoryForSlotRole,
   categoryForFamily,
   compileExecutableProductContract,
   extractCanonicalAttributeValues,
+  extractBlueprintAttributeConstraints,
   inferProductFamily,
   isConcreteProductType,
   extractLeadingColorAlternatives,

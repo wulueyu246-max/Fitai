@@ -303,6 +303,36 @@ test("Style Anchor treats missing positive evidence as neutral, not drift", () =
   assert.equal(drift.allowed, false);
 });
 
+test("Style Anchor canonical comparison prevents a selected direction from conflicting with itself", () => {
+  const anchor = {
+    core_style_anchor: "Clean Fit（利落合身）",
+    anchor_strength: "strong",
+    allowed_style_variants: ["Clean Fit（利落合身）"],
+    anti_drift_evidence: [{
+      value: "clean-fit",
+      evidence_domain: "aesthetic_direction",
+      source: "downstream_style_identity_conflict",
+    }],
+    style_anchor_signature: {
+      style_traits: ["Clean Fit（利落合身）"],
+      anti_drift_evidence: [],
+    },
+  };
+  const assessment = styleAnchorMatchAssessment(structuredLook({
+    direction: "都市 Clean Fit（日常子方向）",
+    items: [
+      {product_type: "短款修身针织衫", product_family: "knitwear", fit: "短款修身"},
+      {product_type: "高腰直筒裤", product_family: "straight_pants", fit: "高腰直筒"},
+      {product_type: "尖头浅口低跟鞋", product_family: "pointed_heel", fit: "尖头浅口低跟"},
+    ],
+  }), anchor);
+
+  assert.equal(assessment.status, STYLE_ANCHOR_STATUS.MATCH);
+  assert.equal(assessment.allowed, true);
+  assert.equal(assessment.matched_anchor, "Clean Fit（利落合身）");
+  assert.deepEqual(assessment.conflict_drift, []);
+});
+
 test("Style Anchor marks generic feminine proportion requests as weak", () => {
   const anchor = buildStyleAnchor({
     semanticIntent: {

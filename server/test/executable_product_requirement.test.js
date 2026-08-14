@@ -2,9 +2,13 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  FIT_FAMILY_STATUS,
+  assessFitFamilyCompatibility,
+  blueprintConstraintScope,
   canonicalizeAttribute,
   categoryForSlotRole,
   compileExecutableProductContract,
+  extractBlueprintAttributeConstraints,
   inferProductFamily,
   isConcreteProductType,
   normalizeExecutableProductRequirement,
@@ -193,7 +197,7 @@ test("abstract item names are rejected and recovered from structural fields", ()
   assert.doesNotThrow(() => validateExecutableProductContract(result));
 });
 
-test("fit and product family conflicts are strict failures", () => {
+test("fit and product family only fail when their taxonomy is explicitly incompatible", () => {
   assert.throws(() => validateExecutableProductContract({
     request_id: "request-003",
     look_id: "look-2",
@@ -208,6 +212,212 @@ test("fit and product family conflicts are strict failures", () => {
     materials: [],
     design_elements: [],
   }), /fit 与 product_family 冲突/u);
+});
+
+test("fit-family compatibility accepts nearby trouser silhouettes", () => {
+  assert.deepEqual(
+    assessFitFamilyCompatibility("bottom", "wide_leg_pants", "直筒微阔"),
+    {status: FIT_FAMILY_STATUS.COMPATIBLE, fit_family: "straight_pants"},
+  );
+  assert.deepEqual(
+    assessFitFamilyCompatibility("bottom", "straight_pants", "直筒"),
+    {status: FIT_FAMILY_STATUS.COMPATIBLE, fit_family: "straight_pants"},
+  );
+  assert.deepEqual(
+    assessFitFamilyCompatibility("bottom", "wide_leg_pants", "舒适垂感"),
+    {status: FIT_FAMILY_STATUS.NEUTRAL, fit_family: ""},
+  );
+  assert.doesNotThrow(() => validateExecutableProductContract({
+    request_id: "case-3",
+    look_id: "look-1",
+    category: "bottom",
+    slot_key: "case-3:look-1:bottom:0",
+    product_type: "高腰垂感阔腿西装裤",
+    product_family: "wide_leg_pants",
+    item_name: "高腰垂感阔腿西装裤",
+    style_role: "保持垂直线条",
+    fit: "直筒微阔",
+    colors: [],
+    materials: [],
+    design_elements: [],
+  }));
+});
+
+test("fit-family compatibility still rejects an explicitly opposite silhouette", () => {
+  assert.equal(
+    assessFitFamilyCompatibility(
+      "bottom",
+      "wide_leg_pants",
+      "紧身贴腿铅笔裤版型",
+    ).status,
+    FIT_FAMILY_STATUS.CONFLICT,
+  );
+});
+
+test("Blueprint OR attributes compile into one any-of hard constraint", () => {
+  assert.deepEqual(
+    extractBlueprintAttributeConstraints("尖头或圆头芭蕾平底鞋"),
+    ["尖头或圆头"],
+  );
+  const compileShoe = (productType, fit, sourceValue) =>
+    compileExecutableProductContract({
+      slot_role: "shoes",
+      product_type: productType,
+      style_role: "完成轻浪漫鞋履造型",
+      fit,
+      colors: [],
+      materials: [],
+      design_elements: [],
+      required_attributes: [],
+      preferred_attributes: [],
+      avoid_attributes: [],
+    }, {
+      requestId: "case-3",
+      lookId: "look-3",
+      category: "shoes",
+      itemIndex: 0,
+      constraintSources: [{
+        value: sourceValue,
+        level: "required",
+        source: "blueprint",
+      }],
+    });
+  const roundToe = compileShoe("圆头芭蕾平底鞋", "圆头平底", "尖头或圆头");
+  const pointedToe = compileShoe("尖头芭蕾平底鞋", "尖头平底", "尖头或圆头");
+  assert.deepEqual(roundToe.required_attribute_constraints, [{
+    key: "pointed_toe",
+    mode: "any_of",
+    values: ["尖头", "圆头"],
+    level: "required",
+  }]);
+  assert.deepEqual(roundToe.missing_required_attributes, []);
+  assert.deepEqual(pointedToe.missing_required_attributes, []);
+  const scopedAlternative = blueprintConstraintScope({
+    must_have_items: {shoes: ["尖头或圆头芭蕾平底鞋"]},
+  }, "shoes", {
+    product_type: "圆头芭蕾平底鞋",
+    fit: "圆头平底",
+  });
+  assert.deepEqual(scopedAlternative.shared_constraints, ["尖头或圆头"]);
+  assert.throws(
+    () => compileShoe("圆头芭蕾平底鞋", "圆头平底", "必须尖头"),
+    /required_attributes/u,
+  );
+});
+
+test("Blueprint sibling candidates keep their attributes candidate-scoped", () => {
+  const blueprint = {
+    must_have_items: {
+      shoes: ["尖头高跟鞋", "圆头芭蕾鞋"],
+    },
+  };
+  const pointedScope = blueprintConstraintScope(blueprint, "shoes", {
+    product_type: "尖头细跟高跟鞋",
+    fit: "尖头细跟",
+  });
+  const roundScope = blueprintConstraintScope(blueprint, "shoes", {
+    product_type: "圆头芭蕾鞋",
+    fit: "圆头平底",
+  });
+  assert.deepEqual(pointedScope.shared_constraints, []);
+  assert.deepEqual(pointedScope.candidate_constraints, ["尖头"]);
+  assert.deepEqual(roundScope.shared_constraints, []);
+  assert.deepEqual(roundScope.candidate_constraints, ["圆头"]);
+  assert.equal(pointedScope.matched_candidate, "尖头高跟鞋");
+  assert.equal(roundScope.matched_candidate, "圆头芭蕾鞋");
+});
+
+test("an explicit category-level hard constraint remains shared", () => {
+  const blueprint = {
+    must_have_items: {
+      shoes: ["所有鞋履必须尖头", "尖头高跟鞋", "圆头芭蕾鞋"],
+    },
+  };
+  const scope = blueprintConstraintScope(blueprint, "shoes", {
+    product_type: "圆头芭蕾鞋",
+    fit: "圆头平底",
+  });
+  assert.deepEqual(scope.shared_constraints, ["尖头"]);
+  assert.throws(() => compileConstraintCase({
+    category: "shoes",
+    productType: "圆头芭蕾鞋",
+    fit: "圆头平底",
+    constraintSources: scope.shared_constraints.map((value) => ({
+      value,
+      level: "required",
+      source: "blueprint_shared",
+    })),
+  }), /required_attributes/u);
+});
+
+test("top neckline alternatives never contaminate their siblings", () => {
+  const blueprint = {
+    must_have_items: {
+      top: ["方领针织衫", "V领衬衫"],
+    },
+  };
+  const square = blueprintConstraintScope(blueprint, "top", {
+    product_type: "方领修身针织衫",
+    fit: "方领修身",
+  });
+  const vee = blueprintConstraintScope(blueprint, "top", {
+    product_type: "V领真丝衬衫",
+    fit: "V领微宽松",
+  });
+  assert.deepEqual(square.shared_constraints, []);
+  assert.deepEqual(square.candidate_constraints, ["方领"]);
+  assert.deepEqual(vee.shared_constraints, []);
+  assert.deepEqual(vee.candidate_constraints, ["V领"]);
+});
+
+test("only the true intersection of sibling candidates becomes shared", () => {
+  const scope = blueprintConstraintScope({
+    must_have_items: {
+      bottom: ["高腰A字半身裙", "高腰直筒裤"],
+    },
+  }, "bottom", {
+    product_type: "高腰A字半身裙",
+    fit: "高腰A字",
+  });
+  assert.deepEqual(scope.shared_constraints, ["高腰"]);
+});
+
+test("CASE 3 sibling pointed shoes do not reject a legal ballet flat", () => {
+  const blueprint = {
+    must_have_items: {
+      shoes: [
+        "酒红细跟穆勒鞋",
+        "皮质芭蕾平底鞋",
+        "芭蕾鞋",
+        "乐福鞋",
+        "尖头鞋",
+        "玛丽珍鞋",
+      ],
+    },
+  };
+  const scope = blueprintConstraintScope(blueprint, "shoes", {
+    product_type: "圆头皮质芭蕾平底鞋",
+    fit: "圆头平底",
+  });
+  assert.equal(scope.shared_constraints.includes("尖头"), false);
+  assert.equal(scope.candidate_constraints.includes("尖头"), false);
+  assert.doesNotThrow(() => compileConstraintCase({
+    category: "shoes",
+    productType: "圆头皮质芭蕾平底鞋",
+    fit: "圆头平底",
+    constraintSources: [
+      ...scope.shared_constraints.map((value) => ({
+        value,
+        level: "required",
+        source: "blueprint_shared",
+      })),
+      ...scope.candidate_constraints.map((value) => ({
+        value,
+        level: "required",
+        source: "blueprint_candidate",
+      })),
+    ],
+  }));
 });
 
 test("attribute normalization never keeps slash-joined values", () => {
@@ -439,6 +649,8 @@ test("fit-family conflict exposes only safe contract diagnostics", () => {
       product_type: "尖头细高跟鞋",
       fit: "平底芭蕾鞋",
       product_family: "heels",
+      fit_family: "flats",
+      fit_family_status: "CONFLICT",
     });
     return true;
   });

@@ -110,11 +110,22 @@ function normalizeStyleAnchor(value) {
     ? value
     : {};
   const strength = cleanText(source.anchor_strength || source.anchorStrength);
+  const anchorSource = cleanText(
+    source.style_anchor_source || source.styleAnchorSource,
+  );
   return Object.freeze({
     core_style_anchor: cleanText(
       source.core_style_anchor || source.coreStyleAnchor,
     ),
+    selected_aesthetic_direction: cleanText(
+      source.selected_aesthetic_direction || source.selectedAestheticDirection,
+    ),
     anchor_strength: strength === "strong" ? "strong" : "weak",
+    style_anchor_source: anchorSource === "fallback_rebuilt"
+      ? "fallback_rebuilt"
+      : anchorSource === "blueprint_authoritative"
+        ? "blueprint_authoritative"
+        : "",
     allowed_style_variants: Object.freeze(cleanList(
       source.allowed_style_variants || source.allowedStyleVariants,
     )),

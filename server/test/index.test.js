@@ -26,6 +26,8 @@ const {
   buildFashionBrainContext,
   preserveFashionBrainKnowledge,
   parseBlueprintPhase,
+  assertStyleAnchorInvariant,
+  resolveAuthoritativeStyleAnchor,
   mergeBlueprintAndLookPhase,
   generatePhasedOutfitAnalysis,
   requestStructuredAiPhase,
@@ -2340,6 +2342,12 @@ test("parses unrestricted style intent before Blueprint generation", () => {
   );
   assert.equal(result.style_profile.intent_priority_score, 92);
   assert.equal(result.style_profile.dimensions.femininity, 92);
+  assert.equal(result.semantic_intent.style_selection_mode, "explicit");
+  assert.equal(
+    result.styling_constitution.selected_aesthetic_direction,
+    result.semantic_intent.style_direction,
+  );
+  assert.equal(result.styling_constitution.weather_scope.may_select_core_style, false);
 });
 
 test("Fashion Brain enriches sweet Intent with concrete item knowledge", () => {
@@ -3037,6 +3045,9 @@ test("merges a text-only Look phase into the immutable AI Blueprint", () => {
     scene: "约会",
     userInput: "甜妹穿搭",
   });
+  const authoritativeStyleAnchor = structuredClone(
+    blueprint.outfit_blueprint.style_anchor,
+  );
   const item = (category, itemName, color) => ({
     slot_role: category,
     product_type: itemName,
@@ -3097,6 +3108,14 @@ test("merges a text-only Look phase into the immutable AI Blueprint", () => {
   });
 
   assert.equal(result.looks.length, 1);
+  assert.deepEqual(
+    result.outfit_blueprint.style_anchor,
+    authoritativeStyleAnchor,
+  );
+  assert.equal(
+    result.outfit_blueprint.style_anchor.style_anchor_source,
+    "blueprint_authoritative",
+  );
   assert.equal(result.outfit_blueprint.style_identity, "甜美穿搭");
   assert.equal(result.looks[0].look_id, "look-1");
   assert.ok(result.products.every((product) =>
@@ -3108,6 +3127,100 @@ test("merges a text-only Look phase into the immutable AI Blueprint", () => {
     result.products.map((product) => product.item_name),
     ["蕾丝上衣", "高腰百褶裙", "玛丽珍鞋"],
   );
+});
+
+test("reuses an authoritative Blueprint Style Anchor without semantic rebuild", () => {
+  const anchor = {
+    core_style_anchor: "Clean Fit (洁净合身)",
+    selected_aesthetic_direction: "Clean Fit (洁净合身)",
+    anchor_strength: "strong",
+    style_anchor_source: "blueprint_authoritative",
+    allowed_style_variants: [
+      "Clean Fit (洁净合身)",
+      "都市 Clean Fit（日常子方向）",
+    ],
+    disallowed_style_drift: ["强运动训练风"],
+    anti_drift_evidence: [{
+      value: "强运动训练风",
+      evidence_domain: "style",
+      source: "fashion_brain.style_relation",
+    }],
+    style_anchor_signature: {
+      style_traits: ["Clean Fit (洁净合身)", "自然利落"],
+      silhouette_tendencies: ["合身直线"],
+      material_tendencies: ["棉"],
+      design_directions: ["简洁针织衫"],
+      dimensions: {minimalism: 90},
+      anti_drift: ["强运动训练风"],
+      anti_drift_evidence: [],
+    },
+  };
+  const resolved = resolveAuthoritativeStyleAnchor({
+    outfitBlueprint: {
+      style_identity: "优化比例的极简自然风",
+      style_anchor: anchor,
+    },
+    semanticIntent: {},
+    stylingConstitution: {
+      selected_aesthetic_direction: "Clean Fit (洁净合身)",
+    },
+    requireCompleteFallback: true,
+  });
+
+  assert.deepEqual(resolved, anchor);
+  assert.equal(resolved.style_anchor_source, "blueprint_authoritative");
+});
+
+test("rebuilds a Style Anchor only from a complete fallback context", () => {
+  const complete = resolveAuthoritativeStyleAnchor({
+    outfitBlueprint: {style_identity: "自然利落比例优化"},
+    semanticIntent: {
+      style_selection_mode: "explicit",
+      selected_aesthetic_direction: "Clean Fit (洁净合身)",
+      must_express: ["自然利落"],
+      must_avoid: ["强运动训练风"],
+    },
+    stylingConstitution: {
+      selected_aesthetic_direction: "Clean Fit (洁净合身)",
+    },
+    styleProfile: {
+      source_text: "想显高显腿长，但穿得自然一点",
+      primary_style: "Clean Fit",
+    },
+    requireCompleteFallback: true,
+  });
+  assert.equal(complete.style_anchor_source, "fallback_rebuilt");
+  assert.equal(
+    complete.selected_aesthetic_direction,
+    "Clean Fit (洁净合身)",
+  );
+
+  assert.throws(() => resolveAuthoritativeStyleAnchor({
+    outfitBlueprint: {style_identity: "自然利落比例优化"},
+    semanticIntent: {},
+    stylingConstitution: {},
+    requireCompleteFallback: true,
+  }), (error) => error.code === "STYLE_ANCHOR_FALLBACK_CONTEXT_INCOMPLETE");
+});
+
+test("reports an equivalent selected direction in anti-drift as an engineering error", () => {
+  assert.throws(() => assertStyleAnchorInvariant({
+    requestId: "style-anchor-self-contradiction",
+    stylingConstitution: {
+      selected_aesthetic_direction: "Clean Fit (洁净合身)",
+    },
+    styleAnchor: {
+      core_style_anchor: "Clean Fit (洁净合身)",
+      selected_aesthetic_direction: "Clean Fit (洁净合身)",
+      allowed_style_variants: ["Clean Fit (洁净合身)"],
+      anti_drift_evidence: [{
+        value: "clean-fit",
+        evidence_domain: "aesthetic_direction",
+        source: "downstream_style_identity_conflict",
+      }],
+      style_anchor_signature: {},
+    },
+  }), (error) => error.code === "STYLE_ANCHOR_SELF_CONTRADICTION");
 });
 
 test("preserves a successful Blueprint when the Look phase times out", async () => {
@@ -3214,9 +3327,18 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
     "scene",
     "semantic_intent",
     "structured_context",
+    "styling_constitution",
   ]);
   assert.equal(Object.hasOwn(blueprintInput, "requested_style"), false);
   assert.equal(blueprintInput.semantic_intent.must_avoid.length > 0, true);
+  assert.equal(
+    blueprintInput.styling_constitution.style_selection_mode,
+    "explicit",
+  );
+  assert.equal(
+    blueprintInput.styling_constitution.selected_aesthetic_direction,
+    blueprintInput.semantic_intent.style_direction,
+  );
   const blueprintKnowledge = JSON.stringify(blueprintInput.knowledge_context);
   assert.match(blueprintKnowledge, /玛丽珍鞋/);
   assert.match(blueprintKnowledge, /蕾丝/);
@@ -3251,6 +3373,7 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
     "persona_contract",
     "scene",
     "structured_context",
+    "styling_constitution",
   ]);
   assert.equal(lookInput.outfit_blueprint.blueprint_source, "ai_generated");
   assert.equal(
@@ -3259,6 +3382,10 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
   );
   assert.equal(lookInput.body_analysis.gender, "female");
   assert.equal(lookInput.persona_contract.gender, "female");
+  assert.equal(
+    lookInput.styling_constitution.shared_look_aesthetic,
+    blueprintInput.semantic_intent.style_direction,
+  );
   assert.equal(Object.hasOwn(lookInput, "requested_style"), false);
   assert.equal(Object.hasOwn(lookInput, "style_profile"), false);
   assert.equal(Object.hasOwn(lookInput, "style_semantics"), false);
@@ -3784,6 +3911,15 @@ test("Native Look Generator keeps three independent executable directions", asyn
     fit: "尖头浅口低跟",
     preferred: ["浅口", "尖头", "低跟"],
   });
+  const roundShoes = (lookId, index) => item({
+    lookId,
+    index,
+    category: "shoes",
+    productType: "圆头芭蕾平底鞋",
+    productFamily: "flats",
+    fit: "圆头浅口平底",
+    preferred: ["浅口", "圆头", "平底"],
+  });
   const baseLook = (lookId, styleDirection, lookDirection, items) => ({
     request_id: requestId,
     look_id: lookId,
@@ -3813,6 +3949,46 @@ test("Native Look Generator keeps three independent executable directions", asyn
       shoes: "尖头浅口低跟鞋",
       accessories: "轻量配饰",
       summary: "三套独立比例优化方案",
+    },
+    outfit_blueprint: {
+      blueprint_source: "ai_generated",
+      style_anchor: {
+        core_style_anchor: "自然女性化约会",
+        selected_aesthetic_direction: "自然女性化约会",
+        anchor_strength: "strong",
+        style_anchor_source: "blueprint_authoritative",
+        allowed_style_variants: ["自然女性化约会"],
+        disallowed_style_drift: ["强运动训练风"],
+        anti_drift_evidence: [{
+          value: "强运动训练风",
+          evidence_domain: "style",
+          source: "semantic_intent.must_avoid",
+        }],
+        style_anchor_signature: {
+          style_traits: ["自然女性化约会"],
+          silhouette_tendencies: ["上短下长"],
+          material_tendencies: [],
+          design_directions: [],
+          dimensions: {},
+          anti_drift: ["强运动训练风"],
+          anti_drift_evidence: [],
+        },
+      },
+      style_identity: "自然女性化约会",
+      character_impression: "自然、轻盈、比例利落",
+      visual_keywords: ["高腰线", "轻盈线条", "浅口鞋"],
+      core_elements: ["短款上衣", "高腰下装", "轻盈鞋型"],
+      silhouette_strategy: ["上短下长", "保持流畅线条"],
+      color_palette: ["奶油白", "浅灰"],
+      material_direction: ["细腻面料"],
+      must_have_items: {
+        top: ["短款修身上衣"],
+        bottom: ["高腰A字半身裙", "高腰阔腿裤"],
+        dress: ["高腰收腰A字连衣裙"],
+        shoes: ["尖头鞋", "圆头芭蕾平底鞋", "低跟穆勒鞋"],
+      },
+      avoid_items: ["低腰", "厚重高帮"],
+      occasion_strategy: "保持约会场景的自然女性化表达",
     },
     looks: [
       baseLook(look1, "高腰裙装比例优化", {
@@ -3851,23 +4027,23 @@ test("Native Look Generator keeps three independent executable directions", asyn
           fit: "短款修身不过胯", required: ["短款或不过胯"]}),
         item({lookId: look2, index: 1, category: "bottom",
           productType: "高腰垂感阔腿裤", productFamily: "wide_leg_pants",
-          fit: "高腰垂感阔腿", required: ["高腰"],
+          fit: "直筒微阔", required: ["高腰"],
           preferred: ["纵向垂感"]}),
         shoes(look2, 2),
       ]),
       baseLook(look3, "收腰连衣裙连续线条", {
         name: "收腰连衣裙连续线条",
         core_structure: "dress_shoes",
-        product_families: {dress: "dress", shoes: "pointed_flat"},
+        product_families: {dress: "dress", shoes: "flats"},
         silhouette: "高腰收腰A字连衣裙",
         waistline: "高腰",
         length_strategy: "连贯裙身线条",
-        shoe_shape: "尖头浅口低跟",
+        shoe_shape: "圆头浅口平底",
       }, [
         item({lookId: look3, index: 0, category: "dress",
           productType: "高腰收腰A字连衣裙", productFamily: "dress",
           fit: "高腰收腰A字", required: ["高腰"]}),
-        shoes(look3, 1),
+        roundShoes(look3, 1),
       ]),
     ],
   };
@@ -3899,7 +4075,7 @@ test("Native Look Generator keeps three independent executable directions", asyn
     [
       {top: "blouse", bottom: "skirt", shoes: "pointed_flat"},
       {top: "knitwear", bottom: "wide_leg_pants", shoes: "pointed_flat"},
-      {dress: "dress", shoes: "pointed_flat"},
+      {dress: "dress", shoes: "flats"},
     ],
   );
   assert.equal(
@@ -3937,6 +4113,64 @@ test("Native Look Generator keeps three independent executable directions", asyn
     Array.isArray(entry.required_attributes) &&
     Array.isArray(entry.preferred_attributes) &&
     Array.isArray(entry.avoid_attributes)));
+
+  const case5Payload = structuredClone(payload);
+  case5Payload.style = "Clean Fit";
+  case5Payload.outfit_blueprint.style_identity = "优化比例的极简自然风";
+  case5Payload.outfit_blueprint.style_anchor = {
+    core_style_anchor: "显高显腿长",
+    selected_aesthetic_direction: "Clean Fit (洁净合身)",
+    anchor_strength: "strong",
+    style_anchor_source: "blueprint_authoritative",
+    allowed_style_variants: [
+      "显高显腿长",
+      "Clean Fit (洁净合身)",
+      "都市 Clean Fit（日常子方向）",
+    ],
+    disallowed_style_drift: ["强运动训练风"],
+    anti_drift_evidence: [{
+      value: "强运动训练风",
+      evidence_domain: "style",
+      source: "semantic_intent.must_avoid",
+    }],
+    style_anchor_signature: {
+      style_traits: ["Clean Fit (洁净合身)", "自然利落"],
+      silhouette_tendencies: ["上短下长", "高腰"],
+      material_tendencies: [],
+      design_directions: [],
+      dimensions: {minimalism: 90},
+      anti_drift: ["强运动训练风"],
+      anti_drift_evidence: [],
+    },
+  };
+  case5Payload.looks.forEach((look, index) => {
+    look.style = "Clean Fit";
+    look.style_direction = `Clean Fit 比例优化方向 ${index + 1}`;
+    look.look_direction.name = `都市 Clean Fit（日常子方向 ${index + 1}）`;
+  });
+  const case5Analysis = parseOutfitAnalysis(JSON.stringify(case5Payload), {
+    requestId: "case-5-authoritative-style-anchor",
+    gender: "female",
+    scene: "日常",
+    userInput: "想显高显腿长，但穿得自然一点",
+    nativeExecutableLookContract: true,
+  });
+  assert.equal(case5Analysis.look_quality_summary.generated, 3);
+  assert.equal(case5Analysis.look_quality_summary.usable, 3);
+  assert.equal(case5Analysis.look_quality_summary.dropped, 0);
+  assert.equal(
+    case5Analysis.outfit_blueprint.style_anchor.style_anchor_source,
+    "blueprint_authoritative",
+  );
+  assert.equal(
+    case5Analysis.outfit_blueprint.style_anchor.selected_aesthetic_direction,
+    "Clean Fit (洁净合身)",
+  );
+  assert.equal(
+    case5Analysis.outfit_blueprint.style_anchor.disallowed_style_drift
+      .includes("Clean Fit"),
+    false,
+  );
 
   const packageHipPayload = structuredClone(payload);
   const packageHipBottom = packageHipPayload.looks[0].items.find(

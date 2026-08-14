@@ -1,0 +1,300 @@
+[
+  {
+    "id": "female_slim_outing_hot",
+    "input": {"user_input": "我想出去玩，帮我搭一套", "gender": "female", "height": 160, "body_profile": "纤细", "occasion": "出去玩", "weather": "高温"},
+    "semantic_intent": {"style_direction": "清爽女性休闲", "must_express": ["女性人物表达", "轻松精致"], "must_avoid": ["训练感"], "style_selection_mode": "stylist_selected", "selected_aesthetic_direction": "清爽女性休闲", "selection_reason": "结合女性人物表达与日常出游场景"},
+    "style_profile": {"primary_style": "清爽女性休闲", "blend_rationale": "适合纤细身形和日常出游"},
+    "blueprint": {"style_identity": "清爽女性休闲", "silhouette_strategy": ["自然腰线", "轻盈利落"]},
+    "weather_adjustments": ["material", "thickness", "sleeve_length", "breathability"],
+    "looks": [
+      {"look_id": "look-1", "gender": "female", "aesthetic_parent": "清爽女性休闲", "look_direction": "柔和短上衣组合", "core_structure": "top_bottom_shoes", "proportion_strategy": "保持清晰腰线"},
+      {"look_id": "look-2", "gender": "female", "aesthetic_parent": "清爽女性休闲", "look_direction": "轻盈裙装组合", "core_structure": "dress_shoes", "proportion_strategy": "连续纵向线条"},
+      {"look_id": "look-3", "gender": "female", "aesthetic_parent": "清爽女性休闲", "look_direction": "松弛层次组合", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "控制外层长度"}
+    ]
+  },
+  {
+    "id": "female_sweet_date",
+    "input": {"user_input": "甜妹约会穿搭", "gender": "female", "height": 162, "body_profile": "匀称", "occasion": "约会", "weather": "温和"},
+    "semantic_intent": {"style_direction": "甜妹", "must_express": ["甜妹", "精致"], "must_avoid": ["成熟商务"], "style_selection_mode": "explicit", "selected_aesthetic_direction": "甜妹", "selection_reason": "忠实执行用户明确甜妹风格"},
+    "style_profile": {"primary_style": "甜妹", "blend_rationale": "用户明确指定"},
+    "expected_explicit_direction": "甜妹",
+    "blueprint": {"style_identity": "甜妹", "silhouette_strategy": ["柔和腰线"]},
+    "weather_adjustments": ["material"],
+    "looks": [
+      {"look_id": "look-1", "gender": "female", "aesthetic_parent": "甜妹", "look_direction": "学院甜妹", "core_structure": "top_bottom_shoes", "proportion_strategy": "明确腰线"},
+      {"look_id": "look-2", "gender": "female", "aesthetic_parent": "甜妹", "look_direction": "法式甜妹", "core_structure": "dress_shoes", "proportion_strategy": "收腰延伸"},
+      {"look_id": "look-3", "gender": "female", "aesthetic_parent": "甜妹", "look_direction": "轻盈甜妹", "core_structure": "top_bottom_shoes", "proportion_strategy": "上短下长"}
+    ]
+  },
+  {
+    "id": "female_mature_date",
+    "input": {"user_input": "御姐约会穿搭", "gender": "female", "height": 168, "body_profile": "匀称", "occasion": "约会", "weather": "温和"},
+    "semantic_intent": {"style_direction": "御姐", "must_express": ["御姐", "成熟利落"], "must_avoid": ["学生甜妹"], "style_selection_mode": "explicit", "selected_aesthetic_direction": "御姐", "selection_reason": "忠实执行用户明确御姐风格"},
+    "style_profile": {"primary_style": "御姐", "blend_rationale": "用户明确指定"},
+    "expected_explicit_direction": "御姐",
+    "blueprint": {"style_identity": "御姐", "silhouette_strategy": ["结构感", "强调腰线"]},
+    "weather_adjustments": ["material"],
+    "looks": [
+      {"look_id": "look-1", "gender": "female", "aesthetic_parent": "御姐", "look_direction": "结构裙装", "core_structure": "top_bottom_shoes", "proportion_strategy": "强调腰线"},
+      {"look_id": "look-2", "gender": "female", "aesthetic_parent": "御姐", "look_direction": "垂感裤装", "core_structure": "top_bottom_shoes", "proportion_strategy": "纵向延伸"},
+      {"look_id": "look-3", "gender": "female", "aesthetic_parent": "御姐", "look_direction": "收腰连衣裙", "core_structure": "dress_shoes", "proportion_strategy": "连续线条"}
+    ]
+  },
+  {
+    "id": "male_outing_selected",
+    "input": {"user_input": "周末出去玩帮我搭一套", "gender": "male", "height": 175, "body_profile": "标准", "occasion": "出去玩", "weather": "晴"},
+    "semantic_intent": {"style_direction": "清洁都市休闲", "must_express": ["利落", "轻松"], "must_avoid": ["邋遢"], "style_selection_mode": "stylist_selected", "selected_aesthetic_direction": "清洁都市休闲", "selection_reason": "结合男性人物表达与周末出游"},
+    "style_profile": {"primary_style": "清洁都市休闲", "blend_rationale": "适合日常出游"},
+    "blueprint": {"style_identity": "清洁都市休闲", "silhouette_strategy": ["适度合体"]},
+    "weather_adjustments": ["material"],
+    "looks": [
+      {"look_id": "look-1", "gender": "male", "aesthetic_parent": "清洁都市休闲", "look_direction": "简洁层次", "core_structure": "top_bottom_shoes", "proportion_strategy": "上下平衡"},
+      {"look_id": "look-2", "gender": "male", "aesthetic_parent": "清洁都市休闲", "look_direction": "轻松衬衫组合", "core_structure": "top_bottom_shoes", "proportion_strategy": "纵向开襟"},
+      {"look_id": "look-3", "gender": "male", "aesthetic_parent": "清洁都市休闲", "look_direction": "短外套组合", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "控制外套长度"}
+    ]
+  },
+  {
+    "id": "male_minimal_formal",
+    "input": {"user_input": "极简正式穿搭", "gender": "male", "height": 180, "body_profile": "高挑", "occasion": "正式", "weather": "凉爽"},
+    "semantic_intent": {"style_direction": "极简", "must_express": ["极简", "克制"], "must_avoid": ["繁复装饰"], "style_selection_mode": "explicit", "selected_aesthetic_direction": "极简", "selection_reason": "执行明确极简风格"},
+    "style_profile": {"primary_style": "极简", "blend_rationale": "用户明确指定"},
+    "expected_explicit_direction": "极简",
+    "blueprint": {"style_identity": "极简", "silhouette_strategy": ["简洁直线"]},
+    "weather_adjustments": ["layering"],
+    "looks": [
+      {"look_id": "look-1", "gender": "male", "aesthetic_parent": "极简", "look_direction": "单色正装", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "垂直线条"},
+      {"look_id": "look-2", "gender": "male", "aesthetic_parent": "极简", "look_direction": "轻结构正装", "core_structure": "top_bottom_shoes", "proportion_strategy": "肩腰平衡"},
+      {"look_id": "look-3", "gender": "male", "aesthetic_parent": "极简", "look_direction": "深浅层次", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "色块延伸"}
+    ]
+  },
+  {
+    "id": "unisex_rain_outing",
+    "input": {"user_input": "雨天出去玩帮我搭配", "gender": "unisex", "height": 170, "body_profile": "未知", "occasion": "出去玩", "weather": "雨"},
+    "semantic_intent": {"style_direction": "精致都市休闲", "must_express": ["清晰造型", "都市感"], "must_avoid": ["训练服"], "style_selection_mode": "stylist_selected", "selected_aesthetic_direction": "精致都市休闲", "selection_reason": "结合中性人物表达与城市出游"},
+    "style_profile": {"primary_style": "精致都市休闲", "blend_rationale": "适合城市出游"},
+    "blueprint": {"style_identity": "精致都市休闲", "silhouette_strategy": ["整洁层次"]},
+    "weather_adjustments": ["material", "layering", "safety"],
+    "looks": [
+      {"look_id": "look-1", "gender": "unisex", "aesthetic_parent": "精致都市休闲", "look_direction": "防雨短外层", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "外层不过长"},
+      {"look_id": "look-2", "gender": "unisex", "aesthetic_parent": "精致都市休闲", "look_direction": "简洁层叠", "core_structure": "top_bottom_shoes", "proportion_strategy": "纵向层次"},
+      {"look_id": "look-3", "gender": "unisex", "aesthetic_parent": "精致都市休闲", "look_direction": "轻量通勤感", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "清晰肩线"}
+    ]
+  },
+  {
+    "id": "female_retro_formal",
+    "input": {"user_input": "复古一点的正式穿搭", "gender": "female", "height": 174, "body_profile": "高挑", "occasion": "正式", "weather": "温和"},
+    "semantic_intent": {"style_direction": "复古", "must_express": ["复古", "典雅"], "must_avoid": ["运动训练"], "style_selection_mode": "explicit", "selected_aesthetic_direction": "复古", "selection_reason": "执行用户明确复古方向"},
+    "style_profile": {"primary_style": "复古", "blend_rationale": "用户明确指定"},
+    "expected_explicit_direction": "复古",
+    "blueprint": {"style_identity": "复古", "silhouette_strategy": ["明确腰线", "经典轮廓"]},
+    "weather_adjustments": ["material"],
+    "looks": [
+      {"look_id": "look-1", "gender": "female", "aesthetic_parent": "复古", "look_direction": "经典裙装", "core_structure": "dress_shoes", "proportion_strategy": "收腰延伸"},
+      {"look_id": "look-2", "gender": "female", "aesthetic_parent": "复古", "look_direction": "复古裤装", "core_structure": "top_bottom_shoes", "proportion_strategy": "高腰平衡"},
+      {"look_id": "look-3", "gender": "female", "aesthetic_parent": "复古", "look_direction": "复古套装", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "肩腰结构"}
+    ]
+  },
+  {
+    "id": "male_short_date_selected",
+    "input": {"user_input": "约会帮我搭一套", "gender": "male", "height": 165, "body_profile": "偏矮", "occasion": "约会", "weather": "温和"},
+    "semantic_intent": {"style_direction": "清爽精致约会", "must_express": ["整洁", "亲和"], "must_avoid": ["松垮"], "style_selection_mode": "stylist_selected", "selected_aesthetic_direction": "清爽精致约会", "selection_reason": "结合男性人物表达、身高比例与约会场景"},
+    "style_profile": {"primary_style": "清爽精致约会", "blend_rationale": "兼顾比例与约会感"},
+    "blueprint": {"style_identity": "清爽精致约会", "silhouette_strategy": ["缩短上身", "纵向延伸"]},
+    "weather_adjustments": ["material"],
+    "looks": [
+      {"look_id": "look-1", "gender": "male", "aesthetic_parent": "清爽精致约会", "look_direction": "短外套约会", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "上短下长"},
+      {"look_id": "look-2", "gender": "male", "aesthetic_parent": "清爽精致约会", "look_direction": "合体针织组合", "core_structure": "top_bottom_shoes", "proportion_strategy": "腰线清晰"},
+      {"look_id": "look-3", "gender": "male", "aesthetic_parent": "清爽精致约会", "look_direction": "衬衫纵向组合", "core_structure": "top_bottom_shoes", "proportion_strategy": "同色延伸"}
+    ]
+  },
+  {
+    "id": "female_short_leg_selected",
+    "input": {"user_input": "想显高显腿长，约会穿", "gender": "female", "height": 160, "body_profile": "腿部视觉比例偏短", "occasion": "约会", "weather": "温和"},
+    "semantic_intent": {"style_direction": "轻法式女性约会", "must_express": ["女性化", "精致"], "must_avoid": ["厚重压身高"], "style_selection_mode": "stylist_selected", "selected_aesthetic_direction": "轻法式女性约会", "selection_reason": "结合女性人物表达、比例目标与约会场景"},
+    "style_profile": {"primary_style": "轻法式女性约会", "blend_rationale": "兼顾约会感和比例"},
+    "blueprint": {"style_identity": "轻法式女性约会", "silhouette_strategy": ["提高腰线", "缩短上身", "纵向延伸"]},
+    "weather_adjustments": ["material"],
+    "looks": [
+      {"look_id": "look-1", "gender": "female", "aesthetic_parent": "轻法式女性约会", "look_direction": "高腰裙装", "core_structure": "top_bottom_shoes", "proportion_strategy": "短上衣配高腰"},
+      {"look_id": "look-2", "gender": "female", "aesthetic_parent": "轻法式女性约会", "look_direction": "九分裤装", "core_structure": "top_bottom_shoes", "proportion_strategy": "露脚踝延伸"},
+      {"look_id": "look-3", "gender": "female", "aesthetic_parent": "轻法式女性约会", "look_direction": "收腰连衣裙", "core_structure": "dress_shoes", "proportion_strategy": "腰线与连续线条"}
+    ]
+  },
+  {
+    "id": "female_cute_hot",
+    "input": {"user_input": "高温天也想穿可爱一点", "gender": "female", "height": 158, "body_profile": "娇小", "occasion": "日常", "weather": "高温"},
+    "semantic_intent": {"style_direction": "可爱", "must_express": ["可爱", "轻盈"], "must_avoid": ["成熟商务"], "style_selection_mode": "explicit", "selected_aesthetic_direction": "可爱", "selection_reason": "保留用户明确可爱风格"},
+    "style_profile": {"primary_style": "可爱", "blend_rationale": "用户明确指定"},
+    "expected_explicit_direction": "可爱",
+    "blueprint": {"style_identity": "可爱", "silhouette_strategy": ["轻巧比例"]},
+    "weather_adjustments": ["material", "thickness", "sleeve_length", "breathability"],
+    "looks": [
+      {"look_id": "look-1", "gender": "female", "aesthetic_parent": "可爱", "look_direction": "清凉学院可爱", "core_structure": "top_bottom_shoes", "proportion_strategy": "短上衣高腰"},
+      {"look_id": "look-2", "gender": "female", "aesthetic_parent": "可爱", "look_direction": "轻盈法式可爱", "core_structure": "dress_shoes", "proportion_strategy": "收腰轻量"},
+      {"look_id": "look-3", "gender": "female", "aesthetic_parent": "可爱", "look_direction": "日常柔和可爱", "core_structure": "top_bottom_shoes", "proportion_strategy": "控制裙长"}
+    ]
+  },
+  {
+    "id": "male_sport_rain",
+    "input": {"user_input": "雨天运动休闲穿搭", "gender": "male", "height": 178, "body_profile": "运动型", "occasion": "日常", "weather": "雨"},
+    "semantic_intent": {"style_direction": "运动休闲", "must_express": ["运动休闲", "活力"], "must_avoid": ["正式商务"], "style_selection_mode": "explicit", "selected_aesthetic_direction": "运动休闲", "selection_reason": "执行用户明确运动休闲方向"},
+    "style_profile": {"primary_style": "运动休闲", "blend_rationale": "用户明确指定"},
+    "expected_explicit_direction": "运动休闲",
+    "blueprint": {"style_identity": "运动休闲", "silhouette_strategy": ["活动余量"]},
+    "weather_adjustments": ["material", "layering", "safety"],
+    "looks": [
+      {"look_id": "look-1", "gender": "male", "aesthetic_parent": "运动休闲", "look_direction": "轻量运动层次", "core_structure": "top_bottom_shoes", "proportion_strategy": "上短下顺"},
+      {"look_id": "look-2", "gender": "male", "aesthetic_parent": "运动休闲", "look_direction": "防雨运动外层", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "外套不过长"},
+      {"look_id": "look-3", "gender": "male", "aesthetic_parent": "运动休闲", "look_direction": "简洁训练感", "core_structure": "top_bottom_shoes", "proportion_strategy": "纵向色块"}
+    ]
+  },
+  {
+    "id": "unisex_vintage_daily",
+    "input": {"user_input": "复古日常穿搭", "gender": "unisex", "height": 170, "body_profile": "未知", "occasion": "日常", "weather": "温和"},
+    "semantic_intent": {"style_direction": "复古", "must_express": ["复古", "生活感"], "must_avoid": ["未来科技"], "style_selection_mode": "explicit", "selected_aesthetic_direction": "复古", "selection_reason": "执行用户明确复古方向"},
+    "style_profile": {"primary_style": "复古", "blend_rationale": "用户明确指定"},
+    "expected_explicit_direction": "复古",
+    "blueprint": {"style_identity": "复古", "silhouette_strategy": ["经典比例"]},
+    "weather_adjustments": ["material"],
+    "looks": [
+      {"look_id": "look-1", "gender": "unisex", "aesthetic_parent": "复古", "look_direction": "经典日常", "core_structure": "top_bottom_shoes", "proportion_strategy": "自然腰线"},
+      {"look_id": "look-2", "gender": "unisex", "aesthetic_parent": "复古", "look_direction": "复古层叠", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "层次平衡"},
+      {"look_id": "look-3", "gender": "unisex", "aesthetic_parent": "复古", "look_direction": "简洁复古", "core_structure": "top_bottom_shoes", "proportion_strategy": "上下协调"}
+    ]
+  },
+  {
+    "id": "female_formal_selected",
+    "input": {"user_input": "参加正式活动帮我搭一套", "gender": "female", "height": 166, "body_profile": "匀称", "occasion": "正式", "weather": "温和"},
+    "semantic_intent": {"style_direction": "结构感女性正装", "must_express": ["女性化", "得体"], "must_avoid": ["随意松垮"], "style_selection_mode": "stylist_selected", "selected_aesthetic_direction": "结构感女性正装", "selection_reason": "结合女性人物表达与正式场景"},
+    "style_profile": {"primary_style": "结构感女性正装", "blend_rationale": "适合正式活动"},
+    "blueprint": {"style_identity": "结构感女性正装", "silhouette_strategy": ["结构肩线", "明确腰线"]},
+    "weather_adjustments": ["material"],
+    "looks": [
+      {"look_id": "look-1", "gender": "female", "aesthetic_parent": "结构感女性正装", "look_direction": "利落套装", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "肩腰平衡"},
+      {"look_id": "look-2", "gender": "female", "aesthetic_parent": "结构感女性正装", "look_direction": "结构裙装", "core_structure": "dress_shoes", "proportion_strategy": "收腰纵向"},
+      {"look_id": "look-3", "gender": "female", "aesthetic_parent": "结构感女性正装", "look_direction": "精致分体", "core_structure": "top_bottom_shoes", "proportion_strategy": "高腰利落"}
+    ]
+  },
+  {
+    "id": "male_hot_outing_selected",
+    "input": {"user_input": "天气很热，出去玩怎么穿", "gender": "male", "height": 173, "body_profile": "标准", "occasion": "出去玩", "weather": "高温"},
+    "semantic_intent": {"style_direction": "轻盈精致休闲", "must_express": ["整洁", "轻松"], "must_avoid": ["训练制服感"], "style_selection_mode": "stylist_selected", "selected_aesthetic_direction": "轻盈精致休闲", "selection_reason": "结合男性人物表达和出游场景"},
+    "style_profile": {"primary_style": "轻盈精致休闲", "blend_rationale": "适合日常出游"},
+    "blueprint": {"style_identity": "轻盈精致休闲", "silhouette_strategy": ["利落宽松度"]},
+    "weather_adjustments": ["material", "thickness", "sleeve_length", "breathability"],
+    "looks": [
+      {"look_id": "look-1", "gender": "male", "aesthetic_parent": "轻盈精致休闲", "look_direction": "清爽衬衫组合", "core_structure": "top_bottom_shoes", "proportion_strategy": "直线延伸"},
+      {"look_id": "look-2", "gender": "male", "aesthetic_parent": "轻盈精致休闲", "look_direction": "简洁短袖组合", "core_structure": "top_bottom_shoes", "proportion_strategy": "衣长受控"},
+      {"look_id": "look-3", "gender": "male", "aesthetic_parent": "轻盈精致休闲", "look_direction": "轻薄层次", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "薄层纵向"}
+    ]
+  },
+  {
+    "id": "female_minimal_rain",
+    "input": {"user_input": "雨天极简穿搭", "gender": "female", "height": 155, "body_profile": "娇小", "occasion": "日常", "weather": "雨"},
+    "semantic_intent": {"style_direction": "极简", "must_express": ["极简", "干净"], "must_avoid": ["繁复"], "style_selection_mode": "explicit", "selected_aesthetic_direction": "极简", "selection_reason": "执行明确极简风格"},
+    "style_profile": {"primary_style": "极简", "blend_rationale": "用户明确指定"},
+    "expected_explicit_direction": "极简",
+    "blueprint": {"style_identity": "极简", "silhouette_strategy": ["短外层", "纵向线条"]},
+    "weather_adjustments": ["material", "layering", "safety"],
+    "looks": [
+      {"look_id": "look-1", "gender": "female", "aesthetic_parent": "极简", "look_direction": "短外层极简", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "缩短上身"},
+      {"look_id": "look-2", "gender": "female", "aesthetic_parent": "极简", "look_direction": "单色极简", "core_structure": "top_bottom_shoes", "proportion_strategy": "同色延伸"},
+      {"look_id": "look-3", "gender": "female", "aesthetic_parent": "极简", "look_direction": "简洁裙装", "core_structure": "dress_shoes", "proportion_strategy": "高腰连续"}
+    ]
+  },
+  {
+    "id": "male_retro_formal",
+    "input": {"user_input": "男士复古正式穿搭", "gender": "male", "height": 185, "body_profile": "高挑", "occasion": "正式", "weather": "凉爽"},
+    "semantic_intent": {"style_direction": "复古", "must_express": ["复古", "绅士"], "must_avoid": ["运动训练"], "style_selection_mode": "explicit", "selected_aesthetic_direction": "复古", "selection_reason": "执行明确复古风格"},
+    "style_profile": {"primary_style": "复古", "blend_rationale": "用户明确指定"},
+    "expected_explicit_direction": "复古",
+    "blueprint": {"style_identity": "复古", "silhouette_strategy": ["经典肩线", "长线条"]},
+    "weather_adjustments": ["layering"],
+    "looks": [
+      {"look_id": "look-1", "gender": "male", "aesthetic_parent": "复古", "look_direction": "经典三件层次", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "肩腰结构"},
+      {"look_id": "look-2", "gender": "male", "aesthetic_parent": "复古", "look_direction": "复古单排扣", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "纵向门襟"},
+      {"look_id": "look-3", "gender": "male", "aesthetic_parent": "复古", "look_direction": "轻复古正装", "core_structure": "top_bottom_shoes", "proportion_strategy": "裤线延伸"}
+    ]
+  },
+  {
+    "id": "unisex_sport_daily",
+    "input": {"user_input": "运动风日常穿搭", "gender": "unisex", "height": 170, "body_profile": "未知", "occasion": "日常", "weather": "温和"},
+    "semantic_intent": {"style_direction": "运动", "must_express": ["运动", "活力"], "must_avoid": ["正式拘谨"], "style_selection_mode": "explicit", "selected_aesthetic_direction": "运动", "selection_reason": "执行明确运动风格"},
+    "style_profile": {"primary_style": "运动", "blend_rationale": "用户明确指定"},
+    "expected_explicit_direction": "运动",
+    "blueprint": {"style_identity": "运动", "silhouette_strategy": ["活动余量"]},
+    "weather_adjustments": ["material"],
+    "looks": [
+      {"look_id": "look-1", "gender": "unisex", "aesthetic_parent": "运动", "look_direction": "运动休闲", "core_structure": "top_bottom_shoes", "proportion_strategy": "轻量比例"},
+      {"look_id": "look-2", "gender": "unisex", "aesthetic_parent": "运动", "look_direction": "城市运动", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "短外层"},
+      {"look_id": "look-3", "gender": "unisex", "aesthetic_parent": "运动", "look_direction": "简洁运动", "core_structure": "top_bottom_shoes", "proportion_strategy": "同色纵向"}
+    ]
+  },
+  {
+    "id": "female_elegant_date",
+    "input": {"user_input": "优雅女性化约会穿搭", "gender": "female", "height": 164, "body_profile": "曲线型", "occasion": "约会", "weather": "温和"},
+    "semantic_intent": {"style_direction": "优雅女性化", "must_express": ["优雅女性化", "精致"], "must_avoid": ["松垮运动"], "style_selection_mode": "explicit", "selected_aesthetic_direction": "优雅女性化", "selection_reason": "执行用户明确审美"},
+    "style_profile": {"primary_style": "优雅女性化", "blend_rationale": "用户明确指定"},
+    "expected_explicit_direction": "优雅女性化",
+    "blueprint": {"style_identity": "优雅女性化", "silhouette_strategy": ["顺应曲线", "明确腰线"]},
+    "weather_adjustments": ["material"],
+    "looks": [
+      {"look_id": "look-1", "gender": "female", "aesthetic_parent": "优雅女性化", "look_direction": "柔和分体", "core_structure": "top_bottom_shoes", "proportion_strategy": "收腰平衡"},
+      {"look_id": "look-2", "gender": "female", "aesthetic_parent": "优雅女性化", "look_direction": "垂感连衣裙", "core_structure": "dress_shoes", "proportion_strategy": "连续线条"},
+      {"look_id": "look-3", "gender": "female", "aesthetic_parent": "优雅女性化", "look_direction": "精致套装", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "结构腰线"}
+    ]
+  },
+  {
+    "id": "male_broad_outing_selected",
+    "input": {"user_input": "出门逛街帮我搭配", "gender": "male", "height": 177, "body_profile": "肩宽", "occasion": "出去玩", "weather": "温和"},
+    "semantic_intent": {"style_direction": "松弛都市质感", "must_express": ["松弛", "整洁"], "must_avoid": ["紧绷"], "style_selection_mode": "stylist_selected", "selected_aesthetic_direction": "松弛都市质感", "selection_reason": "结合男性人物表达、肩部特征与逛街场景"},
+    "style_profile": {"primary_style": "松弛都市质感", "blend_rationale": "适合肩宽和城市出游"},
+    "blueprint": {"style_identity": "松弛都市质感", "silhouette_strategy": ["平衡肩线", "利落下身"]},
+    "weather_adjustments": ["material"],
+    "looks": [
+      {"look_id": "look-1", "gender": "male", "aesthetic_parent": "松弛都市质感", "look_direction": "柔和肩线", "core_structure": "top_bottom_shoes", "proportion_strategy": "肩胯平衡"},
+      {"look_id": "look-2", "gender": "male", "aesthetic_parent": "松弛都市质感", "look_direction": "轻外套层次", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "纵向开襟"},
+      {"look_id": "look-3", "gender": "male", "aesthetic_parent": "松弛都市质感", "look_direction": "简洁同色组合", "core_structure": "top_bottom_shoes", "proportion_strategy": "同色延伸"}
+    ]
+  },
+  {
+    "id": "female_french_outing",
+    "input": {"user_input": "法式一点，周末出去玩", "gender": "female", "height": 167, "body_profile": "纤细", "occasion": "出去玩", "weather": "温和"},
+    "semantic_intent": {"style_direction": "法式", "must_express": ["法式", "松弛精致"], "must_avoid": ["训练感"], "style_selection_mode": "explicit", "selected_aesthetic_direction": "法式", "selection_reason": "执行用户明确法式方向"},
+    "style_profile": {"primary_style": "法式", "blend_rationale": "用户明确指定"},
+    "expected_explicit_direction": "法式",
+    "blueprint": {"style_identity": "法式", "silhouette_strategy": ["自然腰线", "松弛曲线"]},
+    "weather_adjustments": ["material"],
+    "looks": [
+      {"look_id": "look-1", "gender": "female", "aesthetic_parent": "法式", "look_direction": "法式裙装", "core_structure": "dress_shoes", "proportion_strategy": "自然收腰"},
+      {"look_id": "look-2", "gender": "female", "aesthetic_parent": "法式", "look_direction": "法式裤装", "core_structure": "top_bottom_shoes", "proportion_strategy": "高腰延伸"},
+      {"look_id": "look-3", "gender": "female", "aesthetic_parent": "法式", "look_direction": "轻层次法式", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "控制外层长度"}
+    ]
+  },
+  {
+    "id": "female_tall_rain_date_selected",
+    "input": {"user_input": "雨天约会怎么穿", "gender": "female", "height": 175, "body_profile": "高挑", "occasion": "约会", "weather": "雨"},
+    "semantic_intent": {"style_direction": "都市浪漫约会", "must_express": ["女性化", "浪漫克制"], "must_avoid": ["训练运动"], "style_selection_mode": "stylist_selected", "selected_aesthetic_direction": "都市浪漫约会", "selection_reason": "结合女性人物表达、高挑身形与约会场景"},
+    "style_profile": {"primary_style": "都市浪漫约会", "blend_rationale": "适合约会与高挑比例"},
+    "blueprint": {"style_identity": "都市浪漫约会", "silhouette_strategy": ["长线条", "明确腰线"]},
+    "weather_adjustments": ["material", "layering", "safety"],
+    "looks": [
+      {"look_id": "look-1", "gender": "female", "aesthetic_parent": "都市浪漫约会", "look_direction": "长线条裙装", "core_structure": "dress_shoes", "proportion_strategy": "高挑连续线条"},
+      {"look_id": "look-2", "gender": "female", "aesthetic_parent": "都市浪漫约会", "look_direction": "短外层裤装", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "上短下长"},
+      {"look_id": "look-3", "gender": "female", "aesthetic_parent": "都市浪漫约会", "look_direction": "柔和分体", "core_structure": "top_bottom_shoes", "proportion_strategy": "腰线与垂直线"}
+    ]
+  },
+  {
+    "id": "male_tall_ceremony_selected",
+    "input": {"user_input": "参加典礼帮我搭一套", "gender": "male", "height": 188, "body_profile": "高挑", "occasion": "正式", "weather": "低温"},
+    "semantic_intent": {"style_direction": "现代仪式正装", "must_express": ["庄重", "现代"], "must_avoid": ["随意运动"], "style_selection_mode": "stylist_selected", "selected_aesthetic_direction": "现代仪式正装", "selection_reason": "结合男性人物表达、高挑比例与典礼场景"},
+    "style_profile": {"primary_style": "现代仪式正装", "blend_rationale": "适合正式典礼"},
+    "blueprint": {"style_identity": "现代仪式正装", "silhouette_strategy": ["清晰肩线", "长线条"]},
+    "weather_adjustments": ["material", "thickness", "layering"],
+    "looks": [
+      {"look_id": "look-1", "gender": "male", "aesthetic_parent": "现代仪式正装", "look_direction": "经典仪式层次", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "长线条"},
+      {"look_id": "look-2", "gender": "male", "aesthetic_parent": "现代仪式正装", "look_direction": "现代单色正装", "core_structure": "outerwear_bottom_shoes", "proportion_strategy": "同色延伸"},
+      {"look_id": "look-3", "gender": "male", "aesthetic_parent": "现代仪式正装", "look_direction": "轻结构礼服", "core_structure": "top_bottom_shoes", "proportion_strategy": "肩腰平衡"}
+    ]
+  }
+]
