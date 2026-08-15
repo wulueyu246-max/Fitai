@@ -181,111 +181,104 @@ class CatalogProductService implements ProductService {
     required OutfitRequest request,
   }) async {
     final hasStructuredRequirements = analysis.productRequirements.isNotEmpty;
-    if (hasStructuredRequirements) {
-      AppLogger.instance.info(
-        'product_search_requirements_prepared',
+    if (!hasStructuredRequirements) {
+      AppLogger.instance.warning(
+        'structured_product_requirements_missing',
         metadata: {
-          'aiGender': analysis.gender,
-          'requestGender': request.gender,
-          'requirements': analysis.productRequirements
-              .map(
-                (requirement) => {
-                  'lookId': requirement.lookId,
-                  'searchRequirementGender': requirement.gender,
-                  'searchKeywords': requirement.searchKeywords,
-                  'category': requirement.category,
-                  'itemName': requirement.itemName,
-                  'fit': requirement.fit,
-                  'material': requirement.material,
-                  'queryReason': requirement.queryReason,
-                  'sourceElements': requirement.sourceElements,
-                },
-              )
-              .toList(growable: false),
+          'requestId': analysis.requestId,
+          'lookCount': analysis.looks.length,
         },
       );
+      return const [];
     }
+    AppLogger.instance.info(
+      'product_search_requirements_prepared',
+      metadata: {
+        'aiGender': analysis.gender,
+        'requestGender': request.gender,
+        'requirements': analysis.productRequirements
+            .map(
+              (requirement) => {
+                'lookId': requirement.lookId,
+                'searchRequirementGender': requirement.gender,
+                'searchKeywords': requirement.searchKeywords,
+                'category': requirement.category,
+                'itemName': requirement.itemName,
+                'fit': requirement.fit,
+                'material': requirement.material,
+                'queryReason': requirement.queryReason,
+                'sourceElements': requirement.sourceElements,
+              },
+            )
+            .toList(growable: false),
+      },
+    );
     final catalog = await source.fetchProducts(
-      recommendationContext: hasStructuredRequirements
-          ? {
-              if (analysis.requestId?.trim().isNotEmpty ?? false)
-                'request_id': analysis.requestId!.trim(),
-              'user_input': request.request.trim(),
-              'gender': analysis.gender,
-              'style_expression': analysis.styleExpression,
-              'style_semantics': analysis.styleSemantics.toJson(),
-              'style_profile': analysis.styleProfile.toJson(),
-              'outfit_blueprint': analysis.outfitBlueprint.toJson(),
-              'style': analysis.style,
-              'scene': request.scene,
-              'budget': _itemBudgetCeiling(
-                request.itemBudget,
-                request.request,
-              ),
-              'item_budget': request.itemBudget,
-              'outfit_budget': request.outfitBudget,
-              'user_profile': {
-                'gender': analysis.gender,
-                'style_expression': analysis.styleExpression,
-                'style_semantics': analysis.styleSemantics.toJson(),
-                'style_profile': analysis.styleProfile.toJson(),
-                'outfit_blueprint': analysis.outfitBlueprint.toJson(),
-                'height': request.height,
-                'weight': request.weight,
-                'body_profile': analysis.bodyAnalysis,
-                'styling_strategy': analysis.stylingStrategy.toJson(),
-                'item_budget': request.itemBudget,
-                'outfit_budget': request.outfitBudget,
-              },
-              'user_requirements': {
-                'scene': request.scene,
-                'style': analysis.style,
-                'style_semantics': analysis.styleSemantics.toJson(),
-                'style_profile': analysis.styleProfile.toJson(),
-                'outfit_blueprint': analysis.outfitBlueprint.toJson(),
-                'budget': _itemBudgetCeiling(
-                  request.itemBudget,
-                  request.request,
-                ),
-                'item_budget': request.itemBudget,
-                'outfit_budget': request.outfitBudget,
-              },
-              'outfit_plan': {
-                'style_semantics': analysis.styleSemantics.toJson(),
-                'style_profile': analysis.styleProfile.toJson(),
-                'outfit_blueprint': analysis.outfitBlueprint.toJson(),
-                'styling_strategy': analysis.stylingStrategy.toJson(),
-                'looks': analysis.looks
-                    .map((look) => look.toJson())
-                    .toList(growable: false),
-                'top': analysis.top,
-                'bottom': analysis.bottom,
-                'shoes': analysis.shoes,
-                'accessories': analysis.accessories,
-                'summary': analysis.suggestion,
-              },
-              'looks': analysis.looks
-                  .map((look) => look.toJson())
-                  .toList(growable: false),
-              'items': analysis.productRequirements
-                  .map((requirement) => requirement.toJson())
-                  .toList(growable: false),
-            }
-          : null,
+      recommendationContext: {
+        if (analysis.requestId?.trim().isNotEmpty ?? false)
+          'request_id': analysis.requestId!.trim(),
+        'user_input': request.request.trim(),
+        'gender': analysis.gender,
+        'style_expression': analysis.styleExpression,
+        'style_semantics': analysis.styleSemantics.toJson(),
+        'style_profile': analysis.styleProfile.toJson(),
+        'outfit_blueprint': analysis.outfitBlueprint.toJson(),
+        'style': analysis.style,
+        'scene': request.scene,
+        'budget': _itemBudgetCeiling(
+          request.itemBudget,
+          request.request,
+        ),
+        'item_budget': request.itemBudget,
+        'outfit_budget': request.outfitBudget,
+        'user_profile': {
+          'gender': analysis.gender,
+          'style_expression': analysis.styleExpression,
+          'style_semantics': analysis.styleSemantics.toJson(),
+          'style_profile': analysis.styleProfile.toJson(),
+          'outfit_blueprint': analysis.outfitBlueprint.toJson(),
+          'height': request.height,
+          'weight': request.weight,
+          'body_profile': analysis.bodyAnalysis,
+          'styling_strategy': analysis.stylingStrategy.toJson(),
+          'item_budget': request.itemBudget,
+          'outfit_budget': request.outfitBudget,
+        },
+        'user_requirements': {
+          'scene': request.scene,
+          'style': analysis.style,
+          'style_semantics': analysis.styleSemantics.toJson(),
+          'style_profile': analysis.styleProfile.toJson(),
+          'outfit_blueprint': analysis.outfitBlueprint.toJson(),
+          'budget': _itemBudgetCeiling(
+            request.itemBudget,
+            request.request,
+          ),
+          'item_budget': request.itemBudget,
+          'outfit_budget': request.outfitBudget,
+        },
+        'outfit_plan': {
+          'style_semantics': analysis.styleSemantics.toJson(),
+          'style_profile': analysis.styleProfile.toJson(),
+          'outfit_blueprint': analysis.outfitBlueprint.toJson(),
+          'styling_strategy': analysis.stylingStrategy.toJson(),
+          'looks': analysis.looks
+              .map((look) => look.toJson())
+              .toList(growable: false),
+          'top': analysis.top,
+          'bottom': analysis.bottom,
+          'shoes': analysis.shoes,
+          'accessories': analysis.accessories,
+          'summary': analysis.suggestion,
+        },
+        'looks':
+            analysis.looks.map((look) => look.toJson()).toList(growable: false),
+        'items': analysis.productRequirements
+            .map((requirement) => requirement.toJson())
+            .toList(growable: false),
+      },
     );
-    if (hasStructuredRequirements) {
-      return catalog;
-    }
-    return recommendationService.recommendProducts(
-      height: request.height,
-      weight: request.weight,
-      bodyType: analysis.bodyAnalysis,
-      shoulderRatio: analysis.bodyAnalysis,
-      legRatio: analysis.bodyAnalysis,
-      style: analysis.style,
-      scene: request.scene,
-      catalog: catalog,
-    );
+    return catalog;
   }
 
   @override

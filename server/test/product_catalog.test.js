@@ -145,7 +145,7 @@ test("GET /products/recommend returns matched catalog products", async () => {
   }
 });
 
-test("POST /products/recommend returns Mock Provider products", async () => {
+test("POST /products/recommend rejects legacy unstructured recommendation payloads", async () => {
   const server = await listenForRequests(app, 0);
   try {
     const {port} = server.address();
@@ -159,11 +159,8 @@ test("POST /products/recommend returns Mock Provider products", async () => {
     );
     const body = await response.json();
 
-    assert.equal(response.status, 200);
-    assert.ok(Array.isArray(body.products));
-    assert.ok(body.products.length > 0);
-    assert.ok(body.products.every((item) => item.category === "outerwear"));
-    assert.ok(body.products.every((item) => item.is_mock === true));
+    assert.equal(response.status, 400);
+    assert.equal(body.error?.code, "STRUCTURED_PRODUCT_REQUIREMENTS_REQUIRED");
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));

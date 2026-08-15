@@ -93,7 +93,8 @@ void main() {
 
     final sectionKeys = find
         .byWidgetPredicate(
-          (widget) => widget.key == const Key('ai-body-info') ||
+          (widget) =>
+              widget.key == const Key('ai-body-info') ||
               widget.key == const Key('ai-request-budget') ||
               widget.key == const Key('ai-photo-scan'),
         )
@@ -171,6 +172,38 @@ void main() {
     expect(source.contexts[1]['budget'], 1000);
     expect(source.contexts[1]['item_budget'], '500-1000');
     expect(source.contexts[1]['outfit_budget'], '1500-3000');
+  });
+
+  test('outfit recommendation cannot fall back to an unstructured catalog call',
+      () async {
+    final source = _CapturingBrandProductService();
+    final service = CatalogProductService(source: source);
+    const analysis = OutfitAnalysis(
+      requestId: 'missing-contract',
+      gender: 'female',
+      bodyAnalysis: '匀称体型',
+      style: '法式',
+      top: '针织衫',
+      bottom: '半身裙',
+      shoes: '单鞋',
+      accessories: '',
+      suggestion: '轻盈搭配',
+    );
+
+    final products = await service.recommendProducts(
+      analysis: analysis,
+      request: const OutfitRequest(
+        height: 168,
+        weight: 52,
+        scene: '约会',
+        request: '法式穿搭',
+        gender: 'female',
+        images: {'front': 'data:image/jpeg;base64,AA=='},
+      ),
+    );
+
+    expect(products, isEmpty);
+    expect(source.contexts, isEmpty);
   });
 }
 

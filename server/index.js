@@ -4750,6 +4750,14 @@ async function handleProductRecommendations(req, res, next) {
       input,
       res.locals.requestId,
     );
+    if (req.method === "POST" && items.length === 0) {
+      return sendError(
+        res,
+        400,
+        "STRUCTURED_PRODUCT_REQUIREMENTS_REQUIRED",
+        "POST /products/recommend requires structured looks or items",
+      );
+    }
     const recommendationContext = createRecommendationContext({
       requestId: res.locals.requestId,
       gender: filters.gender,
@@ -4791,7 +4799,7 @@ async function handleProductRecommendations(req, res, next) {
         source_elements: item.source_elements,
       })),
     });
-    const products = items.length > 0
+    const products = req.method === "POST"
       ? await productProvider.recommendForQueries(items, filters)
       : await productProvider.recommend(filters);
     const providerDurationMs = Date.now() - startedAt;
