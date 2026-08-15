@@ -11,16 +11,63 @@ String normalizeOutfitGender(String? value) {
   return 'unisex';
 }
 
-String resolveOutfitGender({
+class OutfitGenderResolution {
+  const OutfitGenderResolution({
+    required this.gender,
+    required this.sourceUsed,
+    required this.hasConflict,
+    required this.accountGender,
+    required this.profileGender,
+    required this.initialGender,
+  });
+
+  final String gender;
+  final String sourceUsed;
+  final bool hasConflict;
+  final String accountGender;
+  final String profileGender;
+  final String initialGender;
+}
+
+OutfitGenderResolution resolveOutfitGender({
   String? accountGender,
   String? profileGender,
-  String? selectedGender,
+  String? initialGender,
+  bool accountIsCurrentUser = false,
+  bool profileIsCurrentUser = false,
+  bool initialIsCurrentFlow = false,
 }) {
-  for (final candidate in [accountGender, profileGender, selectedGender]) {
-    final normalized = normalizeOutfitGender(candidate);
-    if (normalized != 'unisex') return normalized;
+  final normalizedAccount = normalizeOutfitGender(accountGender);
+  final normalizedProfile = normalizeOutfitGender(profileGender);
+  final normalizedInitial = normalizeOutfitGender(initialGender);
+  final explicitValues = {
+    normalizedAccount,
+    normalizedProfile,
+    normalizedInitial,
+  }..remove('unisex');
+  final hasConflict = explicitValues.length > 1;
+
+  String resolved = 'unisex';
+  String sourceUsed = 'none';
+  if (accountIsCurrentUser && normalizedAccount != 'unisex') {
+    resolved = normalizedAccount;
+    sourceUsed = 'account';
+  } else if (profileIsCurrentUser && normalizedProfile != 'unisex') {
+    resolved = normalizedProfile;
+    sourceUsed = 'profile';
+  } else if (initialIsCurrentFlow && normalizedInitial != 'unisex') {
+    resolved = normalizedInitial;
+    sourceUsed = 'initial';
   }
-  return 'unisex';
+
+  return OutfitGenderResolution(
+    gender: resolved,
+    sourceUsed: sourceUsed,
+    hasConflict: hasConflict,
+    accountGender: normalizedAccount,
+    profileGender: normalizedProfile,
+    initialGender: normalizedInitial,
+  );
 }
 
 class OutfitRequest {

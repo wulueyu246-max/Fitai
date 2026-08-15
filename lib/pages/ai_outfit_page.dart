@@ -680,12 +680,37 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         ),
       );
       final userRequest = _requestController.text.trim();
+      await _session.ensureLoaded();
+      final currentAccount = _session.account;
       final userProfile = await _profileService.load();
-      final resolvedGender = resolveOutfitGender(
-        accountGender: _session.account?.gender,
+      final genderResolution = resolveOutfitGender(
+        accountGender: currentAccount?.gender,
         profileGender: userProfile.gender,
-        selectedGender: widget.initialGender,
+        initialGender: widget.initialGender,
+        accountIsCurrentUser: currentAccount != null,
+        profileIsCurrentUser:
+            currentAccount == null && widget.initialGender == null,
+        initialIsCurrentFlow:
+            currentAccount == null && widget.initialGender != null,
       );
+      final resolvedGender = genderResolution.gender;
+      final genderMetadata = <String, Object?>{
+        'accountGender': genderResolution.accountGender,
+        'profileGender': genderResolution.profileGender,
+        'initialGender': genderResolution.initialGender,
+        'resolvedGender': resolvedGender,
+        'source_used': genderResolution.sourceUsed,
+      };
+      AppLogger.instance.info(
+        'outfit_gender_resolved',
+        metadata: genderMetadata,
+      );
+      if (genderResolution.hasConflict) {
+        AppLogger.instance.warning(
+          'GENDER_SOURCE_CONFLICT',
+          metadata: genderMetadata,
+        );
+      }
       final outfitRequest = OutfitRequest(
         height: height,
         weight: weight,

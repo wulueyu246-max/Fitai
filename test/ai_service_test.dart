@@ -205,32 +205,68 @@ void main() {
     expect(femaleRequest.toJson()['gender'], 'female');
   });
 
-  test('resolves explicit profile and selected genders without photo inference',
+  test('current female account overrides a stale male initial gender', () {
+    final result = resolveOutfitGender(
+      accountGender: 'female',
+      initialGender: 'male',
+      accountIsCurrentUser: true,
+    );
+
+    expect(result.gender, 'female');
+    expect(result.sourceUsed, 'account');
+    expect(result.hasConflict, isTrue);
+  });
+
+  test('current male account overrides a stale female profile', () {
+    final result = resolveOutfitGender(
+      accountGender: 'male',
+      profileGender: '女性',
+      accountIsCurrentUser: true,
+    );
+
+    expect(result.gender, 'male');
+    expect(result.sourceUsed, 'account');
+    expect(result.hasConflict, isTrue);
+  });
+
+  test('unknown gender remains unisex without photo inference', () {
+    final result = resolveOutfitGender(
+      accountGender: '未设置',
+      profileGender: '',
+      initialGender: null,
+    );
+
+    expect(result.gender, 'unisex');
+    expect(result.sourceUsed, 'none');
+    expect(result.hasConflict, isFalse);
+  });
+
+  test('conflicting genders without an authoritative source fall back safely',
       () {
-    expect(
-      resolveOutfitGender(profileGender: '女性'),
-      'female',
+    final result = resolveOutfitGender(
+      profileGender: 'female',
+      initialGender: 'male',
     );
-    expect(
-      resolveOutfitGender(selectedGender: 'male'),
-      'male',
+
+    expect(result.gender, 'unisex');
+    expect(result.sourceUsed, 'none');
+    expect(result.hasConflict, isTrue);
+  });
+
+  test('current local profile and current flow selection remain supported', () {
+    final profileResult = resolveOutfitGender(
+      profileGender: '女性',
+      profileIsCurrentUser: true,
     );
-    expect(
-      resolveOutfitGender(
-        accountGender: '未设置',
-        profileGender: '',
-        selectedGender: null,
-      ),
-      'unisex',
+    final initialResult = resolveOutfitGender(
+      initialGender: 'male',
+      initialIsCurrentFlow: true,
     );
-    expect(
-      resolveOutfitGender(
-        accountGender: 'female',
-        profileGender: 'male',
-        selectedGender: 'male',
-      ),
-      'female',
-    );
+
+    expect(profileResult.gender, 'female');
+    expect(profileResult.sourceUsed, 'profile');
+    expect(initialResult.gender, 'male');
+    expect(initialResult.sourceUsed, 'initial');
   });
 
   for (final gender in const ['female', 'male', 'unisex']) {
