@@ -258,6 +258,37 @@ test("Shopping Agent structured parser diagnoses every legal non-object JSON typ
   }
 });
 
+test("Product Selector parser accepts object and one safe assessments wrapper only", () => {
+  const payload = {assessments: []};
+  assert.deepEqual(
+    parseAiJson(aiResponse(JSON.stringify(payload)), {
+      allowSingleAssessmentWrapper: true,
+    }),
+    payload,
+  );
+  assert.deepEqual(
+    parseAiJson(aiResponse(JSON.stringify([payload])), {
+      allowSingleAssessmentWrapper: true,
+    }),
+    payload,
+  );
+
+  for (const invalid of [
+    [],
+    [payload, payload],
+    ["not-an-object"],
+    [{}],
+  ]) {
+    assert.throws(
+      () => parseAiJson(aiResponse(JSON.stringify(invalid)), {
+        allowSingleAssessmentWrapper: true,
+      }),
+      (error) => error.code === "SHOPPING_AGENT_SCHEMA_INVALID" &&
+        error.schema_error_kind === "INVALID_SELECTOR_ARRAY_WRAPPER",
+    );
+  }
+});
+
 test("Shopping Intent reports a missing top-level shopping_intent explicitly", () => {
   const input = normalizeAgentInput({user_input: "出去玩", gender: "female"});
   const parsed = parseAiJson(aiResponse("{}"));
@@ -341,6 +372,13 @@ test("selector candidate ID invariant rejects missing, duplicate and foreign IDs
     () => validateProductSelection({
       assessments: [assessment("candidate_001"), assessment("candidate_999")],
     }, values),
+    ShoppingAgentV1Error,
+  );
+  const wrapped = parseAiJson(aiResponse(JSON.stringify([{
+    assessments: [assessment("candidate_001"), assessment("candidate_999")],
+  }])), {allowSingleAssessmentWrapper: true});
+  assert.throws(
+    () => validateProductSelection(wrapped, values),
     ShoppingAgentV1Error,
   );
 });

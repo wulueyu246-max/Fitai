@@ -650,6 +650,7 @@ class TaobaoShoppingAgentV1 {
         maxRetries: 0,
       });
       const payload = parseAiJson(response, {
+        allowSingleAssessmentWrapper: phase.startsWith("product_selector_"),
         onDiagnostic: (diagnostic) => {
           const level = diagnostic.schema_error_kind ? "warn" : "info";
           this.logger[level]?.("shopping_agent_v1_structured_output", {
@@ -1159,7 +1160,10 @@ function taobaoCauseCode(error) {
   return "";
 }
 
-function parseAiJson(response, {onDiagnostic} = {}) {
+function parseAiJson(response, {
+  allowSingleAssessmentWrapper = false,
+  onDiagnostic,
+} = {}) {
   const content = response?.choices?.[0]?.message?.content;
   const diagnostic = {
     finish_reason: response?.choices?.[0]?.finish_reason ?? null,
@@ -1193,8 +1197,17 @@ function parseAiJson(response, {onDiagnostic} = {}) {
   } else if (diagnostic.parsed_json_type === "object") {
     diagnostic.top_level_keys = safeSchemaKeys(parsed);
   }
+  if (allowSingleAssessmentWrapper && isSingleAssessmentWrapper(parsed)) {
+    parsed = parsed[0];
+    diagnostic.parsed_json_type = "object";
+    diagnostic.top_level_keys = safeSchemaKeys(parsed);
+  }
   if (diagnostic.parsed_json_type !== "object") {
-    diagnostic.schema_error_kind = topLevelSchemaErrorKind(diagnostic.parsed_json_type);
+    if (allowSingleAssessmentWrapper && diagnostic.parsed_json_type === "array") {
+      diagnostic.schema_error_kind = "INVALID_SELECTOR_ARRAY_WRAPPER";
+    } else {
+      diagnostic.schema_error_kind = topLevelSchemaErrorKind(diagnostic.parsed_json_type);
+    }
     onDiagnostic?.(Object.freeze({...diagnostic}));
     throw schemaError(
       `AI JSON top level must be an object, received ${diagnostic.parsed_json_type}`,
@@ -1204,6 +1217,15 @@ function parseAiJson(response, {onDiagnostic} = {}) {
   }
   onDiagnostic?.(Object.freeze({...diagnostic}));
   return parsed;
+}
+
+function isSingleAssessmentWrapper(value) {
+  return Array.isArray(value) &&
+    value.length === 1 &&
+    value[0] &&
+    typeof value[0] === "object" &&
+    !Array.isArray(value[0]) &&
+    Array.isArray(value[0].assessments);
 }
 
 function jsonValueType(value) {
