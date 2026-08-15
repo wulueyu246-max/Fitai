@@ -136,3 +136,95 @@ test("transport diagnostics preserve cause safely without credentials", () => {
   assert.equal(JSON.stringify(details).includes("signature"), false);
   assert.equal(JSON.stringify(details).includes("token-value"), false);
 });
+
+test("Taobao client retries a transient ETIMEDOUT once and then succeeds", async () => {
+  let attempts = 0;
+  const client = new TaobaoApiClient({
+    appKey: "key",
+    appSecret: "secret",
+    retryBackoffMs: 0,
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        const transport = Object.assign(new AggregateError([], "connect failed"), {
+          code: "ETIMEDOUT",
+        });
+        throw new TypeError("fetch failed", {cause: transport});
+      }
+      return new Response(JSON.stringify({ok_response: {}}), {status: 200});
+    },
+    logger: {info() {}, warn() {}},
+  });
+
+  const payload = await client.call("taobao.test.method");
+  assert.deepEqual(payload, {ok_response: {}});
+  assert.equal(attempts, 2);
+});
+
+test("Taobao client preserves ETIMEDOUT details after two failed attempts", async () => {
+  let attempts = 0;
+  const client = new TaobaoApiClient({
+    appKey: "key",
+    appSecret: "secret",
+    retryBackoffMs: 0,
+    fetchImpl: async () => {
+      attempts += 1;
+      throw Object.assign(new Error("connect timed out"), {code: "ETIMEDOUT"});
+    },
+    logger: {info() {}, warn() {}},
+  });
+
+  await assert.rejects(
+    () => client.call("taobao.test.method"),
+    (error) => {
+      assert.equal(error.code, "TAOBAO_NETWORK_ERROR");
+      assert.equal(error.details.cause_code, "ETIMEDOUT");
+      assert.equal(error.attempts, 2);
+      assert.equal(typeof error.elapsed_ms, "number");
+      return true;
+    },
+  );
+  assert.equal(attempts, 2);
+});
+
+test("Taobao client does not classify a TOP business error as a network timeout", async () => {
+  let attempts = 0;
+  const client = new TaobaoApiClient({
+    appKey: "key",
+    appSecret: "secret",
+    retryBackoffMs: 0,
+    fetchImpl: async () => {
+      attempts += 1;
+      return new Response(JSON.stringify({
+        error_response: {code: 27, sub_code: "isv.permission-api-package-limit"},
+      }), {status: 200});
+    },
+    logger: {info() {}, warn() {}},
+  });
+
+  await assert.rejects(
+    () => client.call("taobao.test.method"),
+    (error) => error.code === "TAOBAO_PERMISSION_DENIED",
+  );
+  assert.equal(attempts, 1);
+});
+
+test("Taobao client does not retry a non-transient transport error", async () => {
+  let attempts = 0;
+  const client = new TaobaoApiClient({
+    appKey: "key",
+    appSecret: "secret",
+    retryBackoffMs: 0,
+    fetchImpl: async () => {
+      attempts += 1;
+      throw Object.assign(new Error("invalid local transport state"), {code: "ERR_INVALID_ARG_TYPE"});
+    },
+    logger: {info() {}, warn() {}},
+  });
+
+  await assert.rejects(
+    () => client.call("taobao.test.method"),
+    (error) => error.code === "TAOBAO_NETWORK_ERROR" && error.retryable === false,
+  );
+  assert.equal(attempts, 1);
+});

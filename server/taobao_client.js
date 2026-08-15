@@ -5,6 +5,20 @@ const {Agent} = require("undici");
 const TAOBAO_ENDPOINT = "https://eco.taobao.com/router/rest";
 const TAOBAO_MATERIAL_SEARCH_METHOD = "taobao.tbk.dg.material.optional.upgrade";
 const TAOBAO_MATERIAL_SAMPLE_METHOD = "taobao.tbk.dg.material.recommend";
+const DEFAULT_RETRY_BACKOFF_MS = 100;
+const RETRYABLE_TRANSPORT_CODES = new Set([
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
 
 class TaobaoApiError extends Error {
   constructor(message, {
@@ -30,6 +44,7 @@ class TaobaoApiClient {
     connectTimeoutMs = 5_000,
     totalTimeoutMs = 12_000,
     maxRetries = 1,
+    retryBackoffMs = DEFAULT_RETRY_BACKOFF_MS,
     logger = console,
   }) {
     this.appKey = required(appKey, "TAOBAO_APP_KEY");
@@ -38,6 +53,7 @@ class TaobaoApiClient {
     this.fetch = fetchImpl;
     this.totalTimeoutMs = positiveInteger(totalTimeoutMs, 12_000);
     this.maxRetries = Math.min(positiveInteger(maxRetries, 1), 1);
+    this.retryBackoffMs = nonNegativeInteger(retryBackoffMs, DEFAULT_RETRY_BACKOFF_MS);
     this.logger = logger;
     this.dispatcher = fetchImpl === fetch
       ? new Agent({connect: {timeout: positiveInteger(connectTimeoutMs, 5_000)}})
@@ -98,8 +114,10 @@ class TaobaoApiClient {
         });
         if (signal?.aborted) break;
         if (!lastError.retryable || attempt >= this.maxRetries) break;
+        if (!await waitForRetry(this.retryBackoffMs, signal)) break;
       }
     }
+    lastError.elapsed_ms = Date.now() - startedAt;
     throw lastError;
   }
 
@@ -138,9 +156,15 @@ class TaobaoApiClient {
     } catch (error) {
       if (error instanceof TaobaoApiError) throw error;
       const timeout = error?.name === "AbortError";
+      const causeCode = transportErrorCode(error);
       throw new TaobaoApiError(
         timeout ? "淘宝商品请求超时" : "淘宝商品网络请求失败",
-        {code: timeout ? "TAOBAO_TIMEOUT" : "TAOBAO_NETWORK_ERROR", retryable: true, cause: error},
+        {
+          code: timeout ? "TAOBAO_TIMEOUT" : "TAOBAO_NETWORK_ERROR",
+          retryable: timeout || RETRYABLE_TRANSPORT_CODES.has(causeCode),
+          cause: error,
+          details: causeCode ? {cause_code: causeCode} : {},
+        },
       );
     } finally {
       clearTimeout(timer);
@@ -261,6 +285,41 @@ function httpsUrl(value) {
 function positiveInteger(value, fallback) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : fallback;
+}
+
+function nonNegativeInteger(value, fallback) {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : fallback;
+}
+
+function transportErrorCode(error) {
+  const queue = [error];
+  const visited = new Set();
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+    const code = String(current.code || "").trim().toUpperCase();
+    if (RETRYABLE_TRANSPORT_CODES.has(code)) return code;
+    if (current.cause) queue.push(current.cause);
+    if (Array.isArray(current.errors)) queue.push(...current.errors);
+  }
+  return "";
+}
+
+function waitForRetry(delayMs, signal) {
+  if (signal?.aborted) return Promise.resolve(false);
+  if (delayMs <= 0) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const finish = (value) => {
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve(value);
+    };
+    const onAbort = () => finish(false);
+    const timer = setTimeout(() => finish(true), delayMs);
+    signal?.addEventListener?.("abort", onAbort, {once: true});
+  });
 }
 
 module.exports = {

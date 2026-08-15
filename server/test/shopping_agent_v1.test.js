@@ -420,7 +420,51 @@ test("retrieval error classification distinguishes local proxy and provider fail
     "TAOBAO_SLOT_TIMEOUT",
   );
   assert.equal(
+    classifyTaobaoRetrievalError({
+      code: "TAOBAO_NETWORK_ERROR",
+      details: {cause_code: "ETIMEDOUT"},
+    }),
+    "TAOBAO_NETWORK_ERROR",
+  );
+  assert.equal(
     classifyTaobaoRetrievalError({code: "TAOBAO_PERMISSION_DENIED"}),
     "TAOBAO_PROVIDER_ERROR",
   );
+});
+
+test("two top ETIMEDOUT attempts retain successful slots and report network error", async () => {
+  const client = new FakeAiClient();
+  const provider = {
+    async searchShoppingAgentCandidates({category, onAttempt}) {
+      if (category === "top") {
+        onAttempt?.(1);
+        onAttempt?.(2);
+        const error = new Error("network unavailable");
+        error.code = "TAOBAO_NETWORK_ERROR";
+        error.details = {cause_code: "ETIMEDOUT"};
+        error.attempts = 2;
+        throw error;
+      }
+      onAttempt?.(1);
+      const products = candidates(category);
+      return {products, raw_count: products.length, valid_count: products.length, attempts: 1};
+    },
+  };
+  const agent = new TaobaoShoppingAgentV1({
+    client,
+    model: "qwen3.7-plus",
+    productProvider: provider,
+    logger: {info() {}, warn() {}},
+  });
+
+  const result = await agent.run({user_input: "出去玩", authoritative_gender: "female"});
+  assert.equal(result.state, "retryable");
+  assert.equal(result.reason, "PARTIAL_TAOBAO_RETRIEVAL");
+  assert.equal(result.failed_slots[0].category, "top");
+  assert.equal(result.failed_slots[0].error_code, "TAOBAO_NETWORK_ERROR");
+  assert.equal(result.failed_slots[0].cause_code, "ETIMEDOUT");
+  assert.equal(result.failed_slots[0].attempts, 2);
+  assert.deepEqual(Object.keys(result.retrieved_candidates).sort(), ["bottom", "shoes"]);
+  assert.equal(result.final_look_count, 0);
+  assert.equal(client.calls.length, 1);
 });

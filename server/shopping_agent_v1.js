@@ -355,6 +355,7 @@ class TaobaoShoppingAgentV1 {
             attempts: Number(error?.attempts || attempts || 0),
             status: "FAILED",
             error_code: errorCode,
+            cause_code: taobaoCauseCode(error) || null,
             raw_candidate_count: 0,
           },
         });
@@ -1096,12 +1097,46 @@ function classifyTaobaoRetrievalError(error, slotDeadlineAborted = false) {
   if (slotDeadlineAborted || [
     "TAOBAO_SLOT_TIMEOUT",
     "TAOBAO_TIMEOUT",
-    "ETIMEDOUT",
-    "UND_ERR_CONNECT_TIMEOUT",
   ].includes(code)) {
     return "TAOBAO_SLOT_TIMEOUT";
   }
+  if (code === "TAOBAO_NETWORK_ERROR" || taobaoCauseCode(error)) {
+    return "TAOBAO_NETWORK_ERROR";
+  }
   return "TAOBAO_PROVIDER_ERROR";
+}
+
+function taobaoCauseCode(error) {
+  const retryableCodes = new Set([
+    "EAI_AGAIN",
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+    "EPIPE",
+    "ETIMEDOUT",
+    "UND_ERR_BODY_TIMEOUT",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_HEADERS_TIMEOUT",
+    "UND_ERR_SOCKET",
+  ]);
+  const queue = [error?.details?.cause_code, error?.cause, error];
+  const visited = new Set();
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (typeof current === "string") {
+      const code = current.trim().toUpperCase();
+      if (retryableCodes.has(code)) return code;
+      continue;
+    }
+    if (!current || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+    const code = String(current.code || "").trim().toUpperCase();
+    if (retryableCodes.has(code)) return code;
+    if (current.cause) queue.push(current.cause);
+    if (Array.isArray(current.errors)) queue.push(...current.errors);
+  }
+  return "";
 }
 
 function parseAiJson(response) {
