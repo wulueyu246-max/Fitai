@@ -19,8 +19,20 @@ const SELECTOR_STATUS = Object.freeze({
   REJECT: "REJECT",
   UNCERTAIN: "UNCERTAIN",
 });
+const SELECTION_TIER = Object.freeze({
+  HIGH: "HIGH",
+  NORMAL: "NORMAL",
+  NONE: "NONE",
+});
+const POOL_HOMOGENEITY = Object.freeze({
+  LOW: "LOW",
+  MEDIUM: "MEDIUM",
+  HIGH: "HIGH",
+});
 const MAX_VALID_CANDIDATES_PER_SLOT = 10;
 const MAX_SELECTED_CANDIDATES_PER_SLOT = 3;
+const MAX_REFINEMENT_ROUNDS = 1;
+const SELECTOR_RECOMMENDABLE_SCORE = 75;
 const DEFAULT_TAOBAO_SLOT_TIMEOUT_MS = 25_000;
 const DEFAULT_TAOBAO_RETRIEVAL_TIMEOUT_MS = 30_000;
 
@@ -133,6 +145,10 @@ const SCORE_PROPERTIES = Object.freeze({
   persona_fit: {type: "number", minimum: 0, maximum: 100},
   silhouette_fit: {type: "number", minimum: 0, maximum: 100},
   outfit_potential: {type: "number", minimum: 0, maximum: 100},
+  aesthetic_distinctiveness: {type: "number", minimum: 0, maximum: 100},
+  quality_perception: {type: "number", minimum: 0, maximum: 100},
+  age_appropriateness: {type: "number", minimum: 0, maximum: 100},
+  styling_value: {type: "number", minimum: 0, maximum: 100},
 });
 
 const PRODUCT_SELECTION_SCHEMA = Object.freeze({
@@ -152,6 +168,10 @@ const PRODUCT_SELECTION_SCHEMA = Object.freeze({
             type: "string",
             enum: Object.values(SELECTOR_STATUS),
           },
+          selection_tier: {
+            type: "string",
+            enum: Object.values(SELECTION_TIER),
+          },
           scores: {
             type: "object",
             additionalProperties: false,
@@ -160,15 +180,42 @@ const PRODUCT_SELECTION_SCHEMA = Object.freeze({
           },
           reason_codes: STRING_ARRAY_SCHEMA,
         },
-        required: ["candidate_id", "status", "scores", "reason_codes"],
+        required: [
+          "candidate_id",
+          "status",
+          "selection_tier",
+          "scores",
+          "reason_codes",
+        ],
       },
     },
+    quality_sufficient: {type: "boolean"},
+    refinement_needed: {type: "boolean"},
+    refinement_reasons: STRING_ARRAY_SCHEMA,
+    candidate_pool_homogeneity: {
+      type: "string",
+      enum: Object.values(POOL_HOMOGENEITY),
+    },
+    refinement_query: {type: "string"},
   },
-  required: ["assessments"],
+  required: [
+    "assessments",
+    "quality_sufficient",
+    "refinement_needed",
+    "refinement_reasons",
+    "candidate_pool_homogeneity",
+    "refinement_query",
+  ],
 });
 
 const COMPOSER_SCORE_PROPERTIES = Object.freeze({
   aesthetic_coherence: {type: "number", minimum: 0, maximum: 100},
+  proportion_balance: {type: "number", minimum: 0, maximum: 100},
+  color_harmony: {type: "number", minimum: 0, maximum: 100},
+  material_harmony: {type: "number", minimum: 0, maximum: 100},
+  visual_hierarchy: {type: "number", minimum: 0, maximum: 100},
+  style_story: {type: "number", minimum: 0, maximum: 100},
+  distinctiveness: {type: "number", minimum: 0, maximum: 100},
   persona_fit: {type: "number", minimum: 0, maximum: 100},
   body_proportion: {type: "number", minimum: 0, maximum: 100},
   occasion_fit: {type: "number", minimum: 0, maximum: 100},
@@ -310,9 +357,10 @@ class TaobaoShoppingAgentV1 {
     });
 
     let candidateCounter = 0;
-    const retrievalTasks = shoppingIntent.slots.map(async (slot) => {
+    const retrieveSlot = async ({slot, query, round = 1, exclude = []}) => {
       metrics.taobao_call_count += 1;
-      const slotKey = `${requestId}:shopping-agent-v1:${slot.category}`;
+      const slotKey = `${requestId}:shopping-agent-v1:${slot.category}` +
+        (round > 1 ? `:refinement-${round - 1}` : "");
       const slotStartedAt = Date.now();
       const controller = new AbortController();
       let timeoutId;
@@ -321,7 +369,7 @@ class TaobaoShoppingAgentV1 {
       try {
         result = await Promise.race([
           this.productProvider.searchShoppingAgentCandidates({
-            query: slot.search_query,
+            query,
             category: slot.category,
             gender: shoppingIntent.gender,
             requestId,
@@ -348,7 +396,8 @@ class TaobaoShoppingAgentV1 {
           details: {
             slot_key: slotKey,
             category: slot.category,
-            query: slot.search_query,
+            query,
+            round,
             start_time: new Date(slotStartedAt).toISOString(),
             end_time: new Date().toISOString(),
             elapsed_ms: Date.now() - slotStartedAt,
@@ -363,12 +412,14 @@ class TaobaoShoppingAgentV1 {
         if (timeoutId) clearTimeout(timeoutId);
       }
       const rawProducts = Array.isArray(result) ? result : result?.products || [];
+      const excludedIdentities = new Set(exclude.map(productIdentity));
       const assessments = rawProducts.map((product) => ({
         product,
         gate: hardGateCandidate(product, slot, shoppingIntent),
       }));
       const passed = assessments
-        .filter(({gate}) => gate.status === "PASS")
+        .filter(({product, gate}) =>
+          gate.status === "PASS" && !excludedIdentities.has(productIdentity(product)))
         .slice(0, MAX_VALID_CANDIDATES_PER_SLOT)
         .map(({product, gate}) => ({
           ...product,
@@ -385,6 +436,8 @@ class TaobaoShoppingAgentV1 {
         attempts: Number(result?.attempts || attempts || 1),
         status: "SUCCESS",
         error_code: null,
+        round,
+        query,
         raw_count: Number(result?.raw_count ?? rawProducts.length),
         valid_count: Number(result?.valid_count ?? rawProducts.length),
         candidate_gate_pass: assessments.filter(({gate}) => gate.status === "PASS").length,
@@ -394,7 +447,8 @@ class TaobaoShoppingAgentV1 {
       this.logger.info?.("shopping_agent_v1_candidate_gate", {
         request_id: requestId,
         category: slot.category,
-        search_query: slot.search_query,
+        round,
+        search_query: query,
         raw_candidate_count: retrieval.raw_count,
         valid_candidate_count: retrieval.valid_count,
         candidate_gate_pass: retrieval.candidate_gate_pass,
@@ -402,7 +456,11 @@ class TaobaoShoppingAgentV1 {
         evidence_candidate_ids: passed.map((candidate) => candidate.candidate_id),
       });
       return retrieval;
-    });
+    };
+    const retrievalTasks = shoppingIntent.slots.map((slot) => retrieveSlot({
+      slot,
+      query: slot.search_query,
+    }));
     const settledRetrievals = await Promise.allSettled(retrievalTasks);
     const retrievals = [];
     const retrievalFailures = [];
@@ -495,16 +553,22 @@ class TaobaoShoppingAgentV1 {
       }
     }
 
-    const selections = await Promise.all(retrievals.map(async (group) => {
+    const selectGroup = async (group, {round = 1} = {}) => {
       const payload = await this.#aiCall({
-        phase: `product_selector_${group.slot.category}`,
-        schemaName: `fitai_product_selector_${group.slot.category}`,
+        phase: `product_selector_${group.slot.category}` +
+          (round > 1 ? `_refinement_${round - 1}` : ""),
+        schemaName: `fitai_product_selector_${group.slot.category}` +
+          (round > 1 ? `_refinement_${round - 1}` : ""),
         schema: PRODUCT_SELECTION_SCHEMA,
         timeoutMs: this.selectorTimeoutMs,
         metrics,
-        messages: buildSelectorMessages(shoppingIntent, group),
+        messages: buildSelectorMessages(shoppingIntent, group, {round}),
       });
-      const normalized = validateProductSelection(payload, group.candidates);
+      const normalized = validateProductSelection(payload, group.candidates, {
+        slot: group.slot,
+        gender: shoppingIntent.gender,
+        originalQuery: group.query || group.slot.search_query,
+      });
       const pool = selectFinalCandidatePool(group.candidates, normalized.assessments);
       if (pool.length === 0) {
         throw new ShoppingAgentV1Error(
@@ -517,25 +581,123 @@ class TaobaoShoppingAgentV1 {
       }
       const selection = {
         ...group,
+        round,
         selector_keep: normalized.assessments.filter((item) =>
           item.status === SELECTOR_STATUS.KEEP).length,
         selector_reject: normalized.assessments.filter((item) =>
           item.status === SELECTOR_STATUS.REJECT).length,
         selector_uncertain: normalized.assessments.filter((item) =>
           item.status === SELECTOR_STATUS.UNCERTAIN).length,
+        quality_sufficient: normalized.quality_sufficient,
+        refinement_needed: normalized.refinement_needed,
+        refinement_reasons: normalized.refinement_reasons,
+        refinement_query: normalized.refinement_query,
+        candidate_pool_homogeneity: normalized.candidate_pool_homogeneity,
+        top_candidate_quality: topSelectorQuality(normalized.assessments),
         assessments: normalized.assessments,
         final_candidate_pool: pool,
       };
       this.logger.info?.("shopping_agent_v1_product_selector", {
         request_id: requestId,
         category: group.slot.category,
+        round,
         selector_keep: selection.selector_keep,
         selector_reject: selection.selector_reject,
         selector_uncertain: selection.selector_uncertain,
+        quality_sufficient: selection.quality_sufficient,
+        refinement_needed: selection.refinement_needed,
+        refinement_reasons: selection.refinement_reasons,
+        refinement_query: selection.refinement_query,
+        candidate_pool_homogeneity: selection.candidate_pool_homogeneity,
+        top_candidate_quality: selection.top_candidate_quality,
         final_candidate_pool: pool.map((candidate) => candidate.candidate_id),
       });
       return selection;
+    };
+    const firstRoundSelections = await Promise.all(retrievals.map((group) =>
+      selectGroup(group)));
+
+    const refinementPlans = firstRoundSelections.map((selection) => ({
+      selection,
+      decision: refinementDecision(selection),
+    })).filter(({decision}) => decision.needed);
+    const refinementResults = await Promise.all(refinementPlans.map(async ({
+      selection,
+      decision,
+    }) => {
+      let retrieval;
+      try {
+        retrieval = await retrieveSlot({
+          slot: selection.slot,
+          query: decision.query,
+          round: 2,
+          exclude: selection.candidates,
+        });
+        this.logger.info?.("shopping_agent_v1_refinement_retrieval", {
+          request_id: requestId,
+          category: selection.slot.category,
+          first_query: selection.query || selection.slot.search_query,
+          refinement_query: decision.query,
+          refinement_reasons: decision.reasons,
+          raw_candidate_count: retrieval.raw_count,
+          candidate_gate_pass: retrieval.candidate_gate_pass,
+          elapsed_ms: retrieval.elapsed_ms,
+          status: "SUCCESS",
+        });
+      } catch (error) {
+        this.logger.warn?.("shopping_agent_v1_refinement_retrieval", {
+          request_id: requestId,
+          category: selection.slot.category,
+          first_query: selection.query || selection.slot.search_query,
+          refinement_query: decision.query,
+          refinement_reasons: decision.reasons,
+          status: "FAILED",
+          error_code: classifyTaobaoRetrievalError(error),
+        });
+        return {category: selection.slot.category, selection, decision, retrieval: null};
+      }
+      if (retrieval.candidates.length === 0) {
+        return {category: selection.slot.category, selection, decision, retrieval};
+      }
+      const refinedSelection = await selectGroup(retrieval, {round: 2});
+      return {
+        category: selection.slot.category,
+        selection,
+        decision,
+        retrieval,
+        refinedSelection,
+      };
     }));
+    const refinementByCategory = new Map(refinementResults.map((result) => [
+      result.category,
+      result,
+    ]));
+    const selections = firstRoundSelections.map((selection) => {
+      const refinement = refinementByCategory.get(selection.slot.category);
+      if (!refinement?.refinedSelection) {
+        return {
+          ...selection,
+          refinement: refinement ? {
+            triggered: true,
+            status: refinement.retrieval ? "NO_NEW_CANDIDATES" : "FAILED",
+            first_query: selection.query || selection.slot.search_query,
+            second_query: refinement.decision.query,
+            reasons: refinement.decision.reasons,
+            rounds: [selectorRoundMetric(selection)],
+          } : {
+            triggered: false,
+            status: "NOT_NEEDED",
+            first_query: selection.query || selection.slot.search_query,
+            second_query: null,
+            reasons: [],
+            rounds: [selectorRoundMetric(selection)],
+          },
+        };
+      }
+      return mergeSelectionRounds(selection, refinement.refinedSelection, {
+        decision: refinement.decision,
+      });
+    });
 
     const composition = await this.#aiCall({
       phase: "real_product_outfit_composer",
@@ -566,6 +728,15 @@ class TaobaoShoppingAgentV1 {
       selector_keep: selection.selector_keep,
       selector_reject: selection.selector_reject,
       selector_uncertain: selection.selector_uncertain,
+      selector_high: selection.assessments.filter((item) =>
+        item.status === SELECTOR_STATUS.KEEP &&
+        item.selection_tier === SELECTION_TIER.HIGH).length,
+      selector_normal: selection.assessments.filter((item) =>
+        item.status === SELECTOR_STATUS.KEEP &&
+        item.selection_tier === SELECTION_TIER.NORMAL).length,
+      candidate_pool_homogeneity: selection.candidate_pool_homogeneity,
+      top_candidate_quality: selection.top_candidate_quality,
+      refinement: selection.refinement,
       final_candidate_pool: selection.final_candidate_pool.map((product) =>
         product.candidate_id),
     }));
@@ -579,9 +750,14 @@ class TaobaoShoppingAgentV1 {
         slot.category,
         slot.search_query,
       ])),
+      refinement_queries: Object.fromEntries(selections.map((selection) => [
+        selection.slot.category,
+        selection.refinement?.second_query || null,
+      ])),
       slot_metrics: slotMetrics,
       retrieval_budget_ms: this.taobaoRetrievalTimeoutMs,
       slot_timeout_ms: this.taobaoSlotTimeoutMs,
+      max_refinement_rounds: MAX_REFINEMENT_ROUNDS,
       candidate_pools: Object.fromEntries(selections.map((selection) => [
         selection.slot.category,
         selection.final_candidate_pool.map(publicCandidate),
@@ -857,7 +1033,11 @@ function explicitHardConstraintConflict(constraint, evidence) {
   return false;
 }
 
-function validateProductSelection(payload, candidates) {
+function validateProductSelection(payload, candidates, {
+  slot,
+  gender,
+  originalQuery,
+} = {}) {
   const assessments = Array.isArray(payload?.assessments) ? payload.assessments : null;
   if (!assessments) throw schemaError("selector assessments must be an array");
   const allowedIds = new Set(candidates.map((candidate) => candidate.candidate_id));
@@ -872,9 +1052,20 @@ function validateProductSelection(payload, candidates) {
     if (!Object.values(SELECTOR_STATUS).includes(status)) {
       throw schemaError("selector returned an invalid status");
     }
+    const selectionTier = String(assessment?.selection_tier || "").toUpperCase();
+    if (!Object.values(SELECTION_TIER).includes(selectionTier)) {
+      throw schemaError("selector returned an invalid selection_tier");
+    }
+    if (status === SELECTOR_STATUS.KEEP && selectionTier === SELECTION_TIER.NONE) {
+      throw schemaError("KEEP candidates require HIGH or NORMAL selection_tier");
+    }
+    if (status !== SELECTOR_STATUS.KEEP && selectionTier !== SELECTION_TIER.NONE) {
+      throw schemaError("non-KEEP candidates require NONE selection_tier");
+    }
     return Object.freeze({
       candidate_id: candidateId,
       status,
+      selection_tier: selectionTier,
       scores: normalizeScoreObject(assessment.scores, Object.keys(SCORE_PROPERTIES)),
       reason_codes: Object.freeze(stringList(assessment.reason_codes, 12)),
     });
@@ -882,28 +1073,162 @@ function validateProductSelection(payload, candidates) {
   if (seen.size !== allowedIds.size) {
     throw schemaError("selector must assess every candidate exactly once");
   }
-  return {assessments: normalized};
+  if (typeof payload?.quality_sufficient !== "boolean" ||
+      typeof payload?.refinement_needed !== "boolean") {
+    throw schemaError("selector quality decisions must be boolean");
+  }
+  const homogeneity = String(payload?.candidate_pool_homogeneity || "").toUpperCase();
+  if (!Object.values(POOL_HOMOGENEITY).includes(homogeneity)) {
+    throw schemaError("selector returned invalid candidate_pool_homogeneity");
+  }
+  const refinementReasons = Object.freeze(stringList(payload.refinement_reasons, 8));
+  let refinementQuery = text(payload.refinement_query, 80);
+  if (payload.refinement_needed) {
+    if (!slot || !gender || !originalQuery) {
+      if (!refinementQuery) {
+        throw schemaError("selector refinement_query is required when refinement is needed");
+      }
+    } else {
+      refinementQuery = normalizeSearchQuery(refinementQuery, gender, slot.category);
+      if (canonicalQuery(refinementQuery) === canonicalQuery(originalQuery)) {
+        throw schemaError("selector refinement_query must differ from first query");
+      }
+    }
+  } else if (refinementQuery) {
+    refinementQuery = slot && gender
+      ? normalizeSearchQuery(refinementQuery, gender, slot.category)
+      : refinementQuery;
+  }
+  return {
+    assessments: normalized,
+    quality_sufficient: payload.quality_sufficient,
+    refinement_needed: payload.refinement_needed,
+    refinement_reasons: refinementReasons,
+    candidate_pool_homogeneity: homogeneity,
+    refinement_query: refinementQuery,
+  };
 }
 
 function selectFinalCandidatePool(candidates, assessments) {
   const byId = new Map(candidates.map((candidate) => [candidate.candidate_id, candidate]));
-  const score = (assessment) => assessment.scores.outfit_potential * 0.35 +
-    assessment.scores.aesthetic_fit * 0.25 +
-    assessment.scores.persona_fit * 0.2 +
-    assessment.scores.silhouette_fit * 0.1 +
-    assessment.scores.category_fit * 0.1;
-  const order = (status) => assessments
-    .filter((item) => item.status === status)
-    .sort((left, right) => score(right) - score(left));
+  const order = (status, tier) => assessments
+    .filter((item) => item.status === status && (!tier || item.selection_tier === tier))
+    .sort((left, right) => selectorQualityScore(right) - selectorQualityScore(left));
   return [
-    ...order(SELECTOR_STATUS.KEEP),
+    ...order(SELECTOR_STATUS.KEEP, SELECTION_TIER.HIGH),
+    ...order(SELECTOR_STATUS.KEEP, SELECTION_TIER.NORMAL),
     ...order(SELECTOR_STATUS.UNCERTAIN),
   ].slice(0, MAX_SELECTED_CANDIDATES_PER_SLOT).map((assessment) => ({
     ...byId.get(assessment.candidate_id),
     selector_status: assessment.status,
+    selection_tier: assessment.selection_tier,
+    selector_quality_score: selectorQualityScore(assessment),
     selector_scores: assessment.scores,
     selector_reason_codes: assessment.reason_codes,
   }));
+}
+
+function selectorQualityScore(assessment) {
+  const scores = assessment?.scores || {};
+  return roundScore(
+    Number(scores.outfit_potential || 0) * 0.2 +
+    Number(scores.aesthetic_fit || 0) * 0.15 +
+    Number(scores.aesthetic_distinctiveness || 0) * 0.15 +
+    Number(scores.quality_perception || 0) * 0.15 +
+    Number(scores.styling_value || 0) * 0.15 +
+    Number(scores.persona_fit || 0) * 0.08 +
+    Number(scores.silhouette_fit || 0) * 0.05 +
+    Number(scores.age_appropriateness || 0) * 0.05 +
+    Number(scores.category_fit || 0) * 0.02,
+  );
+}
+
+function topSelectorQuality(assessments) {
+  const eligible = assessments.filter((item) =>
+    item.status === SELECTOR_STATUS.KEEP || item.status === SELECTOR_STATUS.UNCERTAIN);
+  return eligible.length > 0
+    ? Math.max(...eligible.map(selectorQualityScore))
+    : 0;
+}
+
+function refinementDecision(selection) {
+  const reasons = new Set(selection.refinement_reasons || []);
+  if (selection.selector_keep < MAX_SELECTED_CANDIDATES_PER_SLOT) {
+    reasons.add("KEEP_BELOW_THREE");
+  }
+  if (selection.top_candidate_quality < SELECTOR_RECOMMENDABLE_SCORE) {
+    reasons.add("TOP_CANDIDATE_QUALITY_BELOW_75");
+  }
+  if (selection.candidate_pool_homogeneity === POOL_HOMOGENEITY.HIGH) {
+    reasons.add("CANDIDATE_POOL_HOMOGENEITY_HIGH");
+  }
+  if (!selection.quality_sufficient) reasons.add("QUALITY_INSUFFICIENT");
+  if (selection.refinement_needed) reasons.add("SELECTOR_REQUESTED_REFINEMENT");
+  const needed = reasons.size > 0;
+  const query = needed ? text(selection.refinement_query, 80) : "";
+  if (needed && !query) {
+    throw schemaError("refinement is required but selector returned no refinement_query");
+  }
+  if (needed && canonicalQuery(query) === canonicalQuery(
+    selection.query || selection.slot.search_query,
+  )) {
+    throw schemaError("refinement query must differ from first query");
+  }
+  return Object.freeze({needed, query, reasons: Object.freeze([...reasons])});
+}
+
+function mergeSelectionRounds(first, second, {decision} = {}) {
+  const candidates = dedupeProducts([...first.candidates, ...second.candidates]);
+  const allowedIds = new Set(candidates.map((candidate) => candidate.candidate_id));
+  const assessments = [...first.assessments, ...second.assessments]
+    .filter((assessment) => allowedIds.has(assessment.candidate_id));
+  const pool = selectFinalCandidatePool(candidates, assessments);
+  return {
+    ...first,
+    candidates,
+    assessments,
+    selector_keep: assessments.filter((item) => item.status === SELECTOR_STATUS.KEEP).length,
+    selector_reject: assessments.filter((item) => item.status === SELECTOR_STATUS.REJECT).length,
+    selector_uncertain: assessments.filter((item) =>
+      item.status === SELECTOR_STATUS.UNCERTAIN).length,
+    quality_sufficient: second.quality_sufficient,
+    refinement_needed: false,
+    refinement_reasons: decision?.reasons || [],
+    refinement_query: second.query,
+    candidate_pool_homogeneity: second.candidate_pool_homogeneity,
+    top_candidate_quality: topSelectorQuality(assessments),
+    final_candidate_pool: pool,
+    refinement: {
+      triggered: true,
+      status: "SUCCESS",
+      first_query: first.query || first.slot.search_query,
+      second_query: second.query,
+      reasons: decision?.reasons || [],
+      first_round_candidate_ids: first.final_candidate_pool.map((item) => item.candidate_id),
+      second_round_candidate_ids: second.final_candidate_pool.map((item) => item.candidate_id),
+      rounds: [selectorRoundMetric(first), selectorRoundMetric(second)],
+    },
+  };
+}
+
+function selectorRoundMetric(selection) {
+  return Object.freeze({
+    round: selection.round,
+    query: selection.query || selection.slot.search_query,
+    selector_keep: selection.selector_keep,
+    selector_reject: selection.selector_reject,
+    selector_uncertain: selection.selector_uncertain,
+    selector_high: selection.assessments.filter((item) =>
+      item.status === SELECTOR_STATUS.KEEP &&
+      item.selection_tier === SELECTION_TIER.HIGH).length,
+    selector_normal: selection.assessments.filter((item) =>
+      item.status === SELECTOR_STATUS.KEEP &&
+      item.selection_tier === SELECTION_TIER.NORMAL).length,
+    candidate_pool_homogeneity: selection.candidate_pool_homogeneity,
+    top_candidate_quality: selection.top_candidate_quality,
+    candidate_ids: Object.freeze(selection.final_candidate_pool.map((item) =>
+      item.candidate_id)),
+  });
 }
 
 function validateComposedLooks(payload, selections) {
@@ -985,11 +1310,12 @@ Generate exactly one concise Chinese Taobao query per slot. Every query must con
   ];
 }
 
-function buildSelectorMessages(shoppingIntent, group) {
+function buildSelectorMessages(shoppingIntent, group, {round = 1} = {}) {
   const content = [{
     type: "text",
     text: JSON.stringify({
-      instruction: "逐件查看随后主图；必须评估每个中性candidate_id一次。明确硬错误REJECT；普通审美差异降分，不必永久拒绝；证据不足UNCERTAIN。",
+      instruction: `逐件查看随后主图；必须评估每个中性candidate_id一次。明确硬错误REJECT；证据不足UNCERTAIN。普通但没错的商品可以KEEP_NORMAL，但只有真正值得搭配师主动选用的商品才是KEEP_HIGH。评分必须严格校准：50以下明显不推荐；50-59勉强符合但审美差；60-69普通可穿；70-79好看可推荐；80-89明显有选品价值；90-94非常优秀；95以上极少使用。判断本轮是否有至少3件足以组成最终Look且有合理差异的商品。refinement_query始终给出一个不同于本轮、保留hard_constraints的简洁安全备选查询；只有refinement_needed=true时系统才会调用。`,
+      selector_round: round,
       shopping_intent: {
         gender: shoppingIntent.gender,
         persona: shoppingIntent.persona,
@@ -999,6 +1325,7 @@ function buildSelectorMessages(shoppingIntent, group) {
         weather_constraints: shoppingIntent.weather_constraints,
       },
       slot: group.slot,
+      current_query: group.query || group.slot.search_query,
       candidates: group.candidates.map(evidenceCandidate),
     }),
   }];
@@ -1020,7 +1347,7 @@ function buildSelectorMessages(shoppingIntent, group) {
   return [
     {
       role: "system",
-      content: "你是商品视觉采购员。只依据当前 Shopping Intent 和真实商品证据输出严格 JSON。不要根据 candidate_id 推断答案。",
+      content: "你是审美标准严格的商品视觉采购员。只依据当前Shopping Intent与真实主图证据输出严格JSON，不得根据candidate_id推断。不要因为商品没犯硬错误就给高分；必须区分普通可穿和有造型价值。识别候选池是否同质，refinement最多只提出一个新query，不得删除hard constraints。",
     },
     {role: "user", content},
   ];
@@ -1030,7 +1357,7 @@ function buildComposerMessages(shoppingIntent, selections) {
   const content = [{
     type: "text",
     text: JSON.stringify({
-      instruction: "只使用候选池中真实candidate_id组合2到3套完整Look。每套必须含top、bottom、shoes；至少两套组合不能完全相同。不得创造新商品或新ID。",
+      instruction: `只使用候选池中真实candidate_id组合2到3套完整Look。每套必须含top、bottom、shoes；至少两套组合不能完全相同。不得创造新商品或新ID。优先使用selection_tier=HIGH，NORMAL仅作为补足。必须独立判断三件之间的体积与腰线、裤长和鞋量感、配色、材质关系、视觉主次、共同风格故事与辨识度；不能把单品分数直接平均成整套高分。评分严格校准：60为能穿但普通，70为好看，80为明显值得推荐，90为造型师级优秀，95以上极罕见。特别检查身高与body_strategy下的比例风险。`,
       shopping_intent: shoppingIntent,
       candidate_pools: Object.fromEntries(selections.map((selection) => [
         selection.slot.category,
@@ -1047,6 +1374,8 @@ function buildComposerMessages(shoppingIntent, selections) {
           category: selection.slot.category,
           title: candidate.title,
           selector_status: candidate.selector_status,
+          selection_tier: candidate.selection_tier,
+          selector_quality_score: candidate.selector_quality_score,
           selector_scores: candidate.selector_scores,
         }),
       });
@@ -1056,7 +1385,7 @@ function buildComposerMessages(shoppingIntent, selections) {
   return [
     {
       role: "system",
-      content: "你是基于真实商品池工作的搭配师。商品池是唯一可用库存。只返回严格JSON，禁止幻想商品。",
+      content: "你是基于真实商品池工作的资深造型师。商品池是唯一可用库存。整套评分必须来自商品之间的真实视觉关系，普通基础款组合不得虚高。只返回严格JSON，禁止幻想商品。",
     },
     {role: "user", content},
   ];
@@ -1090,9 +1419,37 @@ function publicCandidate(candidate) {
     source: candidate.source,
     is_mock: candidate.is_mock === true,
     selector_status: candidate.selector_status,
+    selection_tier: candidate.selection_tier,
+    selector_quality_score: candidate.selector_quality_score,
     selector_scores: candidate.selector_scores,
     selector_reason_codes: candidate.selector_reason_codes,
   };
+}
+
+function productIdentity(product) {
+  const productId = text(product?.product_id, 240);
+  if (productId) return `id:${productId}`;
+  const image = text(product?.image_url, 1000).toLowerCase();
+  if (image) return `image:${image}`;
+  return `title:${text(product?.title, 300).toLowerCase().replace(/\s+/g, "")}`;
+}
+
+function dedupeProducts(products) {
+  const seen = new Set();
+  return products.filter((product) => {
+    const identity = productIdentity(product);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
+function canonicalQuery(value) {
+  return text(value, 100).toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
+function roundScore(value) {
+  return Math.round(Number(value || 0) * 10) / 10;
 }
 
 function retrievalMetric(retrieval) {
@@ -1355,8 +1712,11 @@ module.exports = {
   DEFAULT_TAOBAO_SLOT_TIMEOUT_MS,
   MAX_SELECTED_CANDIDATES_PER_SLOT,
   MAX_VALID_CANDIDATES_PER_SLOT,
+  MAX_REFINEMENT_ROUNDS,
   OUTFIT_COMPOSITION_SCHEMA,
+  POOL_HOMOGENEITY,
   PRODUCT_SELECTION_SCHEMA,
+  SELECTION_TIER,
   SELECTOR_STATUS,
   SHOPPING_PLAN_SCHEMA,
   ShoppingAgentV1Error,
@@ -1369,6 +1729,7 @@ module.exports = {
   normalizeShoppingIntent,
   parseAiJson,
   selectFinalCandidatePool,
+  selectorQualityScore,
   validateComposedLooks,
   validateProductSelection,
 };

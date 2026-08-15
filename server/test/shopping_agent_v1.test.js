@@ -6,6 +6,7 @@ const test = require("node:test");
 const {
   DEFAULT_TAOBAO_RETRIEVAL_TIMEOUT_MS,
   DEFAULT_TAOBAO_SLOT_TIMEOUT_MS,
+  MAX_REFINEMENT_ROUNDS,
   OUTFIT_COMPOSITION_SCHEMA,
   PRODUCT_SELECTION_SCHEMA,
   SHOPPING_PLAN_SCHEMA,
@@ -16,6 +17,8 @@ const {
   normalizeAgentInput,
   normalizeShoppingIntent,
   parseAiJson,
+  selectFinalCandidatePool,
+  selectorQualityScore,
   validateComposedLooks,
   validateProductSelection,
 } = require("../shopping_agent_v1");
@@ -102,7 +105,7 @@ function candidates(category) {
     return [
       product("bottom", 1, "女款高腰A字半身裙"),
       product("bottom", 2, "女款高腰直筒裤"),
-      product("bottom", 3, "女款高腰百褶裙"),
+      product("bottom", 3, "女款高腰直筒牛仔裤"),
       product("bottom", 4, "女士纯棉内裤"),
       product("top", 5, "女款短袖上衣"),
     ];
@@ -114,6 +117,36 @@ function candidates(category) {
     product("shoes", 4, "男士运动鞋"),
     product("bottom", 5, "女款直筒裤"),
   ];
+}
+
+function selectorScores(value = 82) {
+  return {
+    category_fit: Math.min(100, value + 10),
+    aesthetic_fit: value,
+    persona_fit: value,
+    silhouette_fit: value,
+    outfit_potential: value,
+    aesthetic_distinctiveness: value,
+    quality_perception: value,
+    age_appropriateness: value,
+    styling_value: value,
+  };
+}
+
+function composerScores(value = 82) {
+  return {
+    aesthetic_coherence: value,
+    proportion_balance: value,
+    color_harmony: value,
+    material_harmony: value,
+    visual_hierarchy: value,
+    style_story: value,
+    distinctiveness: value,
+    persona_fit: value,
+    body_proportion: value,
+    occasion_fit: value,
+    weather_fit: value,
+  };
 }
 
 class FakeProvider {
@@ -133,11 +166,13 @@ class FakeAiClient {
     composerLookCount = 2,
     foreignComposerId = false,
     wrapComposer = false,
+    refinementCategories = [],
   } = {}) {
     this.calls = [];
     this.composerLookCount = composerLookCount;
     this.foreignComposerId = foreignComposerId;
     this.wrapComposer = wrapComposer;
+    this.refinementCategories = new Set(refinementCategories);
     this.chat = {completions: {create: this.create.bind(this)}};
   }
 
@@ -149,19 +184,25 @@ class FakeAiClient {
       payload = plan();
     } else if (name.startsWith("fitai_product_selector_")) {
       const metadata = JSON.parse(input.messages[1].content[0].text);
+      const requiresRefinement = this.refinementCategories.has(metadata.slot.category) &&
+        metadata.selector_round === 1;
+      const baseScore = requiresRefinement ? 66 : 84;
       payload = {
         assessments: metadata.candidates.map((candidate, index) => ({
           candidate_id: candidate.candidate_id,
-          status: index < 2 ? "KEEP" : "UNCERTAIN",
-          scores: {
-            category_fit: 95,
-            aesthetic_fit: 90 - index,
-            persona_fit: 91 - index,
-            silhouette_fit: 88 - index,
-            outfit_potential: 92 - index,
-          },
+          status: "KEEP",
+          selection_tier: requiresRefinement ? "NORMAL" : index < 2 ? "HIGH" : "NORMAL",
+          scores: selectorScores(baseScore - index),
           reason_codes: [],
         })),
+        quality_sufficient: !requiresRefinement,
+        refinement_needed: requiresRefinement,
+        refinement_reasons: requiresRefinement ? ["商品普通且同质"] : [],
+        candidate_pool_homogeneity: requiresRefinement ? "HIGH" : "LOW",
+        refinement_query: `${metadata.shopping_intent.gender === "female" ? "女款" : "男款"} ${
+          metadata.slot.category === "top" ? "设计感短袖上衣" :
+          metadata.slot.category === "bottom" ? "高腰垂感下装" : "轻盈精致鞋"
+        }`,
       };
     } else if (name === "fitai_real_product_outfit_composer") {
       const metadata = JSON.parse(input.messages[1].content[0].text);
@@ -173,13 +214,7 @@ class FakeAiClient {
             ? "candidate_999" : pools.top[index].candidate_id,
           bottom_candidate_id: pools.bottom[index].candidate_id,
           shoes_candidate_id: pools.shoes[index].candidate_id,
-          scores: {
-            aesthetic_coherence: 90,
-            persona_fit: 92,
-            body_proportion: 88,
-            occasion_fit: 91,
-            weather_fit: 86,
-          },
+          scores: composerScores(82),
           explanation: "真实候选形成的完整外出搭配",
         })),
       };
@@ -203,6 +238,53 @@ test("Shopping Agent V1 schemas are strict objects", () => {
     assert.equal(schema.additionalProperties, false);
     assert.ok(Array.isArray(schema.required));
   }
+  assert.ok(Object.hasOwn(
+    PRODUCT_SELECTION_SCHEMA.properties.assessments.items.properties.scores.properties,
+    "aesthetic_distinctiveness",
+  ));
+  assert.ok(Object.hasOwn(PRODUCT_SELECTION_SCHEMA.properties, "refinement_needed"));
+  assert.ok(Object.hasOwn(
+    OUTFIT_COMPOSITION_SCHEMA.properties.looks.items.properties.scores.properties,
+    "visual_hierarchy",
+  ));
+  assert.equal(MAX_REFINEMENT_ROUNDS, 1);
+});
+
+test("Phase 2 score calibration and tiers prioritize exceptional KEEP candidates", () => {
+  const products = [1, 2, 3].map((index) => ({
+    ...product("top", index, `女款上衣${index}`),
+    candidate_id: `candidate_00${index}`,
+  }));
+  const assessments = [
+    {
+      candidate_id: "candidate_001",
+      status: "KEEP",
+      selection_tier: "NORMAL",
+      scores: selectorScores(79),
+      reason_codes: [],
+    },
+    {
+      candidate_id: "candidate_002",
+      status: "KEEP",
+      selection_tier: "HIGH",
+      scores: selectorScores(76),
+      reason_codes: [],
+    },
+    {
+      candidate_id: "candidate_003",
+      status: "UNCERTAIN",
+      selection_tier: "NONE",
+      scores: selectorScores(90),
+      reason_codes: [],
+    },
+  ];
+  assert.ok(selectorQualityScore(assessments[0]) >= 70);
+  const pool = selectFinalCandidatePool(products, assessments);
+  assert.deepEqual(pool.map((item) => item.candidate_id), [
+    "candidate_002",
+    "candidate_001",
+    "candidate_003",
+  ]);
 });
 
 function aiResponse(content, finishReason = "stop") {
@@ -393,27 +475,30 @@ test("selector candidate ID invariant rejects missing, duplicate and foreign IDs
   const assessment = (candidateId) => ({
     candidate_id: candidateId,
     status: "KEEP",
-    scores: {
-      category_fit: 90,
-      aesthetic_fit: 90,
-      persona_fit: 90,
-      silhouette_fit: 90,
-      outfit_potential: 90,
-    },
+    selection_tier: "HIGH",
+    scores: selectorScores(90),
     reason_codes: [],
   });
+  const selection = (assessments) => ({
+    assessments,
+    quality_sufficient: true,
+    refinement_needed: false,
+    refinement_reasons: [],
+    candidate_pool_homogeneity: "LOW",
+    refinement_query: "女款设计感上衣",
+  });
   assert.throws(
-    () => validateProductSelection({assessments: [assessment("candidate_001")]}, values),
+    () => validateProductSelection(selection([assessment("candidate_001")]), values),
     ShoppingAgentV1Error,
   );
   assert.throws(
-    () => validateProductSelection({
-      assessments: [assessment("candidate_001"), assessment("candidate_999")],
-    }, values),
+    () => validateProductSelection(selection([
+      assessment("candidate_001"), assessment("candidate_999"),
+    ]), values),
     ShoppingAgentV1Error,
   );
   const wrapped = parseAiJson(aiResponse(JSON.stringify([{
-    assessments: [assessment("candidate_001"), assessment("candidate_999")],
+    ...selection([assessment("candidate_001"), assessment("candidate_999")]),
   }])), {allowSingleAssessmentWrapper: true});
   assert.throws(
     () => validateProductSelection(wrapped, values),
@@ -434,13 +519,7 @@ test("composer rejects candidate IDs outside the real candidate pools", () => {
     top_candidate_id: "candidate_999",
     bottom_candidate_id: "candidate_002",
     shoes_candidate_id: "candidate_003",
-    scores: {
-      aesthetic_coherence: 90,
-      persona_fit: 90,
-      body_proportion: 90,
-      occasion_fit: 90,
-      weather_fit: 90,
-    },
+    scores: composerScores(90),
     explanation: "invalid",
   }]}, pools);
   assert.equal(result.looks.length, 0);
@@ -514,6 +593,80 @@ test("minimal proof uses exactly five AI calls, three Taobao calls and real IDs"
   assert.ok(result.slot_metrics.every((slot) => slot.candidate_gate_fail >= 2));
 });
 
+test("Phase 2 refines only an insufficient homogeneous slot once and preserves invariants", async () => {
+  class RefinementProvider {
+    constructor() {
+      this.calls = [];
+    }
+
+    async searchShoppingAgentCandidates(input) {
+      this.calls.push(input);
+      if (input.category === "top" && input.query.includes("设计感")) {
+        const products = [
+          product("top", 11, "女款设计感方领短袖上衣"),
+          product("top", 12, "女款韩系短款Polo针织上衣"),
+          product("top", 13, "女款不对称领修身上衣"),
+        ];
+        return {products, raw_count: 3, valid_count: 3};
+      }
+      const products = candidates(input.category);
+      return {products, raw_count: products.length, valid_count: products.length};
+    }
+  }
+
+  const client = new FakeAiClient({refinementCategories: ["top"]});
+  const provider = new RefinementProvider();
+  const agent = new TaobaoShoppingAgentV1({
+    client,
+    model: "qwen3.7-plus",
+    productProvider: provider,
+    logger: {info() {}, warn() {}},
+  });
+  const result = await agent.run({
+    user_input: "我要出去玩，帮我搭配一套",
+    authoritative_gender: "female",
+    height: 160,
+    weight: 49,
+  });
+
+  assert.equal(result.state, "success");
+  assert.equal(result.ai_call_count, 6);
+  assert.equal(result.taobao_call_count, 4);
+  assert.equal(provider.calls.filter((call) => call.category === "top").length, 2);
+  assert.equal(provider.calls.filter((call) => call.category === "bottom").length, 1);
+  assert.equal(provider.calls.filter((call) => call.category === "shoes").length, 1);
+  assert.match(result.refinement_queries.top, /女.*上衣/);
+  assert.equal(result.refinement_queries.bottom, null);
+  assert.equal(result.refinement_queries.shoes, null);
+  const topMetric = result.slot_metrics.find((slot) => slot.category === "top");
+  assert.equal(topMetric.refinement.triggered, true);
+  assert.equal(topMetric.refinement.status, "SUCCESS");
+  assert.equal(topMetric.refinement.rounds.length, 2);
+  assert.ok(topMetric.refinement.reasons.includes("CANDIDATE_POOL_HOMOGENEITY_HIGH"));
+  assert.equal(topMetric.candidate_pool_homogeneity, "LOW");
+  assert.deepEqual(
+    result.candidate_pools.top.slice(0, 2).map((item) => item.selection_tier),
+    ["HIGH", "HIGH"],
+  );
+  assert.ok(result.candidate_pools.top.every((item) => item.title.includes("女款")));
+  assert.ok(result.candidate_pools.top.some((item) => item.title.includes("设计感")));
+  const refinementSelectorCall = client.calls.find((call) =>
+    call.response_format.json_schema.name === "fitai_product_selector_top_refinement_1");
+  assert.ok(refinementSelectorCall);
+  const refinementMetadata = JSON.parse(refinementSelectorCall.messages[1].content[0].text);
+  assert.deepEqual(
+    refinementMetadata.slot.hard_constraints,
+    plan().shopping_intent.slots[0].hard_constraints,
+  );
+  assert.equal(
+    refinementSelectorCall.messages[1].content.filter((item) =>
+      item.type === "image_url").length,
+    3,
+  );
+  assert.equal(result.invalid_candidate_reference.length, 0);
+  assert.ok(result.final_look_count >= 2);
+});
+
 test("male casual and cute female retain authoritative gender in the proof contract", () => {
   const maleInput = normalizeAgentInput({user_input: "男生日常休闲", gender: "male"});
   const maleIntent = normalizeShoppingIntent(plan("male", "清爽男性休闲").shopping_intent, maleInput);
@@ -521,9 +674,19 @@ test("male casual and cute female retain authoritative gender in the proof contr
   assert.ok(maleIntent.slots.every((slot) => slot.search_query.includes("男")));
 
   const cuteInput = normalizeAgentInput({user_input: "穿得可爱一点", gender: "female"});
-  const cuteIntent = normalizeShoppingIntent(plan("female", "轻甜可爱").shopping_intent, cuteInput);
+  const defaultPlan = plan("female", "清新法式休闲");
+  const cutePlan = plan("female", "轻甜可爱");
+  cutePlan.shopping_intent.slots[0].search_query = "女款 蝴蝶结 短款 上衣";
+  cutePlan.shopping_intent.slots[1].search_query = "女款 高腰 A字 短裙";
+  cutePlan.shopping_intent.slots[2].search_query = "女款 低跟 玛丽珍 鞋";
+  const cuteIntent = normalizeShoppingIntent(cutePlan.shopping_intent, cuteInput);
   assert.equal(cuteIntent.overall_aesthetic.core_direction, "轻甜可爱");
   assert.equal(cuteIntent.gender, "female");
+  assert.ok(cuteIntent.slots.every((slot) => slot.search_query.includes("女")));
+  assert.notDeepEqual(
+    cuteIntent.slots.map((slot) => slot.search_query),
+    defaultPlan.shopping_intent.slots.map((slot) => slot.search_query),
+  );
 });
 
 test("a top timeout preserves successful bottom and shoes and skips every selector", async () => {
@@ -566,7 +729,7 @@ test("a top timeout preserves successful bottom and shoes and skips every select
   assert.equal(result.failed_slots[0].category, "top");
   assert.equal(result.failed_slots[0].error_code, "TAOBAO_SLOT_TIMEOUT");
   assert.deepEqual(Object.keys(result.retrieved_candidates).sort(), ["bottom", "shoes"]);
-  assert.equal(result.retrieved_candidates.bottom.length, 2);
+  assert.equal(result.retrieved_candidates.bottom.length, 3);
   assert.equal(result.retrieved_candidates.shoes.length, 3);
   assert.equal(result.final_look_count, 0);
   assert.equal(result.ai_call_count, 1);
