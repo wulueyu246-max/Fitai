@@ -1641,14 +1641,31 @@ function parseAiJson(response, {
   } else if (diagnostic.parsed_json_type === "object") {
     diagnostic.top_level_keys = safeSchemaKeys(parsed);
   }
+  if (allowSingleLooksWrapper) {
+    diagnostic.raw_array_length = Array.isArray(parsed) ? parsed.length : null;
+    diagnostic.normalized_look_count = null;
+  }
   if (allowSingleAssessmentWrapper && isSingleAssessmentWrapper(parsed)) {
     parsed = parsed[0];
     diagnostic.parsed_json_type = "object";
     diagnostic.top_level_keys = safeSchemaKeys(parsed);
-  } else if (allowSingleLooksWrapper && isSingleLooksWrapper(parsed)) {
-    parsed = parsed[0];
-    diagnostic.parsed_json_type = "object";
-    diagnostic.top_level_keys = safeSchemaKeys(parsed);
+  } else if (allowSingleLooksWrapper) {
+    if (isComposerObjectWrapper(parsed)) {
+      diagnostic.composer_raw_structure = "OBJECT_WRAPPER";
+      diagnostic.normalized_look_count = parsed.looks.length;
+    } else if (isSingleLooksWrapper(parsed)) {
+      parsed = parsed[0];
+      diagnostic.parsed_json_type = "object";
+      diagnostic.top_level_keys = safeSchemaKeys(parsed);
+      diagnostic.composer_raw_structure = "SINGLE_ARRAY_WRAPPER";
+      diagnostic.normalized_look_count = parsed.looks.length;
+    } else if (isDirectLookArray(parsed)) {
+      parsed = {looks: parsed};
+      diagnostic.parsed_json_type = "object";
+      diagnostic.top_level_keys = ["looks"];
+      diagnostic.composer_raw_structure = "DIRECT_LOOK_ARRAY";
+      diagnostic.normalized_look_count = parsed.looks.length;
+    }
   }
   if (diagnostic.parsed_json_type !== "object") {
     if (allowSingleAssessmentWrapper && diagnostic.parsed_json_type === "array") {
@@ -1685,6 +1702,42 @@ function isSingleLooksWrapper(value) {
     typeof value[0] === "object" &&
     !Array.isArray(value[0]) &&
     Array.isArray(value[0].looks);
+}
+
+function isComposerObjectWrapper(value) {
+  return value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Array.isArray(value.looks);
+}
+
+function isDirectLookArray(value) {
+  return Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(isComposerLookObject);
+}
+
+function isComposerLookObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const requiredKeys = OUTFIT_COMPOSITION_SCHEMA.properties.looks.items.required;
+  const allowedKeys = Object.keys(
+    OUTFIT_COMPOSITION_SCHEMA.properties.looks.items.properties,
+  );
+  if (!requiredKeys.every((key) => Object.hasOwn(value, key)) ||
+      Object.keys(value).some((key) => !allowedKeys.includes(key))) {
+    return false;
+  }
+  if (!["look_id", "top_candidate_id", "bottom_candidate_id", "shoes_candidate_id", "explanation"]
+    .every((key) => typeof value[key] === "string" && value[key].trim())) {
+    return false;
+  }
+  if (!value.scores || typeof value.scores !== "object" || Array.isArray(value.scores)) {
+    return false;
+  }
+  const scoreKeys = Object.keys(COMPOSER_SCORE_PROPERTIES);
+  return scoreKeys.every((key) => Number.isFinite(value.scores[key]) &&
+      value.scores[key] >= 0 && value.scores[key] <= 100) &&
+    Object.keys(value.scores).every((key) => scoreKeys.includes(key));
 }
 
 function jsonValueType(value) {
