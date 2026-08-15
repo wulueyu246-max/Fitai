@@ -135,6 +135,7 @@ void main() {
       'weight': 55,
       'scene': '工作',
       'request': '生成通勤穿搭',
+      'user_input': '生成通勤穿搭',
       'gender': 'unisex',
       'item_budget': '200-500',
       'outfit_budget': '800-1500',
@@ -223,6 +224,7 @@ void main() {
     final payload = request.toJson();
     final context = payload['context']! as Map<String, dynamic>;
     expect(payload['request'], userInput);
+    expect(payload['user_input'], userInput);
     expect(payload['request'], isNot(contains('用户地区')));
     expect(payload['request'], isNot(contains('当前实时天气')));
     expect(payload['request'], isNot(contains('场景：')));

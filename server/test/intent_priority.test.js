@@ -109,7 +109,7 @@ test("high relevance alone cannot pass a high-priority style match", () => {
   }), true);
 });
 
-test("high-priority intent hard-rejects low style matches", () => {
+test("high-priority intent marks low style matches for ranking", () => {
   const profile = highPriorityProfile();
   const score = styleMatchScore({
     evidence: "普通运动外套 跑鞋",
@@ -123,7 +123,7 @@ test("high-priority intent hard-rejects low style matches", () => {
   }), true);
 });
 
-test("Style Gate rejects a conflicting 361 sports shoe before ranking", () => {
+test("style conflict assessment detects a conflicting 361 sports shoe", () => {
   const profile = highPriorityProfile();
   const result = evaluateStyleGate({
     title: "361女子运动鞋跑步训练鞋",
@@ -135,7 +135,7 @@ test("Style Gate rejects a conflicting 361 sports shoe before ranking", () => {
   assert.equal(result.intent_priority_score, 92);
 });
 
-test("Style Gate does not reduce a compound long-top constraint to the word top", () => {
+test("style conflict assessment preserves compound long-top evidence", () => {
   const profile = {
     intent_priority_score: 95,
     must_avoid: ["盖臀长上衣"],
@@ -155,7 +155,7 @@ test("Style Gate does not reduce a compound long-top constraint to the word top"
   assert.deepEqual(longLoose.matched_negative_keywords, ["盖臀长上衣"]);
 });
 
-test("Style Gate records safe conflict diagnostics", async () => {
+test("Product Aesthetic Reranker does not execute a second Style Gate", async () => {
   const entries = [];
   const profile = highPriorityProfile();
   const reranker = new ProductAestheticReranker({
@@ -180,16 +180,11 @@ test("Style Gate records safe conflict diagnostics", async () => {
       }],
     }],
   });
-  const diagnostic = entries.find(([message]) =>
-    message === "Style Gate rejected candidate")?.[1];
-  assert.equal(diagnostic.title, "361女子运动鞋跑步训练鞋");
-  assert.equal(diagnostic.category, "shoes");
-  assert.equal(diagnostic.style_conflict, true);
-  assert.ok(diagnostic.matched_negative_keywords.length > 0);
-  assert.equal(diagnostic.intent_priority_score, 92);
+  assert.equal(entries.some(([message]) =>
+    /Style Gate|Style ranking conflict/u.test(message)), false);
 });
 
-test("ten high-priority generations never surface canonical style violations", async () => {
+test("ten high-priority reranks annotate canonical style violations without hard deletion", async () => {
   const profile = highPriorityProfile();
   const allowed = ["甜美玛丽珍鞋", "轻盈芭蕾鞋", "精致低跟单鞋", "柔粉玛丽珍鞋"];
   const blocked = ["361运动鞋", "361跑步鞋", "训练鞋", "篮球鞋"];
@@ -227,8 +222,13 @@ test("ten high-priority generations never surface canonical style violations", a
       }],
     });
     assert.ok(products.length > 0);
-    assert.equal(products.some((product) =>
-      blocked.some((term) => product.title.includes(term))), false);
-    assert.ok(products.every((product) => product.style_match_score >= 50));
+    assert.equal(products.length, 4);
+    const conflicting = products.filter((product) =>
+      blocked.some((term) => product.title.includes(term)));
+    assert.ok(conflicting.every((product) =>
+      product.style_gate_ranking_allowed === false ||
+      product.style_ranking_below_threshold === true));
+    assert.ok(products.every((product) =>
+      typeof product.style_gate_ranking_allowed === "boolean"));
   }
 });

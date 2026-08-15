@@ -317,11 +317,13 @@ function visualFallbackCandidates(candidates, minimumAestheticScore =
   DEFAULT_FALLBACK_AESTHETIC_SCORE) {
   return candidates.filter((product) =>
     product.candidate_gate_state === "PASS" &&
-    Number(product.product_aesthetic_score || 0) >= minimumAestheticScore &&
     product.visual_status !== VISUAL_STATUS.FAIL &&
     product.visual_verification?.visual_status !== VISUAL_STATUS.FAIL)
     .map((product) => ({
       ...product,
+      visual_status: product.visual_status || VISUAL_STATUS.UNCERTAIN,
+      visual_match_score: Number(product.visual_match_score || 0),
+      visual_fallback_ranking_score: Number(product.product_aesthetic_score || 0),
       visual_verification_status: VERIFICATION_STATUS.FALLBACK,
     }))
     .sort(compareProductPurchaseAesthetic);
@@ -383,6 +385,16 @@ class VisualProductVerifier {
     const durationMs = Date.now() - startedAt;
     return {
       groups: results.map((result) => result.group),
+      slot_summaries: results.map((result) => ({
+        look_id: result.group.requirement?.look_id || undefined,
+        slot_key: result.group.requirement?.slot_key || undefined,
+        category: result.group.requirement?.category || undefined,
+        candidate_count: result.candidateCount,
+        pass_count: result.passCount,
+        uncertain_count: result.uncertainCount,
+        fail_count: result.failCount,
+        fallback_used: result.fallback,
+      })),
       summary: {
         request_id: requestId || undefined,
         slot_count: results.length,
@@ -433,7 +445,17 @@ class VisualProductVerifier {
           timeout: positiveInteger(timeoutOverride, this.timeoutMs, this.timeoutMs),
           maxRetries: 0,
         });
-        products = applyVisualVerification(imageCandidates, parseJsonResponse(response));
+        const verified = applyVisualVerification(
+          imageCandidates,
+          parseJsonResponse(response),
+        );
+        const imageIds = new Set(imageCandidates.map((product) =>
+          String(product.product_id)));
+        const unverifiable = visualFallbackCandidates(
+          candidates.filter((product) => !imageIds.has(String(product.product_id))),
+          this.fallbackAestheticScore,
+        );
+        products = [...verified, ...unverifiable].sort(compareVisualProducts);
       } catch (error) {
         fallback = true;
         errorCode = safeErrorCode(error);
@@ -447,7 +469,18 @@ class VisualProductVerifier {
     const originalIds = new Set(candidates.map((product) => String(product.product_id)));
     const retainedIds = new Set(products.map((product) => String(product.product_id)));
     const result = {
-      group: {...group, candidates: products},
+      group: {
+        ...group,
+        candidates: products,
+        visual_funnel: {
+          candidate_count: imageCandidates.length,
+          pass_count: products.filter((product) => product.visual_status === "PASS").length,
+          uncertain_count: products.filter((product) =>
+            product.visual_status === "UNCERTAIN").length,
+          fail_count: [...originalIds].filter((id) => !retainedIds.has(id)).length,
+          fallback_used: fallback,
+        },
+      },
       candidateCount: imageCandidates.length,
       callCount,
       passCount: products.filter((product) => product.visual_status === "PASS").length,

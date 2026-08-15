@@ -78,7 +78,7 @@ test("validates candidate IDs and applies the weighted final score", () => {
   assert.equal(products.some((item) => item.product_id === "invented"), false);
 });
 
-test("Outfit Blueprint is the highest product decision and rejects avoid items", () => {
+test("Outfit Blueprint annotates ranking conflicts without becoming a second hard gate", () => {
   const groups = [{
     requirement: {
       category: "shoes",
@@ -109,13 +109,16 @@ test("Outfit Blueprint is the highest product decision and rejects avoid items",
     selected_products: [selection("running"), selection("mary-jane")],
   }, groups, 4, context);
 
-  assert.deepEqual(products.map((item) => item.product_id), ["mary-jane"]);
-  assert.ok(products[0].blueprint_match_score >= 65);
-  assert.ok(products[0].matched_elements.length > 0);
-  assert.deepEqual(products[0].conflict_elements, []);
+  assert.deepEqual(products.map((item) => item.product_id), ["running", "mary-jane"]);
+  const accepted = products.find((item) => item.product_id === "mary-jane");
+  const conflicted = products.find((item) => item.product_id === "running");
+  assert.ok(accepted.blueprint_match_score >= 65);
+  assert.ok(accepted.matched_elements.length > 0);
+  assert.deepEqual(accepted.conflict_elements, []);
+  assert.ok(conflicted.conflict_elements.length > 0);
 });
 
-test("high-intent Blueprint hard gate controls mature, classic, and unknown styles", () => {
+test("high-intent Blueprint remains ranking evidence for mature, classic, and unknown styles", () => {
   const cases = [
     {
       name: "成熟女性",
@@ -172,9 +175,15 @@ test("high-intent Blueprint hard gate controls mature, classic, and unknown styl
       },
     });
 
-    assert.deepEqual(products.map((item) => item.product_id), [accepted.product_id]);
-    assert.ok(Number.isFinite(products[0].blueprint_match_score));
-    assert.ok(products[0].blueprint_match_score >= 50);
+    assert.deepEqual(products.map((item) => item.product_id), [
+      rejected.product_id,
+      accepted.product_id,
+    ]);
+    const acceptedProduct = products.find((item) => item.product_id === accepted.product_id);
+    const rejectedProduct = products.find((item) => item.product_id === rejected.product_id);
+    assert.ok(Number.isFinite(acceptedProduct.blueprint_match_score));
+    assert.ok(acceptedProduct.blueprint_match_score >= 50);
+    assert.ok(rejectedProduct.conflict_elements.length > 0);
   }
 });
 
@@ -336,7 +345,7 @@ test("brand, image presentation and title quality directly affect aesthetic scor
   assert.ok(promotional.aesthetic_quality_flags.includes("low_end_marketing"));
 });
 
-test("batch visual review filters an image dominated by store advertising", async () => {
+test("legacy batch visual review annotates advertising without acting as a hard gate", async () => {
   let calls = 0;
   const advertised = product("ad-poster", "top", 96);
   advertised.title = "男士质感短袖衬衫";
@@ -379,7 +388,7 @@ test("batch visual review filters an image dominated by store advertising", asyn
         const payload = JSON.parse(request.messages[1].content);
         assert.deepEqual(
           payload.product_groups[0].candidates.map((item) => item.product_id),
-          ["clean-model"],
+          ["clean-model", "ad-poster"],
         );
         return response([selection("clean-model", {
           body_strategy_match_score: 89,
@@ -404,9 +413,10 @@ test("batch visual review filters an image dominated by store advertising", asyn
   });
 
   assert.equal(calls, 2);
-  assert.deepEqual(products.map((item) => item.product_id), ["clean-model"]);
+  assert.deepEqual(products.map((item) => item.product_id), ["clean-model", "ad-poster"]);
   assert.equal(products[0].commercial_ad_penalty, 5);
-  assert.equal(products[0].body_strategy_match_score, 89);
+  assert.ok(Number.isFinite(products[0].body_strategy_match_score));
+  assert.equal(products[1].commercial_ad_warning, true);
   assert.equal(reranker.getStats().visual_call_count, 1);
 });
 
@@ -598,7 +608,7 @@ test("budget is a soft AI signal and over-budget selections explain the tradeoff
   assert.match(products[0].recommendation_reason, /略高于单品预算/);
 });
 
-test("AI reranker excludes low-value products and records safe block diagnostics", async () => {
+test("AI reranker annotates low-value products without owning hard rejection", async () => {
   const warnings = [];
   const safe = product("top-safe", "top", 85);
   safe.title = "男士短袖Polo";
@@ -612,10 +622,7 @@ test("AI reranker excludes low-value products and records safe block diagnostics
     client: {
       chat: {completions: {create: async (request) => {
         const payload = JSON.parse(request.messages[1].content);
-        assert.deepEqual(
-          payload.product_groups[0].candidates.map((item) => item.product_id),
-          ["top-safe"],
-        );
+        assert.equal(payload.product_groups[0].candidates.length, 3);
         return response([selection("top-safe")]);
       }}},
     },
@@ -636,9 +643,13 @@ test("AI reranker excludes low-value products and records safe block diagnostics
     context: {gender: "male"},
   });
 
-  assert.deepEqual(products.map((item) => item.product_id), ["top-safe"]);
-  assert.equal(warnings[0][1].blocked_category[0], "underwear");
-  assert.equal(warnings[0][1].blocked_keyword[0], "内裤");
+  assert.deepEqual(new Set(products.map((item) => item.product_id)), new Set([
+    "top-safe", "top-underwear", "top-promo",
+  ]));
+  assert.equal(Boolean(products.find((item) => item.product_id === "top-safe").product_quality_warning), false);
+  assert.equal(Boolean(products.find((item) => item.product_id === "top-underwear").product_quality_warning), true);
+  assert.equal(products.find((item) => item.product_id === "top-promo").aesthetic_quality_warning, true);
+  assert.equal(warnings.some(([message]) => message === "商品质量过滤"), false);
 });
 
 test("model prompt requires four to six selections for every sufficiently large group", () => {

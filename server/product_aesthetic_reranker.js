@@ -6,17 +6,11 @@ const {
 } = require("./product_relevance");
 const {
   PRODUCT_INTENT_WEIGHTS,
-  evaluateStyleGate,
-  hasActionableStyleConstraints,
   intentDebugSummary,
   resolveIntentPriorityScore,
-  shouldRejectForStyle,
   styleMatchScore,
 } = require("./intent_priority");
-const {
-  blueprintMatchAssessment,
-  blueprintMatchPassesHardGate,
-} = require("./outfit_blueprint");
+const {blueprintMatchAssessment} = require("./outfit_blueprint");
 
 const DEFAULT_SELECTION_LIMIT = 6;
 const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000;
@@ -129,30 +123,14 @@ class ProductAestheticReranker {
   }
 
   async rerank({groups, context = {}, requestId = "", selectionLimit = DEFAULT_SELECTION_LIMIT}) {
-    const gateProfile = contextStyleProfile(context);
-    const gatePriority = resolveIntentPriorityScore(gateProfile);
-    for (const group of Array.isArray(groups) ? groups : []) {
-      for (const product of Array.isArray(group?.candidates) ? group.candidates : []) {
-        const gate = evaluateStyleGate(product, gateProfile, gatePriority);
-        if (!gate.allowed) {
-          this.logger.info?.("Style Gate rejected candidate", {
-            title: product.title,
-            category: group?.requirement?.category || product.category,
-            style_conflict: true,
-            matched_negative_keywords: gate.matched_negative_keywords,
-            intent_priority_score: gate.intent_priority_score,
-          });
-        }
-      }
-    }
     const qualityBlocks = collectQualityBlocks(groups);
     if (qualityBlocks.length > 0) {
-      this.logger.warn?.("商品质量过滤", {
+      this.logger.info?.("商品质量排序标注", {
         requestId: requestId || undefined,
         stage: "ai_reranker",
         blocked_category: [...new Set(qualityBlocks.map((item) => item.blocked_category))],
         blocked_keyword: [...new Set(qualityBlocks.map((item) => item.blocked_keyword))],
-        blockedCount: qualityBlocks.length,
+        warningCount: qualityBlocks.length,
       });
     }
     const prefilterCount = (Array.isArray(groups) ? groups : []).reduce(
@@ -659,8 +637,13 @@ function applyVisualAssessments(groups, payload) {
         ...(assessments.get(`${requirementIndex}:${product.product_id}`) ||
           assessments.get(`id:${product.product_id}`) ||
           visualAssessmentDefaults(product)),
+        commercial_ad_warning: Number(
+          assessments.get(`${requirementIndex}:${product.product_id}`)?.commercial_ad_penalty ||
+          assessments.get(`id:${product.product_id}`)?.commercial_ad_penalty ||
+          product.commercial_ad_penalty ||
+          0,
+        ) >= 60,
       }))
-      .filter((product) => product.commercial_ad_penalty < 60)
       .sort((left, right) => candidateQualityPrior(right) - candidateQualityPrior(left)),
   }));
 }
@@ -768,8 +751,6 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
   const styleProfile = contextStyleProfile(context);
   const styleSemantics = contextStyleSemantics(context);
   const outfitBlueprint = contextOutfitBlueprint(context);
-  const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
-  const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
   const candidates = new Map();
   const productGroups = new Map();
   safeGroups.forEach((group, groupIndex) => {
@@ -793,17 +774,11 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
     const match = candidates.get(`${groupIndex}:${id}`);
     const selectionKey = `${groupIndex}:${id}`;
     if (!match || seen.has(selectionKey)) continue;
-    if (!evaluateStyleGate(
-      match.product,
-      styleProfile,
-      intentPriorityScore,
-    ).allowed) continue;
     const blueprintMatch = blueprintMatchAssessment(
       match.product,
       safeGroups[match.groupIndex]?.requirement,
       outfitBlueprint,
     );
-    if (!blueprintMatchPassesHardGate(blueprintMatch, intentPriorityScore)) continue;
     const catalogAesthetic = boundedScore(match.product.catalog_aesthetic_score ?? 50);
     const brandQuality = boundedScore(match.product.brand_quality_score ?? BRAND_SCORE.C);
     const aiAesthetic = score(item.aesthetic_score ?? item.ai_taste_score);
@@ -837,11 +812,6 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
       styleSemantics,
     });
     const selectedStyleMatch = score(item.style_match_score) ?? localStyleMatch;
-    if (shouldRejectForStyle({
-      intentPriorityScore,
-      styleMatch: selectedStyleMatch,
-      enforce: enforceStyleThreshold,
-    })) continue;
     const weatherMatch = score(item.weather_match_score) ?? 70;
     const recommendationReason = appendBudgetNote(
       userFacingChineseText(item.reason, "该商品与当前穿搭方案和身体比例策略相匹配", 240),
@@ -887,8 +857,15 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
 
 function groupsBelowMinimum(groups, products) {
   const selectedIds = new Set(products.map(productGroupKey));
-  return groups.filter((group) => group.candidates.length >= 4 &&
-    group.candidates.filter((product) => selectedIds.has(productGroupKey(product))).length < 4);
+  return groups.filter((group) => {
+    const expected = Math.min(
+      Number(group.selectionLimit) || DEFAULT_SELECTION_LIMIT,
+      group.candidates.length,
+    );
+    const selected = group.candidates.filter((product) =>
+      selectedIds.has(productGroupKey(product))).length;
+    return expected > 0 && selected < expected;
+  });
 }
 
 function replaceGroupProducts(products, replacements, groups) {
@@ -1099,8 +1076,6 @@ function compositeProductScore({
 function ruleFallback(groups, selectionLimit, context = {}) {
   const styleProfile = contextStyleProfile(context);
   const styleSemantics = contextStyleSemantics(context);
-  const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
-  const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
   const outfitBlueprint = contextOutfitBlueprint(context);
   return groups.flatMap((group) => group.candidates.slice(0, selectionLimit).map((product) => {
     const blueprintMatch = blueprintMatchAssessment(
@@ -1108,9 +1083,6 @@ function ruleFallback(groups, selectionLimit, context = {}) {
       group.requirement,
       outfitBlueprint,
     );
-    if (!blueprintMatchPassesHardGate(blueprintMatch, intentPriorityScore)) {
-      return null;
-    }
     const matchScore = budgetAdjustedMatchScore(product);
     const aestheticScore = boundedScore(
       product.catalog_aesthetic_score ?? matchScore,
@@ -1132,11 +1104,6 @@ function ruleFallback(groups, selectionLimit, context = {}) {
       styleProfile,
       styleSemantics,
     }));
-    if (shouldRejectForStyle({
-      intentPriorityScore,
-      styleMatch,
-      enforce: enforceStyleThreshold,
-    })) return null;
     const weatherMatch = boundedScore(product.weather_match_score ?? 70);
     const diversity = 100;
     const finalScore = compositeProductScore({
@@ -1175,7 +1142,7 @@ function ruleFallback(groups, selectionLimit, context = {}) {
       ),
       ai_rerank_fallback: true,
     };
-  }).filter(Boolean));
+  }));
 }
 
 function applyLabels(products) {
@@ -1204,35 +1171,32 @@ function normalizeGroups(groups, selectionLimit, context = {}) {
   const styleProfile = contextStyleProfile(context);
   const styleSemantics = contextStyleSemantics(context);
   const outfitBlueprint = contextOutfitBlueprint(context);
-  const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
-  const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
   return (Array.isArray(groups) ? groups : []).map((group) => {
     const requirement = compactObject(group?.requirement || {});
     const assessedCandidates = Array.isArray(group?.candidates)
       ? group.candidates
-        .filter((product) => semanticCategoryMatch(product, requirement))
-        .flatMap((product) => {
+        .map((product) => {
           const assessment = blueprintMatchAssessment(
             product,
             requirement,
             outfitBlueprint,
           );
-          return blueprintMatchPassesHardGate(
-            assessment,
-            intentPriorityScore,
-          ) ? [{
+          const qualityWarning = productQualityBlock(product, requirement);
+          return {
             ...product,
             blueprint_match_score: assessment.score,
+            blueprint_ranking_allowed:
+              product.blueprint_ranking_allowed !== false,
             matched_elements: assessment.matched_elements,
             conflict_elements: assessment.conflict_elements,
-          }] : [];
+            style_gate_ranking_allowed:
+              product.style_gate_ranking_allowed !== false,
+            style_gate_conflicts: Array.isArray(product.style_gate_conflicts)
+              ? product.style_gate_conflicts : [],
+            product_quality_warning: qualityWarning,
+            semantic_category_match: semanticCategoryMatch(product, requirement),
+          };
         })
-        .filter((product) => evaluateStyleGate(
-          product,
-          styleProfile,
-          intentPriorityScore,
-        ).allowed)
-        .filter((product) => !productQualityBlock(product, requirement))
         .map((product) => {
           const assessed = {
             ...product,
@@ -1250,12 +1214,12 @@ function normalizeGroups(groups, selectionLimit, context = {}) {
             }),
           };
         })
-        .filter((product) => !shouldRejectForStyle({
-          intentPriorityScore,
-          styleMatch: product.style_match_score,
-          enforce: enforceStyleThreshold,
+        .map((product) => ({
+          ...product,
+          style_ranking_below_threshold:
+            product.style_ranking_below_threshold === true,
+          aesthetic_quality_warning: isAestheticJunk(product),
         }))
-        .filter((product) => !isAestheticJunk(product))
       : [];
     const requiredMinimum = Math.min(4, assessedCandidates.length);
     const highQualityCount = assessedCandidates.filter((product) =>

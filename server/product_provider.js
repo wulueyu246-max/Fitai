@@ -39,6 +39,7 @@ const {
   NO_PRODUCT_MEETS_CORE_SPEC,
   SPEC_CONSISTENCY_STATUS,
   compilePurchaseSpecification,
+  evaluateCandidateAgainstSpecification,
   gateCandidates,
 } = require("./purchase_specification");
 const {
@@ -283,6 +284,32 @@ class TaobaoProductProvider extends ProductProvider {
         cached,
         context.requestId || undefined,
       );
+      for (const requirement of values) {
+        const category = normalizeProductCategory(requirement.category);
+        const lookId = String(requirement.look_id || requirement.lookId || "");
+        const finalCount = cached.filter((product) =>
+          String(product.look_id || "") === lookId &&
+          product.category === category).length;
+        this.logger.info?.("product_slot_funnel", {
+          request_id: context.requestId || undefined,
+          look_id: lookId || undefined,
+          slot_key: requirement.slot_key || requirement.slotKey || undefined,
+          category,
+          raw_count: null,
+          valid_count: null,
+          candidate_gate_pass: null,
+          candidate_gate_unknown: null,
+          candidate_gate_fail: null,
+          ranked_count: null,
+          visual_candidate_count: null,
+          visual_pass: null,
+          visual_uncertain: null,
+          visual_fail: null,
+          final_count: finalCount,
+          first_zero_stage: null,
+          observability_source: "cache",
+        });
+      }
       return cloneProductArray(cached);
     }
     const inflight = this.inflightRecommendations.get(cacheKey);
@@ -292,7 +319,14 @@ class TaobaoProductProvider extends ProductProvider {
     this.inflightRecommendations.set(cacheKey, work);
     try {
       const products = await work;
-      this.#writeRecommendationCache(cacheKey, products);
+      const cacheComplete = values.every((requirement) => {
+        const category = normalizeProductCategory(requirement.category);
+        const lookId = String(requirement.look_id || requirement.lookId || "");
+        return products.some((product) =>
+          String(product.look_id || "") === lookId &&
+          product.category === category);
+      });
+      if (cacheComplete) this.#writeRecommendationCache(cacheKey, products);
       return cloneProductArray(products);
     } finally {
       this.inflightRecommendations.delete(cacheKey);
@@ -305,7 +339,15 @@ class TaobaoProductProvider extends ProductProvider {
     try {
       const groupOutcomes = await Promise.all(values.map(async (query) => {
         const requirement = normalizeProductRequirement({...context, ...query}, context);
-        const metrics = {taobaoCount: 0, semanticPassCount: 0};
+        const metrics = {
+          taobaoCount: 0,
+          semanticPassCount: 0,
+          funnel: {
+            look_id: requirement.look_id || undefined,
+            slot_key: requirement.slot_key || undefined,
+            category: requirement.category,
+          },
+        };
         try {
           const candidates = await withTimeBudget(
             this.#candidatePool({
@@ -326,6 +368,7 @@ class TaobaoProductProvider extends ProductProvider {
             candidates: candidates.slice(0, this.visualVerifier
               ? this.visualCandidateLimit
               : 4),
+            funnel: metrics.funnel,
             metrics,
             error: null,
           };
@@ -340,13 +383,18 @@ class TaobaoProductProvider extends ProductProvider {
             requirement,
             prefilterCount: 0,
             candidates: [],
+            funnel: {
+              ...metrics.funnel,
+              ranked_count: 0,
+              first_zero_stage: safeProviderCode(error) === "TAOBAO_STAGE_TIMEOUT"
+                ? "taobao_timeout" : "taobao_error",
+            },
             metrics,
             error,
           };
         }
       }));
-      let groups = groupOutcomes.map(({error: _error, metrics: _metrics, ...group}) =>
-        group);
+      let groups = groupOutcomes.map(({error: _error, metrics: _metrics, ...group}) => group);
       const taobaoMs = Date.now() - pipelineStartedAt;
       const taobaoCount = groupOutcomes.reduce(
         (total, group) => total + group.metrics.taobaoCount,
@@ -423,92 +471,9 @@ class TaobaoProductProvider extends ProductProvider {
       } else if (baseProducts.length > 0) {
         products = markRerankFallback(baseProducts);
       }
-      const finalStyleProfile = context.style_profile || context.styleProfile ||
-        context.recommendation_context?.style_profile || {};
-      const finalIntentPriority = resolveIntentPriorityScore(finalStyleProfile);
-      const finalOutfitBlueprint = context.outfit_blueprint ||
-        context.outfitBlueprint ||
-        context.recommendation_context?.outfit_blueprint || {};
-      products = products.flatMap((product) => {
-        const requirement = values.find((value) =>
-          String(value.look_id || value.lookId || "") ===
-            String(product.look_id || "") &&
-          normalizeProductCategory(value.category) === product.category) ||
-          values.find((value) =>
-            normalizeProductCategory(value.category) === product.category) || {};
-        const blueprintAssessment = blueprintMatchAssessment(
-          product,
-          requirement,
-          finalOutfitBlueprint,
-        );
-        const blueprintScore = Number.isFinite(Number(product.blueprint_match_score))
-          ? Number(product.blueprint_match_score)
-          : blueprintAssessment.score;
-        const finalBlueprintAssessment = {
-          ...blueprintAssessment,
-          score: blueprintScore,
-        };
-        if (!blueprintMatchPassesHardGate(
-          finalBlueprintAssessment,
-          finalIntentPriority,
-        )) {
-          this.logger.info?.("Outfit Blueprint rejected final product", {
-            request_id: context.requestId || undefined,
-            product_title: product.title,
-            category: product.category,
-            blueprint_score: blueprintScore,
-            matched_elements: product.matched_elements ||
-              blueprintAssessment.matched_elements,
-            conflict_elements: product.conflict_elements ||
-              blueprintAssessment.conflict_elements,
-            intent_priority_score: finalIntentPriority,
-          });
-          return [];
-        }
-        const gate = evaluateStyleGate(
-          product,
-          finalStyleProfile,
-          finalIntentPriority,
-        );
-        if (!gate.allowed) {
-          this.logger.info?.("Style Gate rejected final product", {
-            title: product.title,
-            category: product.category,
-            style_conflict: true,
-            matched_negative_keywords: gate.matched_negative_keywords,
-            intent_priority_score: gate.intent_priority_score,
-          });
-        }
-        const bodyAssessment = bodyStrategyMatchAssessment(
-          product,
-          requirement,
-          finalOutfitBlueprint,
-          context,
-        );
-        const bodyStrategyScore = Number.isFinite(
-          Number(product.body_strategy_match_score),
-        ) ? Number(product.body_strategy_match_score) : bodyAssessment.score;
-        if (bodyAssessment.configured && bodyStrategyScore < 40) {
-          this.logger.info?.("Body Strategy Gate rejected final product", {
-            request_id: context.requestId || undefined,
-            title: product.title,
-            category: product.category,
-            body_strategy_match_score: bodyStrategyScore,
-            conflict_elements: bodyAssessment.conflict_elements,
-          });
-          return [];
-        }
-        return gate.allowed ? [{
-          ...product,
-          blueprint_match_score: blueprintScore,
-          body_strategy_match_score: bodyStrategyScore,
-          body_strategy_configured: bodyAssessment.configured,
-          matched_elements: product.matched_elements ||
-            blueprintAssessment.matched_elements,
-          conflict_elements: product.conflict_elements ||
-            blueprintAssessment.conflict_elements,
-        }] : [];
-      });
+      // Final owns no semantic eligibility decisions. Candidate qualification
+      // is already settled by Candidate Gate and Visual Verification; the
+      // remaining work is structural fallback, dedupe, ordering and capping.
       const productAiMs = Date.now() - productAiStartedAt;
       this.logger.info?.("AI最终选择", {
         requestId: context.requestId || undefined,
@@ -544,6 +509,36 @@ class TaobaoProductProvider extends ProductProvider {
           Number(right?.final_score || right?.relevance_score || 0) -
             Number(left?.final_score || left?.relevance_score || 0))
         .slice(0, values.length * 4);
+      for (const group of groups) {
+        const funnel = group.funnel || {};
+        const visual = group.visual_funnel || {};
+        const finalCount = finalProducts.filter((product) =>
+          String(product.look_id || "") === String(group.requirement?.look_id || "") &&
+          product.category === group.requirement?.category).length;
+        const firstZeroStage = funnel.first_zero_stage ||
+          (Number(funnel.ranked_count || 0) > 0 && group.candidates.length === 0
+            ? "visual_verification"
+            : Number(funnel.ranked_count || 0) > 0 && finalCount === 0
+              ? "final_selection" : null);
+        this.logger.info?.("product_slot_funnel", {
+          request_id: context.requestId || undefined,
+          look_id: group.requirement?.look_id || undefined,
+          slot_key: group.requirement?.slot_key || undefined,
+          category: group.requirement?.category,
+          raw_count: Number(funnel.raw_count || 0),
+          valid_count: Number(funnel.valid_count || 0),
+          candidate_gate_pass: Number(funnel.candidate_gate_pass || 0),
+          candidate_gate_unknown: Number(funnel.candidate_gate_unknown || 0),
+          candidate_gate_fail: Number(funnel.candidate_gate_fail || 0),
+          ranked_count: Number(funnel.ranked_count || 0),
+          visual_candidate_count: Number(visual.candidate_count || 0),
+          visual_pass: Number(visual.pass_count || 0),
+          visual_uncertain: Number(visual.uncertain_count || 0),
+          visual_fail: Number(visual.fail_count || 0),
+          final_count: finalCount,
+          first_zero_stage: firstZeroStage,
+        });
+      }
       logProductBlueprintSummaries(
         this.logger,
         finalProducts,
@@ -587,6 +582,7 @@ class TaobaoProductProvider extends ProductProvider {
 
   async #candidatePool(filters, metrics = null) {
     const requirement = normalizeProductRequirement(filters, filters);
+    if (metrics && !metrics.funnel) metrics.funnel = {};
     const basePurchaseSpecification = compilePurchaseSpecification(requirement, filters);
     if (basePurchaseSpecification.spec_consistency_status !==
         SPEC_CONSISTENCY_STATUS.PASS) {
@@ -598,6 +594,18 @@ class TaobaoProductProvider extends ProductProvider {
         spec_consistency_status: basePurchaseSpecification.spec_consistency_status,
         spec_conflicts: basePurchaseSpecification.spec_conflicts,
       });
+      if (metrics) {
+        metrics.funnel = {
+          ...metrics.funnel,
+          raw_count: 0,
+          valid_count: 0,
+          candidate_gate_pass: 0,
+          candidate_gate_unknown: 0,
+          candidate_gate_fail: 0,
+          ranked_count: 0,
+          first_zero_stage: "purchase_specification_consistency",
+        };
+      }
       return [];
     }
     const outfitBlueprint = filters.outfit_blueprint || filters.outfitBlueprint ||
@@ -652,7 +660,11 @@ class TaobaoProductProvider extends ProductProvider {
       }, metrics);
       if (products.length > 0) successfulQuery = searchPlan.exact;
     }
-    if (products.length === 0 && searchPlan.fallbacks.length > 0) {
+    // A raw hit that fails the sole textual Candidate Gate is not a usable
+    // recall. Continue through the specification-owned fallback queries before
+    // declaring the slot empty.
+    if (gateCandidates(products, purchaseSpecification).length === 0 &&
+        searchPlan.fallbacks.length > 0) {
       const fallbackBatches = await Promise.all(searchPlan.fallbacks.map(
         (searchKeyword, index) => this.#search({
           ...filters,
@@ -685,6 +697,17 @@ class TaobaoProductProvider extends ProductProvider {
       successful_query: successfulQuery || null,
       candidate_count: products.length,
     });
+    const funnel = metrics?.funnel || (metrics ? (metrics.funnel = {}) : {});
+    funnel.raw_count = Number(metrics?.taobaoCount || 0);
+    funnel.valid_count = products.length;
+    const gateAssessments = products.map((product) =>
+      evaluateCandidateAgainstSpecification(product, purchaseSpecification));
+    funnel.candidate_gate_pass = gateAssessments.filter((assessment) =>
+      assessment.state === "PASS").length;
+    funnel.candidate_gate_unknown = gateAssessments.filter((assessment) =>
+      assessment.state === "UNKNOWN").length;
+    funnel.candidate_gate_fail = gateAssessments.filter((assessment) =>
+      assessment.state === "FAIL").length;
     const gatedProducts = gateCandidates(products, purchaseSpecification);
     if (products.length > 0 && gatedProducts.length === 0) {
       this.logger.info?.("purchase_specification_no_match", {
@@ -703,69 +726,46 @@ class TaobaoProductProvider extends ProductProvider {
       filters.recommendation_context?.style_semantics || {};
     const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
     const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
-    const blueprintGatedProducts = products.flatMap((product) => {
+    const blueprintAssessedProducts = products.map((product) => {
       const assessment = blueprintMatchAssessment(
         product,
         requirement,
         outfitBlueprint,
       );
-      if (!blueprintMatchPassesHardGate(assessment, intentPriorityScore)) {
-        this.logger.info?.("Outfit Blueprint rejected candidate", {
-          title: product.title,
-          look_id: requirement.look_id || undefined,
-          category: requirement.category,
-          blueprint_score: assessment.score,
-          matched_elements: assessment.matched_elements,
-          conflict_elements: assessment.conflict_elements,
-          matched_avoid_items: assessment.matched_avoid,
-          intent_priority_score: intentPriorityScore,
-        });
-        return [];
-      }
-      return [{
+      return {
         ...product,
         blueprint_match_score: assessment.score,
+        blueprint_ranking_allowed: blueprintMatchPassesHardGate(
+          assessment,
+          intentPriorityScore,
+        ),
         matched_elements: assessment.matched_elements,
         conflict_elements: assessment.conflict_elements,
-      }];
+      };
     });
-    const bodyGatedProducts = blueprintGatedProducts.flatMap((product) => {
+    const bodyAssessedProducts = blueprintAssessedProducts.map((product) => {
       const assessment = bodyStrategyMatchAssessment(
         product,
         requirement,
         outfitBlueprint,
         filters,
       );
-      if (assessment.configured && assessment.score < 40) {
-        this.logger.info?.("Body Strategy Gate rejected candidate", {
-          title: product.title,
-          look_id: requirement.look_id || undefined,
-          category: requirement.category,
-          body_strategy_match_score: assessment.score,
-          conflict_elements: assessment.conflict_elements,
-        });
-        return [];
-      }
-      return [{
+      return {
         ...product,
         body_strategy_match_score: assessment.score,
         body_strategy_configured: assessment.configured,
-      }];
+        body_strategy_ranking_conflict: assessment.configured && assessment.score < 40,
+      };
     });
-    const styleGatedProducts = bodyGatedProducts.filter((product) => {
+    const styleAssessedProducts = bodyAssessedProducts.map((product) => {
       const gate = evaluateStyleGate(product, styleProfile, intentPriorityScore);
-      if (!gate.allowed) {
-        this.logger.info?.("Style Gate rejected candidate", {
-          title: product.title,
-          category: requirement.category,
-          style_conflict: true,
-          matched_negative_keywords: gate.matched_negative_keywords,
-          intent_priority_score: gate.intent_priority_score,
-        });
-      }
-      return gate.allowed;
+      return {
+        ...product,
+        style_gate_ranking_allowed: gate.allowed,
+        style_gate_conflicts: gate.matched_negative_keywords,
+      };
     });
-    const budgetAssessed = styleGatedProducts
+    let budgetAssessed = styleAssessedProducts
       .map((product) => {
         const productStyleMatch = styleMatchScore({
           evidence: [
@@ -784,13 +784,13 @@ class TaobaoProductProvider extends ProductProvider {
           ...product,
           ...budgetPreferenceAssessment(product, filters.budget),
           style_match_score: productStyleMatch,
+          style_ranking_below_threshold: shouldRejectForStyle({
+            intentPriorityScore,
+            styleMatch: productStyleMatch,
+            enforce: enforceStyleThreshold,
+          }),
         };
       })
-      .filter((product) => !shouldRejectForStyle({
-        intentPriorityScore,
-        styleMatch: product.style_match_score,
-        enforce: enforceStyleThreshold,
-      }))
       .sort((left, right) =>
         compareProductPurchaseAesthetic(left, right) ||
         right.blueprint_match_score - left.blueprint_match_score ||
@@ -798,6 +798,24 @@ class TaobaoProductProvider extends ProductProvider {
         right.style_match_score - left.style_match_score ||
         right.budget_preference_score - left.budget_preference_score ||
         right.relevance_score - left.relevance_score);
+    if (gatedProducts.length > 0 && budgetAssessed.length === 0) {
+      const recovered = scoreAndSortProducts(gatedProducts, purchaseSpecification).slice(0, 1);
+      this.logger.error?.("PRODUCT_PIPELINE_ILLEGAL_ZEROING", {
+        request_id: filters.requestId || undefined,
+        look_id: requirement.look_id || undefined,
+        slot_key: requirement.slot_key || undefined,
+        category: requirement.category,
+        first_zero_stage: "ranking",
+        candidate_gate_pass: funnel.candidate_gate_pass,
+        candidate_gate_unknown: funnel.candidate_gate_unknown,
+      });
+      budgetAssessed = recovered;
+    }
+    funnel.ranked_count = budgetAssessed.length;
+    funnel.first_zero_stage = funnel.raw_count === 0 ? "taobao_raw" :
+      funnel.valid_count === 0 ? "valid_mapping" :
+        gatedProducts.length === 0 ? "candidate_gate" :
+          budgetAssessed.length === 0 ? "ranking" : null;
     this.logger.info?.("user_intent_priority", intentDebugSummary({
       styleProfile,
       finalStyleScore: budgetAssessed.length > 0
@@ -813,7 +831,8 @@ class TaobaoProductProvider extends ProductProvider {
       gender: requirement.gender,
       category: requirement.category,
       candidateCount: products.length,
-      blueprintPassCount: blueprintGatedProducts.length,
+      blueprintPassCount: blueprintAssessedProducts.filter((product) =>
+        product.blueprint_ranking_allowed).length,
       budgetPreferredCount: budgetAssessed.filter((product) =>
         product.budget_preference_score >= 80).length,
     });
@@ -1206,15 +1225,14 @@ function mapPayload(payload, filters, pid, origin, onDiagnostics) {
   const qualityBlocks = usable
     .map((product) => productQualityBlock(product, filters))
     .filter(Boolean);
-  const qualitySafe = usable.filter((product) => !productQualityBlock(product, filters));
   const products = filters.category
     ? rankProducts(
-      qualitySafe,
+      usable,
       filters,
       filters.searchKeyword || filters.keyword,
       {minimumScore: filters.minimumRelevanceScore},
     )
-    : qualitySafe.map((product) => {
+    : usable.map((product) => {
       const {_category_text: _, ...publicProduct} = product;
       return {
         ...publicProduct,
@@ -1237,7 +1255,7 @@ function mapPayload(payload, filters, pid, origin, onDiagnostics) {
     blocked_category: [...new Set(qualityBlocks.map((item) => item.blocked_category))],
     blocked_keyword: [...new Set(qualityBlocks.map((item) => item.blocked_keyword))],
     lowValueBlockedCount: qualityBlocks.length,
-    categoryMismatchCount: Math.max(qualitySafe.length - products.length, 0),
+    categoryMismatchCount: Math.max(usable.length - products.length, 0),
   });
   return products;
 }

@@ -837,7 +837,7 @@ test("timeout fallback style profile cannot clear valid Taobao products", async 
   assert.equal(products[0].is_mock, false);
 });
 
-test("final provider output exposes Blueprint score and hard-rejects conflicts", async () => {
+test("Candidate Gate rejects core shoe conflicts while final only preserves ranking scores", async () => {
   const logs = [];
   const provider = new TaobaoProductProvider({
     pid: "mm_100_200_300",
@@ -960,7 +960,7 @@ test("Blueprint search expansion recovers abstract queries and logs the successf
   assert.equal(summary[1].candidate_count, 1);
 });
 
-test("short-leg body strategy keeps proportion-improving products and rejects conflicts", async () => {
+test("short-leg body strategy ranks proportion evidence without becoming a hard gate", async () => {
   let itemId = 0;
   const provider = new TaobaoProductProvider({
     pid: "mm_100_200_300",
@@ -1036,15 +1036,23 @@ test("short-leg body strategy keeps proportion-improving products and rejects co
     },
   });
 
-  assert.equal(products.length, 3);
+  assert.equal(products.length, 6);
   assert.ok(products.some((product) =>
     product.category === "top" && /短款合身/u.test(product.title)));
   assert.ok(products.some((product) =>
     product.category === "bottom" && /高腰/u.test(product.title)));
   assert.ok(products.some((product) =>
     product.category === "shoes" && /浅口.*尖头.*低跟/u.test(product.title)));
-  assert.ok(products.every((product) => product.body_strategy_match_score >= 90));
-  assert.equal(products.some((product) => /低腰|拖地|厚重|高帮/u.test(product.title)), false);
+  const preferred = products.filter((product) =>
+    /短款合身|高腰|浅口.*尖头.*低跟/u.test(product.title));
+  const conflicting = products.filter((product) =>
+    /低腰|拖地|厚重|高帮|遮臀/u.test(product.title));
+  assert.equal(preferred.length, 3);
+  assert.equal(conflicting.length, 3);
+  assert.ok(preferred.every((product) => product.body_strategy_match_score >= 90));
+  assert.ok(conflicting.every((product) =>
+    Number.isFinite(product.body_strategy_match_score)));
+  assert.ok(conflicting.some((product) => product.body_strategy_ranking_conflict === true));
 });
 
 test("mature, classic and unknown Blueprints all retain at least one matching candidate", async (t) => {
@@ -1193,6 +1201,152 @@ test("mapping diagnostics contain counts but no product content or URLs", async 
   assert.deepEqual(diagnostics.resultListKeys, ["map_data"]);
   assert.equal(JSON.stringify(diagnostics).includes("通勤外套"), false);
   assert.equal(JSON.stringify(diagnostics).includes("s.click.taobao.com"), false);
+});
+
+test("ranking layers cannot zero a Candidate Gate PASS slot before visual verification", async () => {
+  const entries = [];
+  let visualGroups = [];
+  const items = Array.from({length: 400}, (_, index) => taobaoItem({
+    item_basic_info: {
+      item_id: `convergence-${index}`,
+      title: `女士黑色皮质玛丽珍鞋 ${index}`,
+      category_name: "女鞋",
+      pict_url: `//img.example.com/convergence-${index}.jpg`,
+    },
+    publish_info: {
+      click_url: `//s.click.taobao.com/convergence-${index}`,
+    },
+  }));
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client: {call: async (method) => response(method, items)},
+    visualVerifier: {
+      maxCandidatesPerSlot: 8,
+      async verifyGroups({groups}) {
+        visualGroups = groups;
+        const verified = groups.map((group) => ({
+          ...group,
+          candidates: group.candidates.map((product) => ({
+            ...product,
+            visual_status: "PASS",
+          })),
+          visual_funnel: {
+            candidate_count: group.candidates.length,
+            pass_count: group.candidates.length,
+            uncertain_count: 0,
+            fail_count: 0,
+            fallback_used: false,
+          },
+        }));
+        return {
+          groups: verified,
+          summary: {
+            candidate_count: verified[0].candidates.length,
+            visual_call_count: 1,
+            total_visual_ms: 1,
+            fallback_used: false,
+          },
+        };
+      },
+    },
+    reranker: null,
+    logger: {
+      info: (...args) => entries.push(args),
+      warn: (...args) => entries.push(args),
+      error: (...args) => entries.push(args),
+    },
+  });
+
+  const products = await provider.recommendForQueries([{
+    request_id: "pipeline-convergence",
+    look_id: "look-1",
+    slot_key: "pipeline-convergence:look-1:shoes:0",
+    category: "shoes",
+    gender: "female",
+    product_type: "黑色玛丽珍鞋",
+    product_family: "mary_jane",
+    item_name: "黑色玛丽珍鞋",
+    required_attributes: ["玛丽珍结构"],
+    avoid_attributes: ["运动感"],
+  }], {
+    requestId: "pipeline-convergence",
+    gender: "female",
+    style_profile: {
+      intent_priority_score: 95,
+      negative_keywords: ["玛丽珍"],
+    },
+    outfit_blueprint: {
+      style_identity: "极简",
+      avoid_items: ["玛丽珍"],
+    },
+  });
+
+  assert.ok(products.length > 0);
+  assert.equal(visualGroups.length, 1);
+  assert.equal(visualGroups[0].candidates.length, 10);
+  const funnel = entries.find(([message]) => message === "product_slot_funnel")?.[1];
+  assert.equal(funnel.raw_count, 400);
+  assert.equal(funnel.valid_count, 400);
+  assert.equal(funnel.candidate_gate_pass, 400);
+  assert.equal(funnel.candidate_gate_unknown, 0);
+  assert.equal(funnel.candidate_gate_fail, 0);
+  assert.ok(funnel.ranked_count > 0);
+  assert.equal(funnel.visual_candidate_count, 10);
+  assert.equal(funnel.visual_pass, 10);
+  assert.equal(funnel.visual_uncertain, 0);
+  assert.equal(funnel.visual_fail, 0);
+  assert.ok(funnel.final_count > 0);
+  assert.equal(funnel.first_zero_stage, null);
+  assert.equal(entries.some(([message]) =>
+    message === "PRODUCT_PIPELINE_ILLEGAL_ZEROING"), false);
+});
+
+test("Candidate Gate remains a hard boundary and reports first_zero_stage", async () => {
+  const entries = [];
+  let visualCalls = 0;
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client: {call: async (method) => response(method, [taobaoItem({
+      item_basic_info: {
+        item_id: "female-conflict",
+        title: "女士吊带上衣",
+        category_name: "女士上衣",
+      },
+    })])},
+    visualVerifier: {
+      maxCandidatesPerSlot: 8,
+      async verifyGroups({groups}) {
+        visualCalls += 1;
+        return {groups, summary: {}};
+      },
+    },
+    logger: {
+      info: (...args) => entries.push(args),
+      warn: (...args) => entries.push(args),
+      error: (...args) => entries.push(args),
+    },
+  });
+  const products = await provider.recommendForQueries([{
+    look_id: "look-male",
+    slot_key: "candidate-gate-fail:look-male:top:0",
+    category: "top",
+    gender: "male",
+    product_type: "短袖Polo",
+    product_family: "polo",
+    item_name: "短袖Polo",
+  }], {requestId: "candidate-gate-fail", gender: "male"});
+
+  assert.deepEqual(products, []);
+  assert.equal(visualCalls, 0);
+  const funnel = entries.find(([message]) => message === "product_slot_funnel")?.[1];
+  assert.ok(funnel.raw_count > 0);
+  assert.ok(funnel.candidate_gate_fail > 0);
+  assert.equal(funnel.ranked_count, 0);
+  assert.equal(funnel.visual_candidate_count, 0);
+  assert.equal(funnel.final_count, 0);
+  assert.equal(funnel.first_zero_stage, "candidate_gate");
 });
 
 test("legacy Taobao URLs map to affiliate, coupon, purchase and PID fields", () => {

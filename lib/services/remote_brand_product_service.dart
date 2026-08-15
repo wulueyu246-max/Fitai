@@ -69,29 +69,29 @@ class RemoteBrandProductService implements BrandProductService {
         recommendationContext?['explicit_user_search'] == true
             ? (recommendationContext?['user_search_keyword']?.toString() ?? '')
             : '';
-    final qualitySafeProducts = parsedProducts.where((product) {
+    for (final product in parsedProducts) {
       final block = lookProductQualityBlock(
         product,
         explicitSearchKeyword: explicitSearchKeyword,
       );
-      if (block == null) return true;
+      if (block == null) continue;
       AppLogger.instance.warning(
-        'low_value_product_filtered',
+        'low_value_product_warning',
         metadata: {
           'productId': product.id,
           'blocked_category': block.blockedCategory,
           'blocked_keyword': block.blockedKeyword,
         },
       );
-      return false;
-    }).toList(growable: false);
+    }
+    final annotatedProducts = parsedProducts;
     if (!enforceProductionSafety) {
-      return List<Product>.unmodifiable(qualitySafeProducts);
+      return List<Product>.unmodifiable(annotatedProducts);
     }
 
     final expectedRequestId =
         recommendationContext?['request_id']?.toString().trim();
-    final products = qualitySafeProducts.where((product) {
+    final products = annotatedProducts.where((product) {
       final source = product.sourceProvider.trim().toLowerCase();
       final matchesRequest = expectedRequestId == null ||
           expectedRequestId.isEmpty ||

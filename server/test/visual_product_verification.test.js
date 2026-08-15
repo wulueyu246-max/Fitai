@@ -261,7 +261,7 @@ test("one slot is sent as one privacy-minimized multi-image call", async () => {
   assert.equal(result.groups[0].candidates.length, 2);
 });
 
-test("visual service failure falls back only to gate PASS and high aesthetic candidates", async () => {
+test("visual service failure falls back to every Candidate Gate PASS regardless of ranking score", async () => {
   const verifier = new VisualProductVerifier({
     client: {chat: {completions: {create: async () => {
       throw Object.assign(new Error("VISUAL_TIMEOUT"), {code: "VISUAL_TIMEOUT"});
@@ -282,7 +282,7 @@ test("visual service failure falls back only to gate PASS and high aesthetic can
     requestId: "visual-fallback",
   });
 
-  assert.deepEqual(result.groups[0].candidates.map((item) => item.product_id), ["safe"]);
+  assert.deepEqual(result.groups[0].candidates.map((item) => item.product_id), ["safe", "low"]);
   assert.equal(result.groups[0].candidates[0].visual_verification_status, "fallback");
   assert.equal(result.summary.fallback_used, true);
 });

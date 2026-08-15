@@ -106,13 +106,13 @@ void main() {
     expect(parsed.isNetworkImage, isTrue);
   });
 
-  test('Flutter display policy blocks low-value Look products', () {
+  test('Flutter display policy annotates low-value Look products', () {
     final underwear = product().copyWith(name: 'Tom Ford 男士内裤');
     final shirt = product().copyWith(name: '男士短袖Polo');
 
-    expect(underwear.isAllowedForLookRecommendation, isFalse);
+    expect(underwear.hasLookRecommendationQualityWarning, isTrue);
     expect(lookProductQualityBlock(underwear)?.blockedKeyword, '内裤');
-    expect(shirt.isAllowedForLookRecommendation, isTrue);
+    expect(shirt.hasLookRecommendationQualityWarning, isFalse);
     expect(
       lookProductQualityBlock(
         underwear,

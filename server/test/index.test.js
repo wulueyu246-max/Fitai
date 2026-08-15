@@ -267,6 +267,9 @@ test("keeps user input verbatim and validates weather and scene as structured co
   });
 
   assert.equal(result.request, userInput);
+  assert.equal(result.user_input, userInput);
+  assert.equal(result.gender, "female");
+  assert.equal(result.authoritative_gender, "female");
   assert.equal(result.context.scene, "约会");
   assert.deepEqual(result.context.location, {country: "中国", city: "绍兴"});
   assert.equal(result.context.weather.temperature, 33);
@@ -277,6 +280,26 @@ test("keeps user input verbatim and validates weather and scene as structured co
   assert.equal(result.context.body_profile.body_type, "纤细");
   assert.equal(result.context.body_profile.gender, "female");
   assert.doesNotMatch(result.request, /用户地区|当前实时天气|场景|穿搭方案必须遵循/u);
+});
+
+test("rejects competing user-input and authoritative-gender sources", () => {
+  assert.throws(() => validateOutfitRequest({
+    height: 160,
+    weight: 48,
+    scene: "日常",
+    request: "我想出去玩",
+    user_input: "被二次拼接的天气文本",
+    images: {front: imageDataUrl},
+  }), /request 与 user_input 必须完全一致/);
+  assert.throws(() => validateOutfitRequest({
+    height: 160,
+    weight: 48,
+    scene: "日常",
+    request: "我想出去玩",
+    gender: "female",
+    context: {gender: "male"},
+    images: {front: imageDataUrl},
+  }), /gender 与结构化人物资料冲突/);
 });
 
 test("accepts a front-only outfit request without optional photo fields", () => {
@@ -3295,12 +3318,10 @@ test("preserves a successful Blueprint when the Look phase times out", async () 
   const intentInput = JSON.parse(requests[0].messages[1].content);
   assert.deepEqual(Object.keys(intentInput).sort(), [
     "gender",
-    "requested_style",
     "scene",
     "structured_context",
     "user_input",
   ]);
-  assert.equal(intentInput.requested_style, "甜妹穿搭");
   assert.equal(intentInput.user_input, "甜妹穿搭");
   assert.equal(intentInput.structured_context.weather.temperature, 33);
 

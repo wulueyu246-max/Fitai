@@ -148,6 +148,7 @@ function personaConsistencyAssessment(look = {}, contract = {}) {
 function createRecommendationContext({
   requestId,
   gender,
+  authoritativeGender,
   scene,
   requestedStyle,
   styleExpression,
@@ -159,9 +160,18 @@ function createRecommendationContext({
   budget,
   userInput,
 } = {}) {
-  const normalizedGender = normalizeGender(gender);
+  const requestedGender = normalizeGender(gender);
+  const lockedGender = normalizeGender(authoritativeGender);
+  const normalizedGender = lockedGender !== "unisex"
+    ? lockedGender
+    : requestedGender;
+  const immutableUserInput = String(userInput || "").trim();
+  const requestedStyleValue = String(requestedStyle || "").trim();
+  const derivedRequestedStyle = requestedStyleValue &&
+    requestedStyleValue !== immutableUserInput
+    ? requestedStyleValue : "";
   const normalizedStyleProfile = normalizeStyleProfile(styleProfile, {
-    sourceText: requestedStyle || userInput,
+    sourceText: immutableUserInput || String(styleProfile?.source_text || "").trim(),
   });
   const resolvedStyleExpression = resolveStyleExpression({
     explicit: styleExpression,
@@ -170,6 +180,12 @@ function createRecommendationContext({
   const value = {
     request_id: String(requestId || "").trim(),
     gender: normalizedGender,
+    authoritative_gender: normalizedGender,
+    user_input: immutableUserInput,
+    derived_requested_style: Object.freeze({
+      value: derivedRequestedStyle,
+      source: "analysis_style",
+    }),
     scene: String(scene || "").trim(),
     style_expression: resolvedStyleExpression,
     persona_contract: createPersonaContract({
@@ -219,7 +235,8 @@ function logRecommendationStage(logger, stage, context, details = {}) {
     outfit_blueprint_configured: Boolean(
       blueprintHasCoreItems(context?.outfit_blueprint),
     ),
-    requested_style: context?.style_profile?.source_text || undefined,
+    user_input: context?.user_input || undefined,
+    derived_requested_style: context?.derived_requested_style?.value || undefined,
     intent_priority_score: context?.intent_priority_score,
     style_weight: context?.intent_weights?.product?.style,
     weather_weight: context?.intent_weights?.product?.weather,

@@ -175,7 +175,7 @@ test("query builder prefixes every genderless male French shirt keyword", () => 
   ]);
 });
 
-test("male recommendations remove women products and category conflicts", () => {
+test("product relevance only hard-rejects category conflicts and annotates gender/style evidence", () => {
   const requirement = normalizeProductRequirement({
     category: "top",
     gender: "male",
@@ -193,13 +193,13 @@ test("male recommendations remove women products and category conflicts", () => 
     product("weak-couple", "女款情侣基础短袖上衣"),
   ], requirement, requirement.search_keywords[0]);
 
-  assert.deepEqual(ranked.map((item) => item.product_id), ["valid"]);
+  assert.deepEqual(ranked.map((item) => item.product_id), ["valid", "female", "weak-couple"]);
   assert.equal(ranked[0].gender, "male");
   assert.equal(ranked[0].category, "top");
   assert.ok(ranked[0].relevance_score >= 80);
 });
 
-test("female recommendations reject menswear but allow unisex products", () => {
+test("product relevance ranks gender evidence but leaves gender hard rejection to Candidate Gate", () => {
   const requirement = normalizeProductRequirement({
     category: "shoes",
     gender: "female",
@@ -216,7 +216,7 @@ test("female recommendations reject menswear but allow unisex products", () => {
 
   assert.deepEqual(
     new Set(ranked.map((item) => item.product_id)),
-    new Set(["female", "unisex"]),
+    new Set(["female", "unisex", "male"]),
   );
 });
 
@@ -307,7 +307,7 @@ test("relevance score sorts the closest product first and strips internal fields
   assert.equal("_category_text" in ranked[0], false);
 });
 
-test("AI candidate mode admits neutral low-score items without weakening hard filters", () => {
+test("relevance thresholds never silently zero candidates while category remains foundational", () => {
   const requirement = normalizeProductRequirement({
     category: "top",
     gender: "male",
@@ -321,12 +321,15 @@ test("AI candidate mode admits neutral low-score items without weakening hard fi
     product("wrong-category", "男士休闲裤"),
   ];
 
-  assert.deepEqual(rankProducts(candidates, requirement).map((item) => item.product_id), []);
+  assert.deepEqual(
+    new Set(rankProducts(candidates, requirement).map((item) => item.product_id)),
+    new Set(["neutral", "female"]),
+  );
   assert.deepEqual(
     rankProducts(candidates, requirement, requirement.search_keywords[0], {
       minimumScore: 35,
     }).map((item) => item.product_id),
-    ["neutral"],
+    ["female", "neutral"],
   );
 });
 
@@ -375,7 +378,7 @@ test("homepage quality policy blocks underwear and other low-value products", ()
   );
 });
 
-test("low-quality Taobao marketing titles are filtered before ranking", () => {
+test("low-quality Taobao marketing titles are annotated before ranking", () => {
   const requirement = normalizeProductRequirement({
     category: "top",
     gender: "male",
@@ -398,8 +401,11 @@ test("low-quality Taobao marketing titles are filtered before ranking", () => {
       product("ordinary", "男士白色纯棉T恤"),
       product("wholesale", "厂家批发男士白色T恤"),
     ], requirement, "男士 白色 T恤").map((item) => item.product_id),
-    ["ordinary"],
+    ["ordinary", "wholesale"],
   );
+  assert.ok(rankProducts([
+    product("wholesale", "厂家批发男士白色T恤"),
+  ], requirement, "男士 白色 T恤")[0].product_quality_warning);
 });
 
 test("low-value products are allowed only for an explicit matching search", () => {

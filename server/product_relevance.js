@@ -585,16 +585,20 @@ function rankProducts(products, input = {}, searchKeyword = "", options = {}) {
     : requirement.gender === "unisex" ? 0 : 50;
   return (Array.isArray(products) ? products : [])
     .map((product) => scoreProduct(product, requirement, searchKeyword))
-    .filter((product) => product && product.relevance_score >= minimumScore)
+    .filter(Boolean)
+    .map((product) => ({
+      ...product,
+      relevance_below_preferred_threshold: product.relevance_score < minimumScore,
+    }))
     .sort((left, right) => right.relevance_score - left.relevance_score ||
       String(left.product_id).localeCompare(String(right.product_id)));
 }
 
 function scoreProduct(product, requirement, searchKeyword = "") {
   const title = normalizeText(product?.title);
-  if (!title || !semanticCategoryMatch(product, requirement) ||
-      containsNegativeKeyword(title, requirement)) return null;
-  if (productQualityBlock(product, requirement)) return null;
+  if (!title || !semanticCategoryMatch(product, requirement)) return null;
+  const negativeKeywordConflict = containsNegativeKeyword(title, requirement);
+  const qualityBlock = productQualityBlock(product, requirement);
 
   let score = 35;
   if (matchesGender(title, requirement.gender)) score += 20;
@@ -615,6 +619,8 @@ function scoreProduct(product, requirement, searchKeyword = "") {
     gender: requirement.gender,
     search_keyword: normalizeWhitespace(searchKeyword),
     relevance_score: Math.min(score, 100),
+    relevance_negative_conflict: negativeKeywordConflict,
+    product_quality_warning: qualityBlock,
   };
 }
 

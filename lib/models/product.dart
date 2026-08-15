@@ -552,8 +552,13 @@ class Product {
   String get reason => aiReason;
 
   bool get hasAiTasteSelection => !aiRerankFallback && finalScore > 0;
-  bool get isAllowedForLookRecommendation =>
-      lookProductQualityBlock(this) == null;
+  bool get hasLookRecommendationQualityWarning =>
+      lookProductQualityBlock(this) != null;
+
+  /// Retained for source compatibility. Quality heuristics are ranking and
+  /// warning evidence; they no longer own product eligibility.
+  @Deprecated('Use hasLookRecommendationQualityWarning for ranking metadata.')
+  bool get isAllowedForLookRecommendation => true;
   String get displayRecommendationReason => aiRecommendationReason.isNotEmpty
       ? aiRecommendationReason
       : recommendationReason.isNotEmpty

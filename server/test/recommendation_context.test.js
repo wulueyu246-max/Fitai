@@ -26,6 +26,8 @@ test("recommendation context is immutable and rejects female to unisex drift", (
   const context = createRecommendationContext({
     requestId: "request-female-1",
     gender: "female",
+    authoritativeGender: "female",
+    userInput: "明天约会，想有气质但别太成熟",
     scene: "约会",
     requestedStyle: "轻熟御姐",
     styleProfile: {
@@ -38,6 +40,12 @@ test("recommendation context is immutable and rejects female to unisex drift", (
   assert.equal(Object.isFrozen(context), true);
   assert.equal(Object.isFrozen(context.body_profile), true);
   assert.equal(context.gender, "female");
+  assert.equal(context.authoritative_gender, "female");
+  assert.equal(context.user_input, "明天约会，想有气质但别太成熟");
+  assert.deepEqual(context.derived_requested_style, {
+    value: "轻熟御姐",
+    source: "analysis_style",
+  });
   assert.equal(context.style_expression, "feminine");
   assert.equal(assertContextGender(context, "female", "look"), "female");
   assert.throws(

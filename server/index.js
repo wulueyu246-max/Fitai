@@ -960,9 +960,20 @@ function normalizeOutfitContextRecord(value, field) {
   return result;
 }
 
+function resolveAuthoritativeGender(...values) {
+  const explicit = [...new Set(values
+    .map(normalizeGender)
+    .filter((value) => value !== "unisex"))];
+  if (explicit.length > 1) {
+    throw new RequestValidationError("gender 与结构化人物资料冲突");
+  }
+  return explicit[0] || "unisex";
+}
+
 function normalizeOutfitStructuredContext(value, {
   scene,
   gender,
+  authoritativeGender,
   height,
   weight,
 } = {}) {
@@ -997,6 +1008,7 @@ function normalizeOutfitStructuredContext(value, {
       gender,
     }),
     gender,
+    authoritative_gender: authoritativeGender,
   });
 }
 
@@ -1008,9 +1020,22 @@ function validateOutfitRequest(body) {
   const height = Number(body.height);
   const weight = Number(body.weight);
   const scene = typeof body.scene === "string" ? body.scene.trim() : "";
-  const request =
-    typeof body.request === "string" ? body.request.trim() : "";
-  const gender = normalizeGender(body.gender);
+  const requestValue = typeof body.request === "string" ? body.request.trim() : "";
+  const userInputValue = typeof body.user_input === "string"
+    ? body.user_input.trim()
+    : typeof body.userInput === "string" ? body.userInput.trim() : "";
+  if (requestValue && userInputValue && requestValue !== userInputValue) {
+    throw new RequestValidationError("request 与 user_input 必须完全一致");
+  }
+  const request = requestValue || userInputValue;
+  const contextSource = body.context && typeof body.context === "object" &&
+    !Array.isArray(body.context) ? body.context : {};
+  const gender = resolveAuthoritativeGender(
+    body.gender,
+    contextSource.gender,
+    contextSource.authoritative_gender || contextSource.authoritativeGender,
+    contextSource.body_profile?.gender || contextSource.bodyProfile?.gender,
+  );
   const itemBudget = normalizeBudgetOption(
     body.item_budget ?? body.itemBudget,
     itemBudgetOptions,
@@ -1065,22 +1090,26 @@ function validateOutfitRequest(body) {
     throw new RequestValidationError("请上传正面全身照");
   }
 
-  return {
+  const structuredContext = normalizeOutfitStructuredContext(body.context, {
+    scene,
+    gender,
+    authoritativeGender: gender,
+    height,
+    weight,
+  });
+  return Object.freeze({
     height,
     weight,
     scene,
     request,
+    user_input: request,
     gender,
+    authoritative_gender: gender,
     itemBudget,
     outfitBudget,
-    images: normalizedImages,
-    context: normalizeOutfitStructuredContext(body.context, {
-      scene,
-      gender,
-      height,
-      weight,
-    }),
-  };
+    images: Object.freeze(normalizedImages),
+    context: structuredContext,
+  });
 }
 
 function extractAiText(response) {
@@ -4117,6 +4146,7 @@ async function buildOutfitApiResponse(
   const recommendationContext = createRecommendationContext({
     requestId: outfitRequest.requestId,
     gender: effectiveGender,
+    authoritativeGender: effectiveGender,
     scene: outfitRequest.scene,
     requestedStyle: analysis.style,
     styleExpression: analysis.style_expression,
@@ -4723,6 +4753,7 @@ async function handleProductRecommendations(req, res, next) {
     const recommendationContext = createRecommendationContext({
       requestId: res.locals.requestId,
       gender: filters.gender,
+      authoritativeGender: filters.authoritative_gender || filters.gender,
       scene: filters.scene,
       requestedStyle: filters.style,
       styleExpression: filters.style_expression,
@@ -4828,6 +4859,7 @@ function productRecommendationFilters(input = {}, requestId = "") {
     bodyType: input?.bodyType,
     scene: input?.scene,
     gender: input?.gender,
+    authoritative_gender: input?.authoritative_gender ?? input?.authoritativeGender,
     fit: input?.fit,
     season: input?.season,
     budget: input?.budget,
@@ -5083,14 +5115,13 @@ async function generateSemanticFallbackInterpretation({
           {
             role: "system",
             content: `${buildStyleInterpreterPrompt()}
-The visual outfit request failed, so create a low-cost semantic fallback without images. Infer meaning from the complete raw requested_style; do not use a style-name dictionary, whitelist, neutral template, or generic casual defaults.
+The visual outfit request failed, so create a low-cost semantic fallback without images. Infer meaning from the immutable raw user_input; do not use a style-name dictionary, whitelist, neutral template, or generic casual defaults.
 Return Simplified-Chinese user-facing text and exactly one JSON object with style_semantics, style_profile, and outfit_blueprint. outfit_blueprint must contain concrete purchasable core items (top + bottom + shoes, or dress + shoes), preserve the original intent, and set blueprint_source to semantic_fallback. Never add sports/casual items unless the interpreted style positively supports them.`,
           },
           {
             role: "user",
             content: JSON.stringify({
               user_input: sourceText,
-              requested_style: sourceText,
               original_user_description: outfitRequest.request,
               gender: outfitRequest.gender,
               scene: outfitRequest.scene,
@@ -5187,7 +5218,6 @@ All user-facing natural-language values MUST be Simplified Chinese. Preserve gen
             role: "user",
             content: JSON.stringify({
               user_input: sourceText,
-              requested_style: sourceText,
               scene: outfitRequest.scene,
               gender: requestContext.gender,
               structured_context: outfitRequest.context,
@@ -6620,7 +6650,6 @@ async function generatePhasedOutfitAnalysis({
           role: "user",
           content: JSON.stringify({
             user_input: sourceText,
-            requested_style: sourceText,
             scene: outfitRequest.scene,
             gender: requestContext.gender,
             structured_context: outfitRequest.context,
@@ -6753,7 +6782,7 @@ async function generatePhasedOutfitAnalysis({
       blueprintPhase,
       extractAiText(lookResponse),
       {
-        gender: requestContext.gender,
+        gender: blueprintPhase.gender,
         scene: outfitRequest.scene,
         requestId: outfitRequest.requestId,
         userInput: sourceText,
@@ -6827,7 +6856,7 @@ app.post(
       requestId: res.locals.requestId,
     };
     styleCacheContext = {
-      requested_style: outfitRequest.request,
+      user_input: outfitRequest.user_input,
       scene: outfitRequest.scene,
       gender: outfitRequest.gender,
       body_information: {
@@ -6851,6 +6880,7 @@ app.post(
     const requestContext = createRecommendationContext({
       requestId: res.locals.requestId,
       gender: outfitRequest.gender,
+      authoritativeGender: outfitRequest.authoritative_gender,
       scene: outfitRequest.scene,
       requestedStyle: outfitRequest.request,
       styleSemantics: cachedStyleInterpretation?.style_semantics,
@@ -6977,7 +7007,7 @@ app.post(
         requestContext,
         userContent,
         cachedStyleInterpretation,
-        sourceText: styleCacheContext.requested_style,
+        sourceText: styleCacheContext.user_input,
       });
       response = phasedResult.lookResponse || phasedResult.blueprintResponse;
       phasedAnalysis = phasedResult.analysis;
@@ -7223,7 +7253,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
         gender: requestContext.gender,
         scene: outfitRequest.scene,
         requestId: res.locals.requestId,
-        userInput: styleCacheContext.requested_style,
+        userInput: styleCacheContext.user_input,
         style_expression: requestContext.style_expression,
         styleSemantics: cachedStyleInterpretation?.style_semantics,
         styleProfile: cachedStyleInterpretation?.style_profile,
@@ -7233,7 +7263,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       console.warn("AI Look 输出进入风格保真修复", {
         requestId: res.locals.requestId,
         errorMessage: error.message,
-        requestedStyle: styleCacheContext.requested_style,
+        requestedStyle: styleCacheContext.user_input,
       });
       const partialPayload = parseAiPayloadBestEffort(aiText);
       const partialStyleInterpretation = partialPayload &&
@@ -7250,7 +7280,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
         fallbackStyleInterpretation = await ensureSemanticFallbackInterpretation({
           styleInterpretation: fallbackStyleInterpretation || partialStyleInterpretation,
           outfitRequest,
-          sourceText: styleCacheContext.requested_style,
+          sourceText: styleCacheContext.user_input,
         });
         styleInterpretationCache.set(
           styleCacheContext,
@@ -7259,7 +7289,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       } catch (fallbackError) {
         console.warn("Blueprint semantic fallback unavailable", {
           requestId: res.locals.requestId,
-          requestedStyle: styleCacheContext.requested_style,
+          requestedStyle: styleCacheContext.user_input,
           errorName: fallbackError?.name,
           errorMessage: sanitizeAiErrorMessage(fallbackError),
         });
@@ -7287,7 +7317,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
         (analysis.analysisMode === "rule_fallback"
           ? "semantic_fallback"
           : "ai_generated"),
-      requested_style: styleCacheContext.requested_style,
+      user_input: styleCacheContext.user_input,
       core_item_count: Object.values(
         analysis.outfit_blueprint?.must_have_items || {},
       ).reduce((sum, items) => sum + (Array.isArray(items) ? items.length : 0), 0),
@@ -7298,7 +7328,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       try {
         validatedStyleInterpretation = assertValidStyleInterpretation(
           analysis,
-          {sourceText: styleCacheContext.requested_style},
+          {sourceText: styleCacheContext.user_input},
         );
         fallbackStyleInterpretation = validatedStyleInterpretation;
         styleInterpretationCache.set(styleCacheContext, validatedStyleInterpretation);
@@ -7315,7 +7345,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       try {
         validatedStyleInterpretation = assertValidStyleInterpretation(
           analysis,
-          {sourceText: styleCacheContext.requested_style},
+          {sourceText: styleCacheContext.user_input},
         );
       } catch (error) {
         if (!(error instanceof StyleProfileInvalidError)) throw error;
@@ -7328,12 +7358,12 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
           analysis,
           outfitRequest,
           requestContext,
-          sourceText: styleCacheContext.requested_style,
+          sourceText: styleCacheContext.user_input,
           issues: error.issues,
         });
         validatedStyleInterpretation = assertValidStyleInterpretation(
           analysis,
-          {sourceText: styleCacheContext.requested_style},
+          {sourceText: styleCacheContext.user_input},
         );
       }
       fallbackStyleInterpretation = validatedStyleInterpretation;
@@ -7479,7 +7509,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
         fallbackStyleInterpretation = await ensureSemanticFallbackInterpretation({
           styleInterpretation: fallbackStyleInterpretation,
           outfitRequest,
-          sourceText: styleCacheContext?.requested_style ||
+          sourceText: styleCacheContext?.user_input ||
             compactRequestedStyle(outfitRequest.request),
         });
         if (styleCacheContext) {
@@ -7491,7 +7521,7 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       } catch (fallbackError) {
         console.warn("Blueprint semantic fallback unavailable", {
           requestId: res.locals.requestId,
-          requestedStyle: styleCacheContext?.requested_style ||
+          requestedStyle: styleCacheContext?.user_input ||
             compactRequestedStyle(outfitRequest.request),
           errorName: fallbackError?.name,
           errorMessage: sanitizeAiErrorMessage(fallbackError),

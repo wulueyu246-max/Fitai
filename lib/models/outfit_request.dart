@@ -45,11 +45,13 @@ class OutfitRequest {
         .toSet()
         .toList(growable: false);
 
+    final immutableUserInput = request.trim();
     return {
       'height': height,
       'weight': weight,
       'scene': normalizedScene,
-      'request': request.trim(),
+      'request': immutableUserInput,
+      'user_input': immutableUserInput,
       'gender': normalizedGender,
       'item_budget': itemBudget,
       'outfit_budget': outfitBudget,

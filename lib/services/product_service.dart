@@ -210,6 +210,7 @@ class CatalogProductService implements ProductService {
           ? {
               if (analysis.requestId?.trim().isNotEmpty ?? false)
                 'request_id': analysis.requestId!.trim(),
+              'user_input': request.request.trim(),
               'gender': analysis.gender,
               'style_expression': analysis.styleExpression,
               'style_semantics': analysis.styleSemantics.toJson(),
