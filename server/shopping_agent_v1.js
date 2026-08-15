@@ -649,7 +649,18 @@ class TaobaoShoppingAgentV1 {
         timeout: timeoutMs,
         maxRetries: 0,
       });
-      const payload = parseAiJson(response);
+      const payload = parseAiJson(response, {
+        onDiagnostic: (diagnostic) => {
+          const level = diagnostic.schema_error_kind ? "warn" : "info";
+          this.logger[level]?.("shopping_agent_v1_structured_output", {
+            phase,
+            model: this.model,
+            response_format_type: "json_schema",
+            strict: true,
+            ...diagnostic,
+          });
+        },
+      });
       metrics.ai_calls.push({
         phase,
         duration_ms: Date.now() - startedAt,
@@ -702,18 +713,27 @@ function normalizeAgentInput(input = {}) {
 }
 
 function normalizeShoppingIntent(value, input) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw schemaError("shopping_intent must be an object");
+  if (value == null) {
+    throw schemaError("shopping_intent is required", "MISSING_SHOPPING_INTENT");
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw schemaError("shopping_intent must be an object", "INVALID_SHOPPING_INTENT");
   }
   if (normalizeGender(value.gender) !== input.gender) {
     throw schemaError("shopping_intent.gender conflicts with authoritative gender");
   }
-  const rawSlots = Array.isArray(value.slots) ? value.slots : [];
+  if (!Array.isArray(value.slots) || value.slots.length !== CORE_CATEGORIES.length) {
+    throw schemaError("shopping_intent.slots must contain exactly three items", "INVALID_SLOTS");
+  }
+  const rawSlots = value.slots;
   const slotsByCategory = new Map();
   for (const rawSlot of rawSlots) {
     const category = normalizeProductCategory(rawSlot?.category);
     if (!CORE_CATEGORIES.includes(category) || slotsByCategory.has(category)) {
-      throw schemaError("shopping_intent must contain one unique top, bottom and shoes slot");
+      throw schemaError(
+        "shopping_intent must contain one unique top, bottom and shoes slot",
+        "INVALID_SLOTS",
+      );
     }
     const slot = {
       category,
@@ -727,7 +747,7 @@ function normalizeShoppingIntent(value, input) {
     slotsByCategory.set(category, Object.freeze(slot));
   }
   if (slotsByCategory.size !== CORE_CATEGORIES.length) {
-    throw schemaError("shopping_intent must contain top, bottom and shoes");
+    throw schemaError("shopping_intent must contain top, bottom and shoes", "INVALID_SLOTS");
   }
   return Object.freeze({
     gender: input.gender,
@@ -1139,21 +1159,76 @@ function taobaoCauseCode(error) {
   return "";
 }
 
-function parseAiJson(response) {
+function parseAiJson(response, {onDiagnostic} = {}) {
   const content = response?.choices?.[0]?.message?.content;
+  const diagnostic = {
+    finish_reason: response?.choices?.[0]?.finish_reason ?? null,
+    content_type: jsonValueType(content),
+    content_length: typeof content === "string" ? content.length : 0,
+    json_parse_success: false,
+    parsed_json_type: null,
+    schema_error_kind: null,
+  };
   if (typeof content !== "string" || !content.trim()) {
-    throw schemaError("AI content is empty or not a string");
+    diagnostic.schema_error_kind = "INVALID_CONTENT";
+    onDiagnostic?.(Object.freeze({...diagnostic}));
+    throw schemaError("AI content is empty or not a string", "INVALID_CONTENT", diagnostic);
   }
   let parsed;
   try {
     parsed = JSON.parse(content);
   } catch (_) {
-    throw schemaError("AI content is not valid JSON");
+    diagnostic.schema_error_kind = "INVALID_JSON";
+    onDiagnostic?.(Object.freeze({...diagnostic}));
+    throw schemaError("AI content is not valid JSON", "INVALID_JSON", diagnostic);
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw schemaError("AI JSON top level must be an object");
+  diagnostic.json_parse_success = true;
+  diagnostic.parsed_json_type = jsonValueType(parsed);
+  if (Array.isArray(parsed)) {
+    diagnostic.array_length = parsed.length;
+    diagnostic.first_item_type = parsed.length > 0 ? jsonValueType(parsed[0]) : null;
+    if (diagnostic.first_item_type === "object") {
+      diagnostic.first_item_keys = safeSchemaKeys(parsed[0]);
+    }
+  } else if (diagnostic.parsed_json_type === "object") {
+    diagnostic.top_level_keys = safeSchemaKeys(parsed);
   }
+  if (diagnostic.parsed_json_type !== "object") {
+    diagnostic.schema_error_kind = topLevelSchemaErrorKind(diagnostic.parsed_json_type);
+    onDiagnostic?.(Object.freeze({...diagnostic}));
+    throw schemaError(
+      `AI JSON top level must be an object, received ${diagnostic.parsed_json_type}`,
+      diagnostic.schema_error_kind,
+      diagnostic,
+    );
+  }
+  onDiagnostic?.(Object.freeze({...diagnostic}));
   return parsed;
+}
+
+function jsonValueType(value) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  const type = typeof value;
+  return ["object", "string", "number", "boolean"].includes(type) ? type : "other";
+}
+
+function safeSchemaKeys(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  return Object.keys(value).slice(0, 20).map((key) => String(key)
+    .replace(/[^\p{L}\p{N}_.:-]/gu, "_")
+    .slice(0, 80));
+}
+
+function topLevelSchemaErrorKind(type) {
+  const kinds = {
+    array: "TOP_LEVEL_ARRAY",
+    string: "TOP_LEVEL_STRING",
+    number: "TOP_LEVEL_NUMBER",
+    boolean: "TOP_LEVEL_BOOLEAN",
+    null: "TOP_LEVEL_NULL",
+  };
+  return kinds[type] || "TOP_LEVEL_OTHER";
 }
 
 function normalizeScoreObject(value, keys) {
@@ -1216,11 +1291,18 @@ function text(value, limit) {
   return String(value ?? "").trim().slice(0, limit);
 }
 
-function schemaError(message) {
-  return new ShoppingAgentV1Error(message, {
+function schemaError(message, schemaErrorKind = "INVALID_STRUCTURE", structuredOutput) {
+  const error = new ShoppingAgentV1Error(message, {
     code: "SHOPPING_AGENT_SCHEMA_INVALID",
     status: 502,
+    details: {
+      schema_error_kind: schemaErrorKind,
+      ...(structuredOutput ? {structured_output: Object.freeze({...structuredOutput})} : {}),
+    },
   });
+  error.schema_error_kind = schemaErrorKind;
+  error.finish_reason = structuredOutput?.finish_reason ?? null;
+  return error;
 }
 
 function safeErrorCode(error) {
@@ -1246,6 +1328,7 @@ module.exports = {
   normalizeAgentInput,
   normalizeSearchQuery,
   normalizeShoppingIntent,
+  parseAiJson,
   selectFinalCandidatePool,
   validateComposedLooks,
   validateProductSelection,

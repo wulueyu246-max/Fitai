@@ -15,6 +15,7 @@ const {
   hardGateCandidate,
   normalizeAgentInput,
   normalizeShoppingIntent,
+  parseAiJson,
   validateComposedLooks,
   validateProductSelection,
 } = require("../shopping_agent_v1");
@@ -195,6 +196,87 @@ test("Shopping Agent V1 schemas are strict objects", () => {
     assert.equal(schema.additionalProperties, false);
     assert.ok(Array.isArray(schema.required));
   }
+});
+
+function aiResponse(content, finishReason = "stop") {
+  return {choices: [{finish_reason: finishReason, message: {content}}]};
+}
+
+test("Shopping Agent structured parser records a valid object safely", () => {
+  const diagnostics = [];
+  const payload = parseAiJson(aiResponse(JSON.stringify(plan())), {
+    onDiagnostic: (value) => diagnostics.push(value),
+  });
+  assert.deepEqual(payload, plan());
+  assert.deepEqual(diagnostics, [{
+    finish_reason: "stop",
+    content_type: "string",
+    content_length: JSON.stringify(plan()).length,
+    json_parse_success: true,
+    parsed_json_type: "object",
+    schema_error_kind: null,
+    top_level_keys: ["shopping_intent"],
+  }]);
+});
+
+test("Shopping Agent structured parser diagnoses every legal non-object JSON type", () => {
+  const cases = [
+    {
+      value: [{shopping_intent: plan().shopping_intent}],
+      kind: "TOP_LEVEL_ARRAY",
+      type: "array",
+      extra: {
+        array_length: 1,
+        first_item_type: "object",
+        first_item_keys: ["shopping_intent"],
+      },
+    },
+    {value: "wrapped", kind: "TOP_LEVEL_STRING", type: "string", extra: {}},
+    {value: 42, kind: "TOP_LEVEL_NUMBER", type: "number", extra: {}},
+    {value: true, kind: "TOP_LEVEL_BOOLEAN", type: "boolean", extra: {}},
+    {value: null, kind: "TOP_LEVEL_NULL", type: "null", extra: {}},
+  ];
+  for (const item of cases) {
+    const diagnostics = [];
+    assert.throws(
+      () => parseAiJson(aiResponse(JSON.stringify(item.value)), {
+        onDiagnostic: (value) => diagnostics.push(value),
+      }),
+      (error) => error.code === "SHOPPING_AGENT_SCHEMA_INVALID" &&
+        error.schema_error_kind === item.kind,
+    );
+    assert.equal(diagnostics.length, 1);
+    assert.deepEqual(diagnostics[0], {
+      finish_reason: "stop",
+      content_type: "string",
+      content_length: JSON.stringify(item.value).length,
+      json_parse_success: true,
+      parsed_json_type: item.type,
+      schema_error_kind: item.kind,
+      ...item.extra,
+    });
+  }
+});
+
+test("Shopping Intent reports a missing top-level shopping_intent explicitly", () => {
+  const input = normalizeAgentInput({user_input: "出去玩", gender: "female"});
+  const parsed = parseAiJson(aiResponse("{}"));
+  assert.throws(
+    () => normalizeShoppingIntent(parsed.shopping_intent, input),
+    (error) => error.code === "SHOPPING_AGENT_SCHEMA_INVALID" &&
+      error.schema_error_kind === "MISSING_SHOPPING_INTENT",
+  );
+});
+
+test("Shopping Intent reports an invalid slots count explicitly", () => {
+  const input = normalizeAgentInput({user_input: "出去玩", gender: "female"});
+  const intent = structuredClone(plan().shopping_intent);
+  intent.slots.pop();
+  assert.throws(
+    () => normalizeShoppingIntent(intent, input),
+    (error) => error.code === "SHOPPING_AGENT_SCHEMA_INVALID" &&
+      error.schema_error_kind === "INVALID_SLOTS",
+  );
 });
 
 test("Taobao retrieval budgets leave a bounded outer safety margin", () => {
