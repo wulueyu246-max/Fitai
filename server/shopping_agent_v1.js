@@ -564,11 +564,42 @@ class TaobaoShoppingAgentV1 {
         metrics,
         messages: buildSelectorMessages(shoppingIntent, group, {round}),
       });
-      const normalized = validateProductSelection(payload, group.candidates, {
-        slot: group.slot,
-        gender: shoppingIntent.gender,
-        originalQuery: group.query || group.slot.search_query,
-      });
+      const initialQuery = group.query || group.slot.search_query;
+      let normalized;
+      try {
+        normalized = validateProductSelection(payload, group.candidates, {
+          slot: group.slot,
+          gender: shoppingIntent.gender,
+          originalQuery: initialQuery,
+        });
+        this.logger.info?.("shopping_agent_v1_refinement_query_validation", {
+          request_id: requestId,
+          slot_key: group.slot_key,
+          initial_query: initialQuery,
+          refinement_query: normalized.refinement_query,
+          canonical_category: normalized.refinement_query
+            ? normalizeProductCategory(normalized.refinement_query)
+            : null,
+          validation_status: normalized.refinement_query ? "PASS" : "NOT_REQUIRED",
+          validation_error_kind: null,
+        });
+      } catch (error) {
+        const validationErrorKind = error?.schema_error_kind || "INVALID_STRUCTURE";
+        if (!String(validationErrorKind).startsWith("REFINEMENT_QUERY_")) throw error;
+        const refinementQuery = text(payload?.refinement_query, 80);
+        this.logger.warn?.("shopping_agent_v1_refinement_query_validation", {
+          request_id: requestId,
+          slot_key: group.slot_key,
+          initial_query: initialQuery,
+          refinement_query: refinementQuery,
+          canonical_category: refinementQuery
+            ? normalizeProductCategory(refinementQuery)
+            : null,
+          validation_status: "FAIL",
+          validation_error_kind: validationErrorKind,
+        });
+        throw error;
+      }
       const pool = selectFinalCandidatePool(group.candidates, normalized.assessments);
       if (pool.length === 0) {
         throw new ShoppingAgentV1Error(
@@ -980,6 +1011,44 @@ function normalizeSearchQuery(value, gender, category) {
   return query;
 }
 
+function normalizeRefinementQuery(value, gender, category) {
+  const query = text(value, 80).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ");
+  if (!query) {
+    throw schemaError(
+      `${category}.refinement_query is required`,
+      "REFINEMENT_QUERY_EMPTY",
+    );
+  }
+  if (query.length > 50 || /天气|气温|身材策略|穿搭方案必须|因为|所以|：|:/.test(query)) {
+    throw schemaError(
+      `${category}.refinement_query is not concise executable product language`,
+      "REFINEMENT_QUERY_INVALID",
+    );
+  }
+  const genderPattern = gender === "female"
+    ? /女士|女装|女款|女鞋|女性|女生|^女/
+    : gender === "male"
+      ? /男士|男装|男款|男鞋|男性|男生|^男/
+      : null;
+  const unisexDirection = /男女同款|男女通用|中性|情侣/.test(query);
+  if ((genderPattern && !genderPattern.test(query)) ||
+      (genderPattern && unisexDirection) ||
+      explicitGenderConflict(query, gender)) {
+    throw schemaError(
+      `${category}.refinement_query conflicts with authoritative gender`,
+      "REFINEMENT_QUERY_GENDER_MISMATCH",
+    );
+  }
+  const canonicalCategory = normalizeProductCategory(query);
+  if (canonicalCategory !== category) {
+    throw schemaError(
+      `${category}.refinement_query resolves to ${canonicalCategory || "unknown"}`,
+      "REFINEMENT_QUERY_CATEGORY_MISMATCH",
+    );
+  }
+  return Object.freeze({query, canonical_category: canonicalCategory});
+}
+
 function hardGateCandidate(product, slot, shoppingIntent) {
   const evidence = candidateEvidence(product);
   const reasonCodes = [];
@@ -1085,19 +1154,35 @@ function validateProductSelection(payload, candidates, {
   let refinementQuery = text(payload.refinement_query, 80);
   if (payload.refinement_needed) {
     if (!slot || !gender || !originalQuery) {
-      if (!refinementQuery) {
-        throw schemaError("selector refinement_query is required when refinement is needed");
-      }
+      throw schemaError(
+        "selector refinement_query validation context is required",
+        "REFINEMENT_QUERY_CONTEXT_MISSING",
+      );
     } else {
-      refinementQuery = normalizeSearchQuery(refinementQuery, gender, slot.category);
+      refinementQuery = normalizeRefinementQuery(
+        refinementQuery,
+        gender,
+        slot.category,
+      ).query;
       if (canonicalQuery(refinementQuery) === canonicalQuery(originalQuery)) {
-        throw schemaError("selector refinement_query must differ from first query");
+        throw schemaError(
+          `${slot.category}.refinement_query must differ from initial_query`,
+          "REFINEMENT_QUERY_NOT_DISTINCT",
+        );
       }
     }
   } else if (refinementQuery) {
-    refinementQuery = slot && gender
-      ? normalizeSearchQuery(refinementQuery, gender, slot.category)
-      : refinementQuery;
+    if (!slot || !gender) {
+      throw schemaError(
+        "selector refinement_query validation context is required",
+        "REFINEMENT_QUERY_CONTEXT_MISSING",
+      );
+    }
+    refinementQuery = normalizeRefinementQuery(
+      refinementQuery,
+      gender,
+      slot.category,
+    ).query;
   }
   return {
     assessments: normalized,
@@ -1725,6 +1810,7 @@ module.exports = {
   explicitGenderConflict,
   hardGateCandidate,
   normalizeAgentInput,
+  normalizeRefinementQuery,
   normalizeSearchQuery,
   normalizeShoppingIntent,
   parseAiJson,

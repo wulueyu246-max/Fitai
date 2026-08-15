@@ -15,6 +15,7 @@ const {
   classifyTaobaoRetrievalError,
   hardGateCandidate,
   normalizeAgentInput,
+  normalizeRefinementQuery,
   normalizeShoppingIntent,
   parseAiJson,
   selectFinalCandidatePool,
@@ -450,6 +451,50 @@ test("Shopping Intent preserves only flexible slot intent and one executable que
   assert.ok(intent.slots.every((slot) => !Object.hasOwn(slot, "product_type")));
 });
 
+test("refinement query validation uses canonical category and explicit gender", () => {
+  const input = normalizeAgentInput({
+    user_input: "我要出去玩，帮我搭配一套",
+    gender: "female",
+  });
+  const initialPlan = plan();
+  initialPlan.shopping_intent.slots[0].search_query = "女短款修身针织衫";
+  const initialIntent = normalizeShoppingIntent(initialPlan.shopping_intent, input);
+  assert.equal(initialIntent.slots[0].search_query, "女短款修身针织衫");
+
+  assert.deepEqual(
+    normalizeRefinementQuery("女 方领 修身 短袖", "female", "top"),
+    {query: "女 方领 修身 短袖", canonical_category: "top"},
+  );
+  assert.deepEqual(
+    normalizeRefinementQuery("女 韩系 polo 针织", "female", "top"),
+    {query: "女 韩系 polo 针织", canonical_category: "top"},
+  );
+  assert.deepEqual(
+    normalizeRefinementQuery("女 设计感 针织衫", "female", "top"),
+    {query: "女 设计感 针织衫", canonical_category: "top"},
+  );
+
+  assert.throws(
+    () => normalizeRefinementQuery("女 高腰牛仔裤", "female", "top"),
+    (error) => error.schema_error_kind === "REFINEMENT_QUERY_CATEGORY_MISMATCH" &&
+      error.message.startsWith("top.refinement_query"),
+  );
+  assert.throws(
+    () => normalizeRefinementQuery("男士短袖衬衫", "female", "top"),
+    (error) => error.schema_error_kind === "REFINEMENT_QUERY_GENDER_MISMATCH" &&
+      error.message.startsWith("top.refinement_query"),
+  );
+  assert.throws(
+    () => normalizeRefinementQuery("男女同款短袖", "female", "top"),
+    (error) => error.schema_error_kind === "REFINEMENT_QUERY_GENDER_MISMATCH",
+  );
+  assert.throws(
+    () => normalizeRefinementQuery("", "female", "top"),
+    (error) => error.schema_error_kind === "REFINEMENT_QUERY_EMPTY" &&
+      error.message.startsWith("top.refinement_query"),
+  );
+});
+
 test("hard gate rejects wrong gender, wrong category and underwear/homewear only", () => {
   const intent = normalizeShoppingIntent(
     plan().shopping_intent,
@@ -616,11 +661,15 @@ test("Phase 2 refines only an insufficient homogeneous slot once and preserves i
 
   const client = new FakeAiClient({refinementCategories: ["top"]});
   const provider = new RefinementProvider();
+  const logs = [];
   const agent = new TaobaoShoppingAgentV1({
     client,
     model: "qwen3.7-plus",
     productProvider: provider,
-    logger: {info() {}, warn() {}},
+    logger: {
+      info(event, details) { logs.push({event, details}); },
+      warn(event, details) { logs.push({event, details}); },
+    },
   });
   const result = await agent.run({
     user_input: "我要出去玩，帮我搭配一套",
@@ -665,6 +714,15 @@ test("Phase 2 refines only an insufficient homogeneous slot once and preserves i
   );
   assert.equal(result.invalid_candidate_reference.length, 0);
   assert.ok(result.final_look_count >= 2);
+  const refinementValidation = logs.find(({event, details}) =>
+    event === "shopping_agent_v1_refinement_query_validation" &&
+    details.slot_key.endsWith(":top") &&
+    details.validation_status === "PASS");
+  assert.ok(refinementValidation);
+  assert.equal(refinementValidation.details.initial_query, "女款 方领 合身 上衣");
+  assert.match(refinementValidation.details.refinement_query, /女.*上衣/);
+  assert.equal(refinementValidation.details.canonical_category, "top");
+  assert.equal(refinementValidation.details.validation_error_kind, null);
 });
 
 test("male casual and cute female retain authoritative gender in the proof contract", () => {
