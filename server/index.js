@@ -48,6 +48,10 @@ const {
 const {ProductAestheticReranker} = require("./product_aesthetic_reranker");
 const {VisualProductVerifier} = require("./visual_product_verification");
 const {
+  ShoppingAgentV1Error,
+  TaobaoShoppingAgentV1,
+} = require("./shopping_agent_v1");
+const {
   BLUEPRINT_ITEM_KEYS,
   applyBlueprintToRequirement,
   blueprintHasCoreItems,
@@ -695,6 +699,12 @@ const productProvider = createProductProvider({
   visualVerifier: visualProductVerifier,
 });
 const taobaoService = new TaobaoService({provider: productProvider});
+const shoppingAgentV1 = new TaobaoShoppingAgentV1({
+  client: shouldUseMockAi(config, aiClient) ? null : aiClient,
+  model: config.model,
+  productProvider,
+  fashionBrain,
+});
 
 function shouldUseMockAi(currentConfig, aiClient) {
   return currentConfig.forceMockAi || !aiClient;
@@ -5052,6 +5062,26 @@ function productRecommendationRequest(input = {}, requestId = "") {
 app.get("/products/recommend", handleProductRecommendations);
 app.post("/products/recommend", handleProductRecommendations);
 
+app.post("/shopping-agent/v1/proof", async (req, res, next) => {
+  try {
+    const result = await shoppingAgentV1.run({
+      ...req.body,
+      request_id: req.body?.request_id || res.locals.requestId,
+    });
+    return res.json(result);
+  } catch (error) {
+    if (error instanceof ShoppingAgentV1Error || error instanceof ProductProviderError) {
+      return sendError(
+        res,
+        error.status || 502,
+        error.code || "SHOPPING_AGENT_V1_FAILED",
+        error.message,
+      );
+    }
+    return next(error);
+  }
+});
+
 app.get("/products/search", async (req, res, next) => {
   try {
     const products = await taobaoService.search({
@@ -7775,6 +7805,7 @@ module.exports = {
   productProvider,
   productAestheticReranker,
   visualProductVerifier,
+  shoppingAgentV1,
   taobaoService,
   productClickStore,
   fashionBrain,

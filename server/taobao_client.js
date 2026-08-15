@@ -48,6 +48,8 @@ class TaobaoApiClient {
     requestId = crypto.randomUUID(),
     provider = "taobao",
     siteId = "",
+    signal,
+    onAttempt,
   } = {}) {
     const startedAt = Date.now();
     const diagnostics = {
@@ -61,11 +63,12 @@ class TaobaoApiClient {
     let lastError;
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
       try {
+        onAttempt?.(attempt + 1);
         this.logger.info?.("淘宝商品接口请求", {
           ...diagnostics,
           attempt: attempt + 1,
         });
-        const payload = await this.#callOnce(method, apiParams);
+        const payload = await this.#callOnce(method, apiParams, signal);
         const errorResponse = payload?.error_response;
         if (errorResponse) {
           const code = safeTopErrorCode(errorResponse);
@@ -84,6 +87,7 @@ class TaobaoApiClient {
         return payload;
       } catch (error) {
         lastError = normalizeError(error);
+        lastError.attempts = attempt + 1;
         this.logger.warn?.("淘宝商品接口失败", {
           ...diagnostics,
           attempt: attempt + 1,
@@ -92,13 +96,14 @@ class TaobaoApiClient {
           ...lastError.details,
           ...safeTransportDetails(lastError, this.endpoint),
         });
+        if (signal?.aborted) break;
         if (!lastError.retryable || attempt >= this.maxRetries) break;
       }
     }
     throw lastError;
   }
 
-  async #callOnce(method, apiParams) {
+  async #callOnce(method, apiParams, externalSignal) {
     const params = {
       app_key: this.appKey,
       format: "json",
@@ -112,12 +117,15 @@ class TaobaoApiClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.totalTimeoutMs);
     timer.unref?.();
+    const signal = externalSignal && typeof AbortSignal.any === "function"
+      ? AbortSignal.any([controller.signal, externalSignal])
+      : externalSignal || controller.signal;
     try {
       const response = await this.fetch(this.endpoint, {
         method: "POST",
         headers: {"content-type": "application/x-www-form-urlencoded"},
         body: new URLSearchParams(params).toString(),
-        signal: controller.signal,
+        signal,
         ...(this.dispatcher ? {dispatcher: this.dispatcher} : {}),
       });
       if (!response.ok) {

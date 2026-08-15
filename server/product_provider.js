@@ -80,6 +80,13 @@ class ProductProvider {
     ));
     return uniqueProducts(batches.flat()).slice(0, 12);
   }
+
+  async searchShoppingAgentCandidates() {
+    throw new ProductProviderError("当前商品 Provider 不支持 Shopping Agent 真实候选召回", {
+      status: 503,
+      code: "SHOPPING_AGENT_SEARCH_UNAVAILABLE",
+    });
+  }
 }
 
 class MockProductProvider extends ProductProvider {
@@ -208,6 +215,51 @@ class TaobaoProductProvider extends ProductProvider {
   async healthCheck() {
     await this.#search(normalizeFilters({category: "top", keyword: "上衣", limit: 1}));
     return true;
+  }
+
+  async searchShoppingAgentCandidates({
+    query,
+    category,
+    gender,
+    requestId,
+    limit = 30,
+    signal,
+    onAttempt,
+  } = {}) {
+    const searchKeyword = String(query || "").trim();
+    const normalizedCategory = normalizeProductCategory(category);
+    if (!searchKeyword || searchKeyword.length > 80) {
+      throw new ProductProviderError("Shopping Agent 搜索词无效", {
+        status: 400,
+        code: "INVALID_SHOPPING_AGENT_QUERY",
+      });
+    }
+    if (!normalizedCategory || !["top", "bottom", "shoes"].includes(normalizedCategory)) {
+      throw new ProductProviderError("Shopping Agent 仅支持 top、bottom、shoes", {
+        status: 400,
+        code: "INVALID_SHOPPING_AGENT_CATEGORY",
+      });
+    }
+    const metrics = {taobaoCount: 0, semanticPassCount: 0};
+    const products = await this.#search({
+      category: normalizedCategory,
+      gender: normalizeGender(gender),
+      requestId: String(requestId || "").trim(),
+      originalKeyword: searchKeyword,
+      searchKeyword,
+      fallbackLevel: 0,
+      pageNo: 1,
+      limit: Math.min(positiveInteger(limit, 30), 50),
+      shoppingAgentRaw: true,
+      signal,
+      onAttempt,
+    }, metrics);
+    return {
+      products,
+      raw_count: metrics.taobaoCount,
+      valid_count: metrics.semanticPassCount,
+      attempts: metrics.attempts,
+    };
   }
 
   async recommend(filters = {}) {
@@ -852,6 +904,11 @@ class TaobaoProductProvider extends ProductProvider {
         requestId: filters.requestId || undefined,
         provider: "taobao",
         siteId: this.siteId,
+        signal: filters.signal,
+        onAttempt: (attempt) => {
+          if (metrics) metrics.attempts = Number(metrics.attempts || 0) + 1;
+          filters.onAttempt?.(attempt);
+        },
       });
     } catch (error) {
       if (isEmptyTaobaoResult(error)) {
@@ -999,6 +1056,15 @@ class AutoProductProvider extends ProductProvider {
       }));
       return this.mock.recommendForQueries(fallbackQueries, context);
     }
+  }
+
+  async searchShoppingAgentCandidates(input = {}) {
+    // The Shopping Agent proof must use real Taobao evidence. It intentionally
+    // bypasses AutoProvider's mock fallback.
+    const result = await this.taobao.searchShoppingAgentCandidates(input);
+    this.health = true;
+    this.status = "taobao";
+    return result;
   }
 
   #logFallback(error, filters = {}) {
@@ -1225,7 +1291,14 @@ function mapPayload(payload, filters, pid, origin, onDiagnostics) {
   const qualityBlocks = usable
     .map((product) => productQualityBlock(product, filters))
     .filter(Boolean);
-  const products = filters.category
+  const products = filters.shoppingAgentRaw === true
+    ? usable.map((product) => ({
+      ...product,
+      gender: normalizeGender(filters.gender),
+      search_keyword: filters.searchKeyword || filters.keyword || "",
+      relevance_score: 0,
+    }))
+    : filters.category
     ? rankProducts(
       usable,
       filters,
