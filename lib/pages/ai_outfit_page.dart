@@ -166,26 +166,6 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
 
   bool get _isGenerating => _generationState.isBusy;
 
-  String get _resolvedProfileGender {
-    final accountGender = _normalizeProfileGender(_session.account?.gender);
-    return accountGender != 'unisex'
-        ? accountGender
-        : _normalizeProfileGender(widget.initialGender);
-  }
-
-  String _normalizeProfileGender(String? value) {
-    final normalized = value?.trim().toLowerCase() ?? '';
-    if (const {'male', 'man', 'men'}.contains(normalized) ||
-        normalized.contains('\u7537')) {
-      return 'male';
-    }
-    if (const {'female', 'woman', 'women'}.contains(normalized) ||
-        normalized.contains('\u5973')) {
-      return 'female';
-    }
-    return 'unisex';
-  }
-
   @override
   void initState() {
     super.initState();
@@ -700,11 +680,17 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         ),
       );
       final userRequest = _requestController.text.trim();
+      final userProfile = await _profileService.load();
+      final resolvedGender = resolveOutfitGender(
+        accountGender: _session.account?.gender,
+        profileGender: userProfile.gender,
+        selectedGender: widget.initialGender,
+      );
       final outfitRequest = OutfitRequest(
         height: height,
         weight: weight,
         scene: _scene,
-        gender: _resolvedProfileGender,
+        gender: resolvedGender,
         itemBudget: _itemBudget,
         outfitBudget: _outfitBudget,
         request: userRequest,
@@ -716,7 +702,7 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         bodyProfile: {
           'height': height,
           'weight': weight,
-          'gender': _resolvedProfileGender,
+          'gender': resolvedGender,
         },
         images: images,
       );

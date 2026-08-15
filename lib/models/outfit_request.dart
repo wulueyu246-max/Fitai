@@ -1,3 +1,28 @@
+String normalizeOutfitGender(String? value) {
+  final normalized = value?.trim().toLowerCase() ?? '';
+  if (const {'male', 'man', 'men'}.contains(normalized) ||
+      normalized.contains('\u7537')) {
+    return 'male';
+  }
+  if (const {'female', 'woman', 'women'}.contains(normalized) ||
+      normalized.contains('\u5973')) {
+    return 'female';
+  }
+  return 'unisex';
+}
+
+String resolveOutfitGender({
+  String? accountGender,
+  String? profileGender,
+  String? selectedGender,
+}) {
+  for (final candidate in [accountGender, profileGender, selectedGender]) {
+    final normalized = normalizeOutfitGender(candidate);
+    if (normalized != 'unisex') return normalized;
+  }
+  return 'unisex';
+}
+
 class OutfitRequest {
   const OutfitRequest({
     required this.height,

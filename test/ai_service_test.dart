@@ -205,6 +205,54 @@ void main() {
     expect(femaleRequest.toJson()['gender'], 'female');
   });
 
+  test('resolves explicit profile and selected genders without photo inference',
+      () {
+    expect(
+      resolveOutfitGender(profileGender: '女性'),
+      'female',
+    );
+    expect(
+      resolveOutfitGender(selectedGender: 'male'),
+      'male',
+    );
+    expect(
+      resolveOutfitGender(
+        accountGender: '未设置',
+        profileGender: '',
+        selectedGender: null,
+      ),
+      'unisex',
+    );
+    expect(
+      resolveOutfitGender(
+        accountGender: 'female',
+        profileGender: 'male',
+        selectedGender: 'male',
+      ),
+      'female',
+    );
+  });
+
+  for (final gender in const ['female', 'male', 'unisex']) {
+    test('$gender is preserved through the complete OutfitRequest context', () {
+      final payload = OutfitRequest(
+        height: 160,
+        weight: 49,
+        scene: '日常',
+        request: '我想出去玩，帮我搭一套',
+        gender: gender,
+        bodyProfile: const {'body_type': '纤细'},
+        images: const {'front': 'data:image/jpeg;base64,AA=='},
+      ).toJson();
+      final context = payload['context']! as Map<String, dynamic>;
+      final bodyProfile = context['body_profile']! as Map<String, dynamic>;
+
+      expect(payload['gender'], gender);
+      expect(context['gender'], gender);
+      expect(bodyProfile['gender'], gender);
+    });
+  }
+
   test('keeps user input separate from structured scene and weather context',
       () {
     const userInput = '我想出去玩，帮我搭一套';

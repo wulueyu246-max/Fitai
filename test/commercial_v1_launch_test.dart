@@ -182,6 +182,50 @@ void main() {
     expect(products.single.isMock, isFalse);
   });
 
+  test('remote product source preserves structured backend validation errors',
+      () async {
+    const requestId = '4c80e770-9f54-4d51-af36-717e6497b326';
+    final client = MockClient((request) async {
+      return http.Response.bytes(
+        utf8.encode(jsonEncode({
+          'status': 400,
+          'message': 'search_keywords has too many entries',
+          'requestId': requestId,
+          'error': {
+            'code': 'INVALID_PRODUCT_FILTER',
+            'message': 'search_keywords has too many entries',
+            'request_id': requestId,
+            'details': {'field': 'looks[0].items[1].search_keywords'},
+          },
+        })),
+        400,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+    final service = RemoteBrandProductService(
+      catalogEndpoint: Uri.parse('https://api.example.com/products/recommend'),
+      client: client,
+    );
+
+    try {
+      await service.fetchProducts(
+        recommendationContext: const {
+          'request_id': requestId,
+          'items': [],
+        },
+      );
+      fail('Expected ProductSourceException');
+    } on ProductSourceException catch (error) {
+      expect(error.statusCode, 400);
+      expect(error.backendCode, 'INVALID_PRODUCT_FILTER');
+      expect(error.backendMessage, 'search_keywords has too many entries');
+      expect(error.backendField, 'looks[0].items[1].search_keywords');
+      expect(error.requestId, requestId);
+      expect(error.toString(), contains('INVALID_PRODUCT_FILTER'));
+      expect(error.toString(), contains('looks[0].items[1].search_keywords'));
+    }
+  });
+
   test('production safety binds real products to the current request',
       () async {
     const requestId = '123e4567-e89b-42d3-a456-426614174000';

@@ -282,6 +282,28 @@ test("keeps user input verbatim and validates weather and scene as structured co
   assert.doesNotMatch(result.request, /用户地区|当前实时天气|场景|穿搭方案必须遵循/u);
 });
 
+test("preserves female, male, and unisex as authoritative outfit genders", () => {
+  for (const gender of ["female", "male", "unisex"]) {
+    const result = validateOutfitRequest({
+      height: 160,
+      weight: 49,
+      scene: "日常",
+      request: "我想出去玩，帮我搭一套",
+      gender,
+      context: {
+        gender,
+        body_profile: {gender},
+      },
+      images: {front: imageDataUrl},
+    });
+
+    assert.equal(result.gender, gender);
+    assert.equal(result.authoritative_gender, gender);
+    assert.equal(result.context.gender, gender);
+    assert.equal(result.context.body_profile.gender, gender);
+  }
+});
+
 test("rejects competing user-input and authoritative-gender sources", () => {
   assert.throws(() => validateOutfitRequest({
     height: 160,

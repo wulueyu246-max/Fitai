@@ -272,8 +272,9 @@ class RemoteBrandProductService implements BrandProductService {
     final responseBody = utf8.decode(response.bodyBytes);
     _debugResponse(response.statusCode);
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw ProductSourceException(
-        '商品源请求失败（HTTP ${response.statusCode}）',
+      throw _backendError(
+        response,
+        responseBody,
       );
     }
     try {
@@ -282,6 +283,69 @@ class RemoteBrandProductService implements BrandProductService {
     } catch (_) {
       throw const ProductSourceException('商品源返回了无效数据');
     }
+  }
+
+  ProductSourceException _backendError(
+    http.Response response,
+    String responseBody,
+  ) {
+    Map<String, dynamic>? payload;
+    try {
+      final decoded = jsonDecode(responseBody);
+      if (decoded is Map<String, dynamic>) payload = decoded;
+    } catch (_) {
+      // A non-JSON error response still retains its HTTP status safely.
+    }
+
+    final error = payload?['error'] is Map<String, dynamic>
+        ? payload!['error'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final details = error['details'] is Map<String, dynamic>
+        ? error['details'] as Map<String, dynamic>
+        : payload?['details'] is Map<String, dynamic>
+            ? payload!['details'] as Map<String, dynamic>
+            : const <String, dynamic>{};
+    final backendCode = _safeDiagnosticText(
+      error['code'] ?? payload?['code'],
+    );
+    final backendMessage = _safeDiagnosticText(
+      error['message'] ?? payload?['message'],
+      maxLength: 500,
+    );
+    final backendField = _safeDiagnosticText(
+      error['field'] ??
+          error['validation_field'] ??
+          details['field'] ??
+          details['validation_field'] ??
+          payload?['field'] ??
+          payload?['validation_field'],
+    );
+    final requestId = _safeDiagnosticText(
+      error['request_id'] ??
+          error['requestId'] ??
+          payload?['request_id'] ??
+          payload?['requestId'] ??
+          response.headers['x-request-id'],
+    );
+    final message = backendMessage.isEmpty
+        ? '商品源请求失败（HTTP ${response.statusCode}）'
+        : backendMessage;
+    return ProductSourceException(
+      message,
+      statusCode: response.statusCode,
+      backendCode: backendCode,
+      backendMessage: backendMessage,
+      backendField: backendField,
+      requestId: requestId,
+    );
+  }
+
+  String _safeDiagnosticText(Object? value, {int maxLength = 160}) {
+    if (value is! String) return '';
+    final normalized = value.trim().replaceAll(RegExp(r'\s+'), ' ');
+    return normalized.length <= maxLength
+        ? normalized
+        : normalized.substring(0, maxLength);
   }
 
   List<dynamic> _extractProducts(Object? payload) {
@@ -349,10 +413,38 @@ class RemoteBrandProductService implements BrandProductService {
 }
 
 class ProductSourceException implements Exception {
-  const ProductSourceException(this.message);
+  const ProductSourceException(
+    this.message, {
+    this.statusCode,
+    this.backendCode = '',
+    this.backendMessage = '',
+    this.backendField = '',
+    this.requestId = '',
+  });
 
   final String message;
+  final int? statusCode;
+  final String backendCode;
+  final String backendMessage;
+  final String backendField;
+  final String requestId;
+
+  Map<String, Object?> get diagnostics => {
+        'status_code': statusCode,
+        'backend_code': backendCode,
+        'backend_message': backendMessage,
+        'backend_field': backendField,
+        'request_id': requestId,
+      };
 
   @override
-  String toString() => message;
+  String toString() {
+    final metadata = <String>[
+      if (statusCode != null) 'status_code=$statusCode',
+      if (backendCode.isNotEmpty) 'backend_code=$backendCode',
+      if (backendField.isNotEmpty) 'backend_field=$backendField',
+      if (requestId.isNotEmpty) 'request_id=$requestId',
+    ];
+    return metadata.isEmpty ? message : '$message (${metadata.join(', ')})';
+  }
 }
