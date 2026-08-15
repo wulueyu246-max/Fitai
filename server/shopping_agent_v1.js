@@ -651,6 +651,7 @@ class TaobaoShoppingAgentV1 {
       });
       const payload = parseAiJson(response, {
         allowSingleAssessmentWrapper: phase.startsWith("product_selector_"),
+        allowSingleLooksWrapper: phase === "real_product_outfit_composer",
         onDiagnostic: (diagnostic) => {
           const level = diagnostic.schema_error_kind ? "warn" : "info";
           this.logger[level]?.("shopping_agent_v1_structured_output", {
@@ -1162,6 +1163,7 @@ function taobaoCauseCode(error) {
 
 function parseAiJson(response, {
   allowSingleAssessmentWrapper = false,
+  allowSingleLooksWrapper = false,
   onDiagnostic,
 } = {}) {
   const content = response?.choices?.[0]?.message?.content;
@@ -1201,10 +1203,16 @@ function parseAiJson(response, {
     parsed = parsed[0];
     diagnostic.parsed_json_type = "object";
     diagnostic.top_level_keys = safeSchemaKeys(parsed);
+  } else if (allowSingleLooksWrapper && isSingleLooksWrapper(parsed)) {
+    parsed = parsed[0];
+    diagnostic.parsed_json_type = "object";
+    diagnostic.top_level_keys = safeSchemaKeys(parsed);
   }
   if (diagnostic.parsed_json_type !== "object") {
     if (allowSingleAssessmentWrapper && diagnostic.parsed_json_type === "array") {
       diagnostic.schema_error_kind = "INVALID_SELECTOR_ARRAY_WRAPPER";
+    } else if (allowSingleLooksWrapper && diagnostic.parsed_json_type === "array") {
+      diagnostic.schema_error_kind = "INVALID_COMPOSER_ARRAY_WRAPPER";
     } else {
       diagnostic.schema_error_kind = topLevelSchemaErrorKind(diagnostic.parsed_json_type);
     }
@@ -1226,6 +1234,15 @@ function isSingleAssessmentWrapper(value) {
     typeof value[0] === "object" &&
     !Array.isArray(value[0]) &&
     Array.isArray(value[0].assessments);
+}
+
+function isSingleLooksWrapper(value) {
+  return Array.isArray(value) &&
+    value.length === 1 &&
+    value[0] &&
+    typeof value[0] === "object" &&
+    !Array.isArray(value[0]) &&
+    Array.isArray(value[0].looks);
 }
 
 function jsonValueType(value) {

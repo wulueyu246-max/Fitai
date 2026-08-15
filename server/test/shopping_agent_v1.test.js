@@ -129,9 +129,15 @@ class FakeProvider {
 }
 
 class FakeAiClient {
-  constructor({foreignComposerId = false} = {}) {
+  constructor({
+    composerLookCount = 2,
+    foreignComposerId = false,
+    wrapComposer = false,
+  } = {}) {
     this.calls = [];
+    this.composerLookCount = composerLookCount;
     this.foreignComposerId = foreignComposerId;
+    this.wrapComposer = wrapComposer;
     this.chat = {completions: {create: this.create.bind(this)}};
   }
 
@@ -161,7 +167,7 @@ class FakeAiClient {
       const metadata = JSON.parse(input.messages[1].content[0].text);
       const pools = metadata.candidate_pools;
       payload = {
-        looks: [0, 1].map((index) => ({
+        looks: Array.from({length: this.composerLookCount}, (_, index) => ({
           look_id: `look-${index + 1}`,
           top_candidate_id: index === 0 && this.foreignComposerId
             ? "candidate_999" : pools.top[index].candidate_id,
@@ -177,6 +183,7 @@ class FakeAiClient {
           explanation: "真实候选形成的完整外出搭配",
         })),
       };
+      if (this.wrapComposer) payload = [payload];
     } else {
       throw new Error(`unexpected schema ${name}`);
     }
@@ -285,6 +292,37 @@ test("Product Selector parser accepts object and one safe assessments wrapper on
       }),
       (error) => error.code === "SHOPPING_AGENT_SCHEMA_INVALID" &&
         error.schema_error_kind === "INVALID_SELECTOR_ARRAY_WRAPPER",
+    );
+  }
+});
+
+test("Composer parser accepts object and one safe looks wrapper only", () => {
+  const payload = {looks: []};
+  assert.deepEqual(
+    parseAiJson(aiResponse(JSON.stringify(payload)), {
+      allowSingleLooksWrapper: true,
+    }),
+    payload,
+  );
+  assert.deepEqual(
+    parseAiJson(aiResponse(JSON.stringify([payload])), {
+      allowSingleLooksWrapper: true,
+    }),
+    payload,
+  );
+
+  for (const invalid of [
+    [],
+    [payload, payload],
+    ["not-an-object"],
+    [{}],
+  ]) {
+    assert.throws(
+      () => parseAiJson(aiResponse(JSON.stringify(invalid)), {
+        allowSingleLooksWrapper: true,
+      }),
+      (error) => error.code === "SHOPPING_AGENT_SCHEMA_INVALID" &&
+        error.schema_error_kind === "INVALID_COMPOSER_ARRAY_WRAPPER",
     );
   }
 });
@@ -408,6 +446,42 @@ test("composer rejects candidate IDs outside the real candidate pools", () => {
   assert.equal(result.looks.length, 0);
   assert.equal(result.invalid_candidate_reference.length, 1);
   assert.deepEqual(result.invalid_candidate_reference[0].categories, ["top"]);
+});
+
+test("Composer wrapper keeps candidate references and minimum Look count strict", async () => {
+  const wrappedAgent = new TaobaoShoppingAgentV1({
+    client: new FakeAiClient({wrapComposer: true}),
+    model: "qwen3.7-plus",
+    productProvider: new FakeProvider(),
+    logger: {info() {}},
+  });
+  const wrappedResult = await wrappedAgent.run({
+    user_input: "我要出去玩，帮我搭配一套",
+    authoritative_gender: "female",
+  });
+  assert.equal(wrappedResult.final_look_count, 2);
+
+  const foreignAgent = new TaobaoShoppingAgentV1({
+    client: new FakeAiClient({foreignComposerId: true, wrapComposer: true}),
+    model: "qwen3.7-plus",
+    productProvider: new FakeProvider(),
+    logger: {info() {}},
+  });
+  await assert.rejects(
+    () => foreignAgent.run({user_input: "出去玩", authoritative_gender: "female"}),
+    (error) => error.code === "SHOPPING_AGENT_INSUFFICIENT_LOOKS",
+  );
+
+  const oneLookAgent = new TaobaoShoppingAgentV1({
+    client: new FakeAiClient({composerLookCount: 1, wrapComposer: true}),
+    model: "qwen3.7-plus",
+    productProvider: new FakeProvider(),
+    logger: {info() {}},
+  });
+  await assert.rejects(
+    () => oneLookAgent.run({user_input: "出去玩", authoritative_gender: "female"}),
+    (error) => error.code === "SHOPPING_AGENT_INSUFFICIENT_LOOKS",
+  );
 });
 
 test("minimal proof uses exactly five AI calls, three Taobao calls and real IDs", async () => {
