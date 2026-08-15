@@ -767,6 +767,10 @@ test("Phase 2 refines only an insufficient homogeneous slot once and preserves i
   const topMetric = result.slot_metrics.find((slot) => slot.category === "top");
   assert.equal(topMetric.refinement.triggered, true);
   assert.equal(topMetric.refinement.status, "SUCCESS");
+  assert.equal(topMetric.refinement_attempted, true);
+  assert.equal(topMetric.refinement_succeeded, true);
+  assert.equal(topMetric.refinement_fallback_used, false);
+  assert.equal(topMetric.refinement_error_code, null);
   assert.equal(topMetric.refinement.rounds.length, 2);
   assert.ok(topMetric.refinement.reasons.includes("CANDIDATE_POOL_HOMOGENEITY_HIGH"));
   assert.equal(topMetric.candidate_pool_homogeneity, "LOW");
@@ -800,6 +804,106 @@ test("Phase 2 refines only an insufficient homogeneous slot once and preserves i
   assert.match(refinementValidation.details.refinement_query, /女.*上衣/);
   assert.equal(refinementValidation.details.canonical_category, "top");
   assert.equal(refinementValidation.details.validation_error_kind, null);
+});
+
+test("refinement network failure falls back to three legal first-round candidates", async () => {
+  class NetworkFailureRefinementProvider extends FakeProvider {
+    async searchShoppingAgentCandidates(input) {
+      this.calls.push(input);
+      if (input.category === "top" && input.query.includes("设计感")) {
+        input.onAttempt?.(1);
+        input.onAttempt?.(2);
+        const error = new Error("connect timed out");
+        error.code = "TAOBAO_NETWORK_ERROR";
+        error.details = {cause_code: "UND_ERR_CONNECT_TIMEOUT"};
+        error.attempts = 2;
+        throw error;
+      }
+      const products = candidates(input.category);
+      return {products, raw_count: products.length, valid_count: products.length};
+    }
+  }
+
+  const client = new FakeAiClient({refinementCategories: ["top"]});
+  const provider = new NetworkFailureRefinementProvider();
+  const agent = new TaobaoShoppingAgentV1({
+    client,
+    model: "qwen3.7-plus",
+    productProvider: provider,
+    logger: {info() {}, warn() {}},
+  });
+  const result = await agent.run({user_input: "出去玩", authoritative_gender: "female"});
+  const topMetric = result.slot_metrics.find((slot) => slot.category === "top");
+
+  assert.equal(result.state, "success");
+  assert.equal(result.final_look_count, 2);
+  assert.equal(result.taobao_call_count, 4);
+  assert.equal(result.ai_call_count, 5);
+  assert.equal(topMetric.refinement_status, "failed_fallback");
+  assert.equal(topMetric.refinement.status, "failed_fallback");
+  assert.equal(topMetric.refinement_attempted, true);
+  assert.equal(topMetric.refinement_succeeded, false);
+  assert.equal(topMetric.refinement_fallback_used, true);
+  assert.equal(topMetric.refinement_error_code, "TAOBAO_NETWORK_ERROR");
+  assert.equal(topMetric.refinement.refinement_cause_code, "UND_ERR_CONNECT_TIMEOUT");
+  assert.equal(result.candidate_pools.top.length, 3);
+  assert.ok(result.candidate_pools.top.every((item) => !item.title.includes("设计感")));
+});
+
+test("zero legal first-round candidates fail before optional refinement or Composer", async () => {
+  const client = new FakeAiClient({refinementCategories: ["top"]});
+  const provider = {
+    async searchShoppingAgentCandidates(input) {
+      const products = input.category === "top" ? [] : candidates(input.category);
+      return {products, raw_count: products.length, valid_count: products.length};
+    },
+  };
+  const agent = new TaobaoShoppingAgentV1({
+    client,
+    model: "qwen3.7-plus",
+    productProvider: provider,
+    logger: {info() {}, warn() {}},
+  });
+
+  await assert.rejects(
+    () => agent.run({user_input: "出去玩", authoritative_gender: "female"}),
+    (error) => error.code === "SHOPPING_AGENT_NO_HARD_GATE_CANDIDATES" &&
+      error.details.category === "top",
+  );
+  assert.equal(client.calls.length, 1);
+});
+
+test("refinement provider hard error keeps existing handling without network fallback", async () => {
+  class BusinessFailureRefinementProvider extends FakeProvider {
+    async searchShoppingAgentCandidates(input) {
+      this.calls.push(input);
+      if (input.category === "top" && input.query.includes("设计感")) {
+        const error = new Error("Taobao permission denied");
+        error.code = "TAOBAO_PERMISSION_DENIED";
+        error.attempts = 1;
+        throw error;
+      }
+      const products = candidates(input.category);
+      return {products, raw_count: products.length, valid_count: products.length};
+    }
+  }
+
+  const client = new FakeAiClient({refinementCategories: ["top"]});
+  const agent = new TaobaoShoppingAgentV1({
+    client,
+    model: "qwen3.7-plus",
+    productProvider: new BusinessFailureRefinementProvider(),
+    logger: {info() {}, warn() {}},
+  });
+  const result = await agent.run({user_input: "出去玩", authoritative_gender: "female"});
+  const topMetric = result.slot_metrics.find((slot) => slot.category === "top");
+
+  assert.equal(result.state, "success");
+  assert.equal(topMetric.refinement.status, "FAILED");
+  assert.equal(topMetric.refinement_attempted, true);
+  assert.equal(topMetric.refinement_succeeded, false);
+  assert.equal(topMetric.refinement_fallback_used, false);
+  assert.equal(topMetric.refinement_error_code, "TAOBAO_PROVIDER_ERROR");
 });
 
 test("male casual and cute female retain authoritative gender in the proof contract", () => {

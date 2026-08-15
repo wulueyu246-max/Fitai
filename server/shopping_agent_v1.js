@@ -676,16 +676,34 @@ class TaobaoShoppingAgentV1 {
           status: "SUCCESS",
         });
       } catch (error) {
+        const errorCode = classifyTaobaoRetrievalError(error);
+        const causeCode = taobaoCauseCode(error) || null;
+        const hasFirstRoundCandidates = selection.final_candidate_pool.length > 0;
+        const refinementFallbackUsed = errorCode === "TAOBAO_NETWORK_ERROR" &&
+          hasFirstRoundCandidates;
         this.logger.warn?.("shopping_agent_v1_refinement_retrieval", {
           request_id: requestId,
           category: selection.slot.category,
           first_query: selection.query || selection.slot.search_query,
           refinement_query: decision.query,
           refinement_reasons: decision.reasons,
-          status: "FAILED",
-          error_code: classifyTaobaoRetrievalError(error),
+          status: refinementFallbackUsed ? "failed_fallback" : "FAILED",
+          error_code: errorCode,
+          cause_code: causeCode,
+          refinement_fallback_used: refinementFallbackUsed,
         });
-        return {category: selection.slot.category, selection, decision, retrieval: null};
+        if (errorCode === "TAOBAO_NETWORK_ERROR" && !hasFirstRoundCandidates) {
+          throw error;
+        }
+        return {
+          category: selection.slot.category,
+          selection,
+          decision,
+          retrieval: null,
+          errorCode,
+          causeCode,
+          refinementFallbackUsed,
+        };
       }
       if (retrieval.candidates.length === 0) {
         return {category: selection.slot.category, selection, decision, retrieval};
@@ -706,11 +724,24 @@ class TaobaoShoppingAgentV1 {
     const selections = firstRoundSelections.map((selection) => {
       const refinement = refinementByCategory.get(selection.slot.category);
       if (!refinement?.refinedSelection) {
+        const status = refinement
+          ? refinement.refinementFallbackUsed
+            ? "failed_fallback"
+            : refinement.retrieval
+              ? "NO_NEW_CANDIDATES"
+              : "FAILED"
+          : "NOT_NEEDED";
         return {
           ...selection,
           refinement: refinement ? {
             triggered: true,
-            status: refinement.retrieval ? "NO_NEW_CANDIDATES" : "FAILED",
+            status,
+            refinement_status: status,
+            refinement_attempted: true,
+            refinement_succeeded: false,
+            refinement_fallback_used: refinement.refinementFallbackUsed === true,
+            refinement_error_code: refinement.errorCode || null,
+            refinement_cause_code: refinement.causeCode || null,
             first_query: selection.query || selection.slot.search_query,
             second_query: refinement.decision.query,
             reasons: refinement.decision.reasons,
@@ -718,6 +749,12 @@ class TaobaoShoppingAgentV1 {
           } : {
             triggered: false,
             status: "NOT_NEEDED",
+            refinement_status: "NOT_NEEDED",
+            refinement_attempted: false,
+            refinement_succeeded: false,
+            refinement_fallback_used: false,
+            refinement_error_code: null,
+            refinement_cause_code: null,
             first_query: selection.query || selection.slot.search_query,
             second_query: null,
             reasons: [],
@@ -767,6 +804,11 @@ class TaobaoShoppingAgentV1 {
         item.selection_tier === SELECTION_TIER.NORMAL).length,
       candidate_pool_homogeneity: selection.candidate_pool_homogeneity,
       top_candidate_quality: selection.top_candidate_quality,
+      refinement_status: selection.refinement.refinement_status,
+      refinement_attempted: selection.refinement.refinement_attempted,
+      refinement_succeeded: selection.refinement.refinement_succeeded,
+      refinement_fallback_used: selection.refinement.refinement_fallback_used,
+      refinement_error_code: selection.refinement.refinement_error_code,
       refinement: selection.refinement,
       final_candidate_pool: selection.final_candidate_pool.map((product) =>
         product.candidate_id),
@@ -1286,6 +1328,12 @@ function mergeSelectionRounds(first, second, {decision} = {}) {
     refinement: {
       triggered: true,
       status: "SUCCESS",
+      refinement_status: "SUCCESS",
+      refinement_attempted: true,
+      refinement_succeeded: true,
+      refinement_fallback_used: false,
+      refinement_error_code: null,
+      refinement_cause_code: null,
       first_query: first.query || first.slot.search_query,
       second_query: second.query,
       reasons: decision?.reasons || [],
