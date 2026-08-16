@@ -52,6 +52,10 @@ const {
   TaobaoShoppingAgentV1,
 } = require("./shopping_agent_v1");
 const {
+  integrateShoppingAgentMainChain,
+  shoppingAgentFeatureEnabled,
+} = require("./shopping_agent_main_chain");
+const {
   BLUEPRINT_ITEM_KEYS,
   applyBlueprintToRequirement,
   blueprintHasCoreItems,
@@ -369,6 +373,7 @@ const config = Object.freeze({
     readPositiveInteger(process.env.PRODUCT_VISUAL_VERIFICATION_TIMEOUT_MS, 20_000),
     20_000,
   ),
+  shoppingAgentV1Enabled: shoppingAgentFeatureEnabled(process.env),
   fallbackOnAiError: readBoolean(process.env.AI_FALLBACK_ON_ERROR, false),
   useProxy: proxyConfig.useProxy,
   aiProxyUrl: proxyConfig.proxyUrl,
@@ -4249,26 +4254,43 @@ async function buildOutfitResponseForRequest(
   outfitRequest,
   {deferProducts = false} = {},
 ) {
-  if (!deferProducts) {
-    return buildOutfitApiResponse(analysis, undefined, outfitRequest);
+  const effectiveDeferProducts = config.shoppingAgentV1Enabled || deferProducts;
+  let responsePayload;
+  if (!effectiveDeferProducts) {
+    responsePayload = await buildOutfitApiResponse(
+      analysis,
+      undefined,
+      outfitRequest,
+    );
+  } else {
+    const analysisGender = normalizeGender(analysis.gender);
+    const profileGender = normalizeGender(outfitRequest.gender);
+    const effectiveGender = profileGender !== "unisex"
+      ? profileGender
+      : analysisGender;
+    const looks = normalizeAnalysisLooks(analysis, outfitRequest, effectiveGender);
+    const products = looks.flatMap((look) => look.items);
+    responsePayload = finalizeOutfitResponseIntegrity({
+      ...analysis,
+      gender: effectiveGender,
+      looks,
+      products,
+      recommendations: {
+        ...analysis.recommendations,
+        products: [],
+      },
+    });
+    logFinalResponseIntegrity(responsePayload);
   }
-  const analysisGender = normalizeGender(analysis.gender);
-  const profileGender = normalizeGender(outfitRequest.gender);
-  const effectiveGender = profileGender !== "unisex" ? profileGender : analysisGender;
-  const looks = normalizeAnalysisLooks(analysis, outfitRequest, effectiveGender);
-  const products = looks.flatMap((look) => look.items);
-  const responsePayload = finalizeOutfitResponseIntegrity({
-    ...analysis,
-    gender: effectiveGender,
-    looks,
-    products,
-    recommendations: {
-      ...analysis.recommendations,
-      products: [],
-    },
+
+  return integrateShoppingAgentMainChain({
+    enabled: config.shoppingAgentV1Enabled,
+    agent: shoppingAgentV1,
+    basePayload: responsePayload,
+    outfitRequest,
+    analysis,
+    requestId: outfitRequest.requestId,
   });
-  logFinalResponseIntegrity(responsePayload);
-  return responsePayload;
 }
 
 function outfitRateLimiter(req, res, next) {

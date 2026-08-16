@@ -31,6 +31,9 @@ class OutfitAnalysis {
     this.outfitPlan,
     this.looks = const [],
     this.outfitPlans = const [],
+    this.shoppingAgentStatus = 'disabled',
+    this.shoppingAgentFirstFailureStage,
+    this.shoppingAgentRetryable = false,
   });
 
   factory OutfitAnalysis.fromJson(Map<String, dynamic> json) {
@@ -110,6 +113,21 @@ class OutfitAnalysis {
         ),
       ),
       outfitPlans: _readOutfitPlans(json['outfit_plans']),
+      shoppingAgentStatus: _readOptionalAliasedString(
+        json,
+        const ['shopping_agent_status', 'shoppingAgentStatus'],
+        fallback: 'disabled',
+      ),
+      shoppingAgentFirstFailureStage: _readOptionalAliasedString(
+        json,
+        const [
+          'shopping_agent_first_failure_stage',
+          'shoppingAgentFirstFailureStage',
+        ],
+        fallback: '',
+      ),
+      shoppingAgentRetryable:
+          json['shopping_agent_retryable'] as bool? ?? false,
     );
   }
 
@@ -207,17 +225,36 @@ class OutfitAnalysis {
       stylingStrategy: _readStylingStrategy(
         json['styling_strategy'] ?? json['stylingStrategy'],
       ),
-      recommendedProducts: productRecommendations.isEmpty
-          ? _readVisionProducts(json['products'])
-          : List<Product>.unmodifiable(
-              productRecommendations.map(
-                (recommendation) => recommendation.toProduct(),
-              ),
-            ),
+      recommendedProducts: json['shopping_agent_products'] is List
+          ? _readProducts(json['shopping_agent_products'])
+          : productRecommendations.isEmpty
+              ? _readVisionProducts(json['products'])
+              : List<Product>.unmodifiable(
+                  productRecommendations.map(
+                    (recommendation) => recommendation.toProduct(),
+                  ),
+                ),
       productRecommendations: productRecommendations,
       productRequirements: productRequirements,
       requestId: requestId,
+      outfitPlan: _readOutfitPlan(json['outfit_plan']),
       looks: outfitLooks,
+      outfitPlans: _readOutfitPlans(json['outfit_plans']),
+      shoppingAgentStatus: _readOptionalAliasedString(
+        json,
+        const ['shopping_agent_status', 'shoppingAgentStatus'],
+        fallback: 'disabled',
+      ),
+      shoppingAgentFirstFailureStage: _readOptionalAliasedString(
+        json,
+        const [
+          'shopping_agent_first_failure_stage',
+          'shoppingAgentFirstFailureStage',
+        ],
+        fallback: '',
+      ),
+      shoppingAgentRetryable:
+          json['shopping_agent_retryable'] as bool? ?? false,
     );
   }
 
@@ -242,8 +279,13 @@ class OutfitAnalysis {
   final OutfitPlan? outfitPlan;
   final List<OutfitLook> looks;
   final List<OutfitPlan> outfitPlans;
+  final String shoppingAgentStatus;
+  final String? shoppingAgentFirstFailureStage;
+  final bool shoppingAgentRetryable;
 
   bool get isMock => analysisMode == 'mock';
+  bool get hasShoppingAgentResult => shoppingAgentStatus == 'success';
+  bool get hasShoppingAgentFailure => shoppingAgentStatus == 'failed';
 
   OutfitAnalysis copyWith({
     String? bodyAnalysis,
@@ -267,6 +309,9 @@ class OutfitAnalysis {
     OutfitPlan? outfitPlan,
     List<OutfitLook>? looks,
     List<OutfitPlan>? outfitPlans,
+    String? shoppingAgentStatus,
+    String? shoppingAgentFirstFailureStage,
+    bool? shoppingAgentRetryable,
   }) {
     return OutfitAnalysis(
       bodyAnalysis: bodyAnalysis ?? this.bodyAnalysis,
@@ -291,6 +336,11 @@ class OutfitAnalysis {
       outfitPlan: outfitPlan ?? this.outfitPlan,
       looks: looks ?? this.looks,
       outfitPlans: outfitPlans ?? this.outfitPlans,
+      shoppingAgentStatus: shoppingAgentStatus ?? this.shoppingAgentStatus,
+      shoppingAgentFirstFailureStage:
+          shoppingAgentFirstFailureStage ?? this.shoppingAgentFirstFailureStage,
+      shoppingAgentRetryable:
+          shoppingAgentRetryable ?? this.shoppingAgentRetryable,
     );
   }
 
@@ -323,6 +373,9 @@ class OutfitAnalysis {
       'looks': looks.map((look) => look.toJson()).toList(growable: false),
       'outfit_plans':
           outfitPlans.map((plan) => plan.toJson()).toList(growable: false),
+      'shopping_agent_status': shoppingAgentStatus,
+      'shopping_agent_first_failure_stage': shoppingAgentFirstFailureStage,
+      'shopping_agent_retryable': shoppingAgentRetryable,
     };
   }
 

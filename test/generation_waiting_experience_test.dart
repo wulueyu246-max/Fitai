@@ -148,6 +148,41 @@ void main() {
     expect(productService.calls, 1);
   });
 
+  testWidgets(
+      'Shopping Agent success displays candidate-backed Looks without legacy product call',
+      (tester) async {
+    final productService = _CountingProductService();
+    await _pumpPage(
+      tester,
+      repository: _ShoppingAgentOutfitRepository(success: true),
+      productService: productService,
+    );
+    await _selectFrontPhoto(tester);
+    await _tapGenerate(tester);
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(productService.calls, 0);
+    expect(find.text('真实商品 Look 1'), findsWidgets);
+    expect(find.text('真实商品 Look 2'), findsWidgets);
+  });
+
+  testWidgets(
+      'Shopping Agent failure never falls back to legacy product recommendation',
+      (tester) async {
+    final productService = _CountingProductService();
+    await _pumpPage(
+      tester,
+      repository: _ShoppingAgentOutfitRepository(success: false),
+      productService: productService,
+    );
+    await _selectFrontPhoto(tester);
+    await _tapGenerate(tester);
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(productService.calls, 0);
+    expect(find.text('本次智能选品未完成，请重新生成'), findsWidgets);
+  });
+
   testWidgets('AI timeout stops loading and allows retry', (tester) async {
     final repository = _TimeoutOutfitRepository();
     await _pumpPage(tester, repository: repository);
@@ -343,6 +378,95 @@ class _EmptyProductService extends _BaseProductService {
     calls += 1;
     return const [];
   }
+}
+
+class _CountingProductService extends _BaseProductService {
+  int calls = 0;
+
+  @override
+  Future<List<Product>> recommendProducts({
+    required OutfitAnalysis analysis,
+    required OutfitRequest request,
+  }) async {
+    calls += 1;
+    return MockProductDatabase.products;
+  }
+}
+
+class _ShoppingAgentOutfitRepository implements OutfitRepository {
+  _ShoppingAgentOutfitRepository({required this.success});
+
+  final bool success;
+
+  @override
+  Future<OutfitAnalysis> generateOutfit(OutfitRequest request) async {
+    if (!success) {
+      return _analysis.copyWith(
+        requestId: 'shopping-agent-failed',
+        gender: 'unisex',
+        shoppingAgentStatus: 'failed',
+        shoppingAgentFirstFailureStage: 'product_selector',
+        shoppingAgentRetryable: true,
+      );
+    }
+    final products = _shoppingAgentProducts();
+    OutfitPlan plan(int index) => OutfitPlan(
+          id: 'shopping-plan-$index',
+          title: '真实商品 Look $index',
+          top: products.firstWhere(
+            (product) => product.id == 'candidate-top-$index',
+          ),
+          bottom: products.firstWhere(
+            (product) => product.id == 'candidate-bottom-$index',
+          ),
+          shoes: products.firstWhere(
+            (product) => product.id == 'candidate-shoes-$index',
+          ),
+          reason: '真实候选组合',
+          createdTime: DateTime(2026, 8, 17),
+          gender: 'unisex',
+          requestId: 'shopping-agent-success',
+          lookId: 'shopping-look-$index',
+          matchScore: 80,
+        );
+    final plans = [plan(1), plan(2)];
+    return _analysis.copyWith(
+      requestId: 'shopping-agent-success',
+      gender: 'unisex',
+      shoppingAgentStatus: 'success',
+      recommendedProducts: products,
+      outfitPlan: plans.first,
+      outfitPlans: plans,
+    );
+  }
+
+  @override
+  void close() {}
+}
+
+List<Product> _shoppingAgentProducts() {
+  Product product(String category, int index) {
+    final source = MockProductDatabase.products.firstWhere(
+      (item) => item.wardrobeSlot == category,
+    );
+    return source.copyWith(
+      id: 'candidate-$category-$index',
+      sku: 'candidate-$category-$index',
+      name: '$category 真实商品 $index',
+      sourceProvider: 'taobao',
+      isMock: false,
+      requestId: 'shopping-agent-success',
+      lookId: 'shopping-look-$index',
+    );
+  }
+
+  return [
+    for (final index in [1, 2]) ...[
+      product(ProductCategory.top, index),
+      product(ProductCategory.bottom, index),
+      product(ProductCategory.shoes, index),
+    ],
+  ];
 }
 
 abstract class _BaseProductService implements ProductService {

@@ -889,15 +889,37 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       _selectedProductIds = {};
     });
 
+    if (analysis.hasShoppingAgentFailure) {
+      _viewModel.markShoppingAgentFailure(analysis.requestId ?? '');
+      setState(() {
+        _generationState = OutfitGenerationState.success;
+        _generationDetail = OutfitGenerationState.success.label;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('本次智能选品未完成，请重新生成')),
+      );
+      AppLogger.instance.warning(
+        'shopping_agent_main_chain_failed',
+        metadata: {
+          'requestId': analysis.requestId,
+          'firstFailureStage': analysis.shoppingAgentFirstFailureStage,
+          'retryable': analysis.shoppingAgentRetryable,
+        },
+      );
+      return;
+    }
+
     final productStopwatch = Stopwatch()..start();
     late final List<Product> products;
     try {
-      final catalogProducts = analysis.productRecommendations.isNotEmpty
+      final catalogProducts = analysis.hasShoppingAgentResult
           ? analysis.recommendedProducts
-          : await _productService.recommendProducts(
-              analysis: analysis,
-              request: request,
-            );
+          : analysis.productRecommendations.isNotEmpty
+              ? analysis.recommendedProducts
+              : await _productService.recommendProducts(
+                  analysis: analysis,
+                  request: request,
+                );
       final rawProducts = catalogProducts.isEmpty
           ? analysis.recommendedProducts
           : catalogProducts;
@@ -946,11 +968,18 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         }
       }
 
-      final attached = _viewModel.attachRecommendations(
-        products,
-        expectedRequestId: analysis.requestId ?? '',
-        expectedGender: analysis.gender,
-      );
+      final attached = analysis.hasShoppingAgentResult
+          ? _attachCurrentLooks(
+              products: products,
+              plans: analysis.outfitPlans,
+              analysisRequestId: analysis.requestId ?? '',
+              analysisGender: analysis.gender,
+            )
+          : _viewModel.attachRecommendations(
+              products,
+              expectedRequestId: analysis.requestId ?? '',
+              expectedGender: analysis.gender,
+            );
       if (!attached) {
         AppLogger.instance.warning(
           'stale_product_recommendations_ignored',
@@ -1023,6 +1052,18 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         userId: _session.account?.id ?? 'local-demo-user',
       ),
     );
+
+    if (analysis.hasShoppingAgentResult) {
+      AppLogger.instance.info(
+        'shopping_agent_products_attached',
+        metadata: {
+          'requestId': analysis.requestId,
+          'productCount': products.length,
+          'lookCount': analysis.outfitPlans.length,
+        },
+      );
+      return;
+    }
 
     try {
       final outfitPlans = await _productService.createOutfitPlans(

@@ -47,14 +47,17 @@ class OutfitViewModel extends ChangeNotifier {
       final effectiveRequestId = responseRequestId.isNotEmpty
           ? responseRequestId
           : 'client-look-${DateTime.now().microsecondsSinceEpoch}';
-      // AI product entries are non-purchasable suggestions. ProductService
-      // replaces them with catalog-backed products after matching succeeds.
+      final hasAgentProducts = response.hasShoppingAgentResult;
+      // Legacy AI product entries are non-purchasable suggestions. A successful
+      // Shopping Agent response is already backed by verified catalog items.
       _analysis = response.copyWith(
-        recommendedProducts: const [],
-        productRecommendations: const [],
+        recommendedProducts:
+            hasAgentProducts ? response.recommendedProducts : const [],
+        productRecommendations:
+            hasAgentProducts ? response.productRecommendations : const [],
         requestId: effectiveRequestId,
-        outfitPlan: null,
-        outfitPlans: const [],
+        outfitPlan: hasAgentProducts ? response.outfitPlan : null,
+        outfitPlans: hasAgentProducts ? response.outfitPlans : const [],
         looks: response.looks
             .map((look) => look.copyWith(requestId: effectiveRequestId))
             .toList(growable: false),
@@ -138,6 +141,14 @@ class OutfitViewModel extends ChangeNotifier {
             ? ProductLoadingState.fallback
             : ProductLoadingState.failed;
     _productErrorMessage = timeout ? '商品匹配响应较慢，请重新匹配商品' : '智能精选暂时不可用，点击重新匹配';
+    _notifyListeners();
+    return true;
+  }
+
+  bool markShoppingAgentFailure(String expectedRequestId) {
+    if (_analysis?.requestId?.trim() != expectedRequestId.trim()) return false;
+    _productState = ProductLoadingState.failed;
+    _productErrorMessage = '本次智能选品未完成，请重新生成';
     _notifyListeners();
     return true;
   }
