@@ -33,6 +33,13 @@ const MAX_VALID_CANDIDATES_PER_SLOT = 10;
 const MAX_SELECTED_CANDIDATES_PER_SLOT = 3;
 const MAX_REFINEMENT_ROUNDS = 1;
 const SELECTOR_RECOMMENDABLE_SCORE = 75;
+const PRICE_POSITION = Object.freeze({
+  UNKNOWN: "UNKNOWN",
+  BELOW_MEDIAN: "BELOW_MEDIAN",
+  TYPICAL: "TYPICAL",
+  UPPER_QUARTILE: "UPPER_QUARTILE",
+  OUTLIER_HIGH: "PRICE_OUTLIER_HIGH",
+});
 const DEFAULT_TAOBAO_SLOT_TIMEOUT_MS = 25_000;
 const DEFAULT_TAOBAO_RETRIEVAL_TIMEOUT_MS = 30_000;
 
@@ -220,6 +227,8 @@ const COMPOSER_SCORE_PROPERTIES = Object.freeze({
   body_proportion: {type: "number", minimum: 0, maximum: 100},
   occasion_fit: {type: "number", minimum: 0, maximum: 100},
   weather_fit: {type: "number", minimum: 0, maximum: 100},
+  value_coherence: {type: "number", minimum: 0, maximum: 100},
+  cross_look_distinctiveness: {type: "number", minimum: 0, maximum: 100},
   final_score: {type: "number", minimum: 0, maximum: 100},
 });
 
@@ -416,7 +425,7 @@ class TaobaoShoppingAgentV1 {
         product,
         gate: hardGateCandidate(product, slot, shoppingIntent),
       }));
-      const passed = assessments
+      const gatedCandidates = assessments
         .filter(({product, gate}) =>
           gate.status === "PASS" && !excludedIdentities.has(productIdentity(product)))
         .slice(0, MAX_VALID_CANDIDATES_PER_SLOT)
@@ -426,6 +435,12 @@ class TaobaoShoppingAgentV1 {
           candidate_gate_status: gate.status,
           candidate_gate_reasons: gate.reason_codes,
         }));
+      const priceContext = buildPriceContext(gatedCandidates);
+      const passed = gatedCandidates.map((candidate) => enrichCandidatePriceContext(
+        candidate,
+        priceContext,
+        shoppingIntent.budget,
+      ));
       const retrieval = {
         slot,
         slot_key: slotKey,
@@ -441,6 +456,7 @@ class TaobaoShoppingAgentV1 {
         valid_count: Number(result?.valid_count ?? rawProducts.length),
         candidate_gate_pass: assessments.filter(({gate}) => gate.status === "PASS").length,
         candidate_gate_fail: assessments.filter(({gate}) => gate.status === "FAIL").length,
+        price_context: priceContext,
         candidates: passed,
       };
       this.logger.info?.("shopping_agent_v1_candidate_gate", {
@@ -626,6 +642,7 @@ class TaobaoShoppingAgentV1 {
         top_candidate_quality: topSelectorQuality(normalized.assessments),
         assessments: normalized.assessments,
         final_candidate_pool: pool,
+        diversity: candidatePoolDiversity(pool, group.slot.category),
       };
       this.logger.info?.("shopping_agent_v1_product_selector", {
         request_id: requestId,
@@ -640,6 +657,8 @@ class TaobaoShoppingAgentV1 {
         refinement_query: selection.refinement_query,
         candidate_pool_homogeneity: selection.candidate_pool_homogeneity,
         top_candidate_quality: selection.top_candidate_quality,
+        price_context: selection.price_context,
+        diversity: selection.diversity,
         final_candidate_pool: pool.map((candidate) => candidate.candidate_id),
       });
       return selection;
@@ -796,6 +815,8 @@ class TaobaoShoppingAgentV1 {
       composer_candidate_ids: validatedLooks.composer_candidate_ids,
       invalid_candidate_reference: validatedLooks.invalid_candidate_reference,
       candidate_reference_audit: validatedLooks.candidate_reference_audit,
+      structural_duplicate: validatedLooks.structural_duplicate,
+      diversity_insufficient: validatedLooks.diversity_insufficient,
       final_look_count: validatedLooks.looks.length,
     });
     if (validatedLooks.looks.length < 2) {
@@ -803,6 +824,8 @@ class TaobaoShoppingAgentV1 {
         code: "SHOPPING_AGENT_INSUFFICIENT_LOOKS",
         details: {
           invalid_candidate_reference: validatedLooks.invalid_candidate_reference,
+          structural_duplicate: validatedLooks.structural_duplicate,
+          diversity_insufficient: validatedLooks.diversity_insufficient,
         },
       });
     }
@@ -819,6 +842,8 @@ class TaobaoShoppingAgentV1 {
         item.status === SELECTOR_STATUS.KEEP &&
         item.selection_tier === SELECTION_TIER.NORMAL).length,
       candidate_pool_homogeneity: selection.candidate_pool_homogeneity,
+      price_context: selection.price_context,
+      diversity: selection.diversity,
       top_candidate_quality: selection.top_candidate_quality,
       refinement_status: selection.refinement.refinement_status,
       refinement_attempted: selection.refinement.refinement_attempted,
@@ -853,6 +878,8 @@ class TaobaoShoppingAgentV1 {
       ])),
       composer_candidate_ids: validatedLooks.composer_candidate_ids,
       invalid_candidate_reference: validatedLooks.invalid_candidate_reference,
+      structural_duplicate: validatedLooks.structural_duplicate,
+      diversity_insufficient: validatedLooks.diversity_insufficient,
       candidate_reference_audit: validatedLooks.candidate_reference_audit,
       looks: validatedLooks.looks,
       final_look_count: validatedLooks.looks.length,
@@ -870,6 +897,7 @@ class TaobaoShoppingAgentV1 {
       composer_candidate_ids: response.composer_candidate_ids,
       invalid_candidate_reference: response.invalid_candidate_reference,
       final_look_count: response.final_look_count,
+      diversity_insufficient: response.diversity_insufficient,
       ai_call_count: response.ai_call_count,
       taobao_call_count: response.taobao_call_count,
       total_ms: response.timings.total_ms,
@@ -987,7 +1015,7 @@ function normalizeAgentInput(input = {}) {
     persona: normalizePlainObject(input.persona),
     occasion: text(input.occasion ?? input.scene, 120) || "日常外出",
     weather: normalizePlainObject(input.weather),
-    budget: normalizePlainObject(input.budget),
+    budget: normalizeBudgetContext(input.budget, userInput),
   });
 }
 
@@ -1057,8 +1085,27 @@ function normalizeShoppingIntent(value, input) {
       comfort: Object.freeze(stringList(value.weather_constraints?.comfort, 8)),
       safety: Object.freeze(stringList(value.weather_constraints?.safety, 8)),
     }),
+    budget: input.budget,
     slots: Object.freeze(CORE_CATEGORIES.map((category) => slotsByCategory.get(category))),
   });
+}
+
+function normalizeBudgetContext(value, userInput = "") {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const explicitItem = positiveBudgetNumber(source.item_budget ?? source.itemBudget);
+  const explicitOutfit = positiveBudgetNumber(source.outfit_budget ?? source.outfitBudget);
+  const textValue = String(userInput || "");
+  const itemMatch = textValue.match(/(?:单件|每件)[^\d]{0,8}(\d{2,6}(?:\.\d{1,2})?)/);
+  const outfitMatch = textValue.match(/(?:整套|全套|总预算|预算)[^\d]{0,8}(\d{2,6}(?:\.\d{1,2})?)/);
+  return Object.freeze({
+    item_budget: explicitItem ?? positiveBudgetNumber(itemMatch?.[1]),
+    outfit_budget: explicitOutfit ?? positiveBudgetNumber(outfitMatch?.[1]),
+  });
+}
+
+function positiveBudgetNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? roundPrice(number) : null;
 }
 
 function normalizeSearchQuery(value, gender, category) {
@@ -1266,21 +1313,169 @@ function validateProductSelection(payload, candidates, {
 
 function selectFinalCandidatePool(candidates, assessments) {
   const byId = new Map(candidates.map((candidate) => [candidate.candidate_id, candidate]));
-  const order = (status, tier) => assessments
-    .filter((item) => item.status === status && (!tier || item.selection_tier === tier))
-    .sort((left, right) => selectorQualityScore(right) - selectorQualityScore(left));
+  const evaluated = assessments.map((assessment) => evaluateCandidateValue(
+    byId.get(assessment.candidate_id),
+    assessment,
+  ));
+  const order = (status, tier) => evaluated
+    .filter((item) => item.status === status && (!tier || item.effective_tier === tier))
+    .sort((left, right) => right.value_adjusted_score - left.value_adjusted_score);
   return [
     ...order(SELECTOR_STATUS.KEEP, SELECTION_TIER.HIGH),
     ...order(SELECTOR_STATUS.KEEP, SELECTION_TIER.NORMAL),
     ...order(SELECTOR_STATUS.UNCERTAIN),
-  ].slice(0, MAX_SELECTED_CANDIDATES_PER_SLOT).map((assessment) => ({
-    ...byId.get(assessment.candidate_id),
-    selector_status: assessment.status,
-    selection_tier: assessment.selection_tier,
-    selector_quality_score: selectorQualityScore(assessment),
-    selector_scores: assessment.scores,
-    selector_reason_codes: assessment.reason_codes,
+  ].slice(0, MAX_SELECTED_CANDIDATES_PER_SLOT).map((evaluatedItem) => ({
+    ...byId.get(evaluatedItem.assessment.candidate_id),
+    selector_status: evaluatedItem.status,
+    selection_tier: evaluatedItem.effective_tier,
+    selector_quality_score: evaluatedItem.value_adjusted_score,
+    selector_raw_quality_score: evaluatedItem.raw_quality_score,
+    selector_scores: Object.freeze({
+      ...evaluatedItem.assessment.scores,
+      outfit_potential: evaluatedItem.effective_outfit_potential,
+    }),
+    selector_raw_scores: evaluatedItem.assessment.scores,
+    selector_reason_codes: evaluatedItem.assessment.reason_codes,
+    value_reasonableness: evaluatedItem.value_reasonableness,
+    value_reason_codes: evaluatedItem.value_reason_codes,
+    value_adjustment: evaluatedItem.value_adjustment,
+    variation_axes: candidateVariationAxes(
+      byId.get(evaluatedItem.assessment.candidate_id),
+    ),
   }));
+}
+
+function buildPriceContext(candidates) {
+  const prices = candidates.map((candidate) => Number(candidate?.price))
+    .filter((price) => Number.isFinite(price) && price > 0)
+    .sort((left, right) => left - right);
+  if (prices.length === 0) {
+    return Object.freeze({
+      min_price: null,
+      median_price: null,
+      p75_price: null,
+      max_price: null,
+      observed_count: 0,
+    });
+  }
+  return Object.freeze({
+    min_price: roundPrice(prices[0]),
+    median_price: roundPrice(percentile(prices, 0.5)),
+    p75_price: roundPrice(percentile(prices, 0.75)),
+    max_price: roundPrice(prices.at(-1)),
+    observed_count: prices.length,
+  });
+}
+
+function enrichCandidatePriceContext(candidate, priceContext, budget = {}) {
+  const price = Number(candidate?.price);
+  const position = pricePosition(price, priceContext);
+  const withinExplicitItemBudget = Number.isFinite(budget?.item_budget) &&
+    price <= budget.item_budget;
+  let valueReasonableness = 72;
+  const reasonCodes = [];
+  if (!Number.isFinite(price) || price <= 0) {
+    valueReasonableness = 55;
+    reasonCodes.push("PRICE_EVIDENCE_MISSING");
+  } else if (position === PRICE_POSITION.OUTLIER_HIGH) {
+    reasonCodes.push("PRICE_OUTLIER_HIGH");
+    if (withinExplicitItemBudget) {
+      valueReasonableness = 72;
+      reasonCodes.push("WITHIN_EXPLICIT_ITEM_BUDGET");
+    } else {
+      valueReasonableness = 42;
+    }
+  } else if (withinExplicitItemBudget) {
+    valueReasonableness = 78;
+    reasonCodes.push("WITHIN_EXPLICIT_ITEM_BUDGET");
+  }
+  return Object.freeze({
+    ...candidate,
+    price_context: priceContext,
+    price_position: position,
+    value_reasonableness: valueReasonableness,
+    value_reason_codes: Object.freeze(reasonCodes),
+    explicit_budget: budget,
+  });
+}
+
+function evaluateCandidateValue(candidate, assessment) {
+  const rawQualityScore = selectorQualityScore(assessment);
+  const reasonCodes = new Set(candidate?.value_reason_codes || []);
+  let valueReasonableness = Number(candidate?.value_reasonableness ?? 60);
+  let valueAdjustment = 0;
+  let effectiveTier = assessment.selection_tier;
+  if (candidate?.price_position === PRICE_POSITION.OUTLIER_HIGH &&
+      !reasonCodes.has("WITHIN_EXPLICIT_ITEM_BUDGET")) {
+    if (hasExceptionalAestheticValue(assessment)) {
+      valueReasonableness = Math.max(valueReasonableness, 64);
+      reasonCodes.add("PRICE_PREMIUM_JUSTIFIED_BY_SELECTION_EVIDENCE");
+      valueAdjustment = -4;
+    } else {
+      valueReasonableness = Math.min(valueReasonableness, 42);
+      reasonCodes.add("PRICE_PREMIUM_NOT_JUSTIFIED");
+      valueAdjustment = -18;
+      if (effectiveTier === SELECTION_TIER.HIGH) effectiveTier = SELECTION_TIER.NORMAL;
+    }
+  }
+  return Object.freeze({
+    assessment,
+    status: assessment.status,
+    effective_tier: effectiveTier,
+    raw_quality_score: rawQualityScore,
+    value_adjusted_score: roundScore(Math.max(0, rawQualityScore + valueAdjustment)),
+    value_reasonableness: roundScore(valueReasonableness),
+    value_reason_codes: Object.freeze([...reasonCodes]),
+    value_adjustment: valueAdjustment,
+    effective_outfit_potential: roundScore(Math.max(
+      0,
+      Number(assessment.scores?.outfit_potential || 0) + valueAdjustment,
+    )),
+  });
+}
+
+function hasExceptionalAestheticValue(assessment) {
+  const scores = assessment?.scores || {};
+  const proof = [
+    scores.aesthetic_fit,
+    scores.aesthetic_distinctiveness,
+    scores.quality_perception,
+    scores.styling_value,
+    scores.outfit_potential,
+  ].map(Number);
+  return proof.every(Number.isFinite) &&
+    proof.reduce((sum, score) => sum + score, 0) / proof.length >= 86 &&
+    Number(scores.aesthetic_distinctiveness) >= 82 &&
+    Number(scores.styling_value) >= 82;
+}
+
+function pricePosition(price, context) {
+  if (!Number.isFinite(price) || price <= 0 || !context?.observed_count) {
+    return PRICE_POSITION.UNKNOWN;
+  }
+  const highThreshold = Math.max(
+    Number(context.p75_price || 0) * 2,
+    Number(context.median_price || 0) * 2.5,
+  );
+  if (context.observed_count >= 4 && price > highThreshold) {
+    return PRICE_POSITION.OUTLIER_HIGH;
+  }
+  if (price < context.median_price) return PRICE_POSITION.BELOW_MEDIAN;
+  if (price <= context.p75_price) return PRICE_POSITION.TYPICAL;
+  return PRICE_POSITION.UPPER_QUARTILE;
+}
+
+function percentile(sortedValues, quantile) {
+  if (sortedValues.length === 1) return sortedValues[0];
+  const position = (sortedValues.length - 1) * quantile;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  const fraction = position - lower;
+  return sortedValues[lower] + (sortedValues[upper] - sortedValues[lower]) * fraction;
+}
+
+function roundPrice(value) {
+  return Math.round(Number(value) * 100) / 100;
 }
 
 function selectorQualityScore(assessment) {
@@ -1306,6 +1501,91 @@ function topSelectorQuality(assessments) {
     : 0;
 }
 
+function candidateVariationAxes(candidate) {
+  const evidence = candidateEvidence(candidate);
+  const category = normalizeProductCategory(candidate?.category || evidence);
+  return Object.freeze({
+    top_family: category === "top" ? matchAxis(evidence, [
+      ["polo", /polo/],
+      ["knit_top", /针织|毛衣/],
+      ["shirt", /衬衫|衬衣/],
+      ["tshirt", /t恤|tee|短袖t/i],
+      ["tank_or_camisole", /背心|吊带/],
+      ["jacket", /外套|夹克|西装/],
+      ["blouse", /罩衫|雪纺衫/],
+    ]) : null,
+    top_silhouette: category === "top" ? matchAxis(evidence, [
+      ["cropped", /短款|露脐/],
+      ["fitted", /修身|紧身|合身/],
+      ["relaxed", /宽松|廓形|oversi[sz]e/i],
+      ["longline", /长款/],
+    ]) : null,
+    bottom_family: category === "bottom" ? matchAxis(evidence, [
+      ["skirt", /半身裙|a字裙|包臀裙|百褶裙|短裙|长裙/],
+      ["shorts", /短裤/],
+      ["wide_leg_pants", /阔腿|喇叭裤/],
+      ["straight_pants", /直筒|烟管裤/],
+      ["jogger_pants", /束脚|运动裤/],
+      ["skinny_pants", /紧身裤|铅笔裤/],
+    ]) : null,
+    shoe_family: category === "shoes" ? matchAxis(evidence, [
+      ["ballet_flat", /芭蕾鞋|芭蕾平底/],
+      ["loafer", /乐福鞋/],
+      ["mary_jane", /玛丽珍/],
+      ["heel", /高跟|细跟|猫跟|尖头低跟/],
+      ["trainer", /德训鞋/],
+      ["sneaker", /运动鞋|跑鞋|板鞋|老爹鞋/],
+      ["sandal", /凉鞋|拖鞋/],
+      ["boot", /靴/],
+      ["flat", /平底鞋|浅口鞋/],
+    ]) : null,
+    color_story: matchAxis(evidence, [
+      ["light_neutral", /白|米|奶油|燕麦|杏/],
+      ["dark_neutral", /黑|深灰|炭灰|藏青/],
+      ["cool_color", /蓝|绿|薄荷|紫/],
+      ["warm_color", /红|粉|橙|黄|棕|咖/],
+      ["metallic", /银|金属/],
+    ]),
+    expression: matchAxis(evidence, [
+      ["feminine", /女性化|甜美|优雅|法式|蝴蝶结|蕾丝/],
+      ["clean", /极简|简约|利落|clean/i],
+      ["sporty", /运动|跑步|训练|机能/],
+      ["retro", /复古|vintage/i],
+    ]),
+    styling_mood: matchAxis(evidence, [
+      ["polished", /精致|通勤|气质/],
+      ["relaxed", /休闲|慵懒|宽松/],
+      ["playful", /可爱|甜|俏皮/],
+      ["active", /活力|运动|户外/],
+    ]),
+  });
+}
+
+function matchAxis(evidence, options) {
+  return options.find(([, pattern]) => pattern.test(evidence))?.[0] || "unknown";
+}
+
+function candidatePoolDiversity(pool, category) {
+  const axisKeys = category === "top"
+    ? ["top_family", "top_silhouette"]
+    : category === "bottom" ? ["bottom_family"] : ["shoe_family"];
+  const signatures = pool.map((candidate) => {
+    const axes = candidate.variation_axes || candidateVariationAxes(candidate);
+    return axisKeys.map((key) => axes[key]).join("|");
+  });
+  const known = signatures.filter((signature) => !signature.split("|").every((item) =>
+    item === "unknown" || item === "null"));
+  const uniqueKnown = new Set(known);
+  const evidenceSufficient = known.length >= 2;
+  return Object.freeze({
+    category,
+    axis_keys: Object.freeze(axisKeys),
+    unique_structure_count: uniqueKnown.size,
+    evidence_sufficient: evidenceSufficient,
+    diversity_insufficient: evidenceSufficient && uniqueKnown.size < 2,
+  });
+}
+
 function refinementDecision(selection) {
   const reasons = new Set(selection.refinement_reasons || []);
   if (selection.selector_keep < MAX_SELECTED_CANDIDATES_PER_SLOT) {
@@ -1317,6 +1597,7 @@ function refinementDecision(selection) {
   if (selection.candidate_pool_homogeneity === POOL_HOMOGENEITY.HIGH) {
     reasons.add("CANDIDATE_POOL_HOMOGENEITY_HIGH");
   }
+  if (selection.diversity?.diversity_insufficient) reasons.add("DIVERSITY_GAP");
   if (!selection.quality_sufficient) reasons.add("QUALITY_INSUFFICIENT");
   if (selection.refinement_needed) reasons.add("SELECTOR_REQUESTED_REFINEMENT");
   const needed = reasons.size > 0;
@@ -1333,7 +1614,13 @@ function refinementDecision(selection) {
 }
 
 function mergeSelectionRounds(first, second, {decision} = {}) {
-  const candidates = dedupeProducts([...first.candidates, ...second.candidates]);
+  const mergedCandidates = dedupeProducts([...first.candidates, ...second.candidates]);
+  const priceContext = buildPriceContext(mergedCandidates);
+  const candidates = mergedCandidates.map((candidate) => enrichCandidatePriceContext(
+    candidate,
+    priceContext,
+    candidate.explicit_budget,
+  ));
   const allowedIds = new Set(candidates.map((candidate) => candidate.candidate_id));
   const assessments = [...first.assessments, ...second.assessments]
     .filter((assessment) => allowedIds.has(assessment.candidate_id));
@@ -1353,6 +1640,8 @@ function mergeSelectionRounds(first, second, {decision} = {}) {
     candidate_pool_homogeneity: second.candidate_pool_homogeneity,
     top_candidate_quality: topSelectorQuality(assessments),
     final_candidate_pool: pool,
+    price_context: priceContext,
+    diversity: candidatePoolDiversity(pool, first.slot.category),
     refinement: {
       triggered: true,
       status: "SUCCESS",
@@ -1403,6 +1692,8 @@ function validateComposedLooks(payload, selections, {onScoreError} = {}) {
   ]));
   const invalidReferences = [];
   const signatures = new Set();
+  const structuralSignatures = new Set();
+  const structuralDuplicates = [];
   const validLooks = [];
   const composerIds = [];
   const referenceAudit = [];
@@ -1441,6 +1732,20 @@ function validateComposedLooks(payload, selections, {onScoreError} = {}) {
     const signature = CORE_CATEGORIES.map((category) => ids[category]).join("|");
     if (signatures.has(signature)) continue;
     signatures.add(signature);
+    const selectedCandidates = Object.fromEntries(CORE_CATEGORIES.map((category) => [
+      category,
+      pools.get(category).get(ids[category]),
+    ]));
+    const structuralSignature = lookStructuralSignature(selectedCandidates);
+    if (structuralSignature.comparable && structuralSignatures.has(structuralSignature.value)) {
+      structuralDuplicates.push(Object.freeze({
+        look_id: lookId,
+        error_code: "STRUCTURAL_DUPLICATE",
+        structural_signature: structuralSignature.value,
+      }));
+      continue;
+    }
+    if (structuralSignature.comparable) structuralSignatures.add(structuralSignature.value);
     composerIds.push(...Object.values(ids));
     validLooks.push({
       look_id: lookId,
@@ -1456,7 +1761,7 @@ function validateComposedLooks(payload, selections, {onScoreError} = {}) {
       ),
       items: Object.fromEntries(CORE_CATEGORIES.map((category) => [
         category,
-        publicCandidate(pools.get(category).get(ids[category])),
+        publicCandidate(selectedCandidates[category]),
       ])),
     });
   }
@@ -1465,7 +1770,37 @@ function validateComposedLooks(payload, selections, {onScoreError} = {}) {
     composer_candidate_ids: [...new Set(composerIds)],
     invalid_candidate_reference: invalidReferences,
     candidate_reference_audit: referenceAudit,
+    structural_duplicate: structuralDuplicates,
+    diversity_insufficient: validLooks.length < 2 || candidatePoolsCannotDiversify(selections),
   };
+}
+
+function candidatePoolsCannotDiversify(selections) {
+  const evidence = selections.map((selection) => selection.diversity ||
+    candidatePoolDiversity(selection.final_candidate_pool, selection.slot.category));
+  return evidence.every((item) => item.evidence_sufficient) &&
+    evidence.every((item) => item.diversity_insufficient);
+}
+
+function lookStructuralSignature(items) {
+  const top = items.top?.variation_axes || candidateVariationAxes(items.top);
+  const bottom = items.bottom?.variation_axes || candidateVariationAxes(items.bottom);
+  const shoes = items.shoes?.variation_axes || candidateVariationAxes(items.shoes);
+  const values = [
+    top.top_family,
+    top.top_silhouette,
+    bottom.bottom_family,
+    shoes.shoe_family,
+  ];
+  const knownMajorAxes = [
+    top.top_family !== "unknown" || top.top_silhouette !== "unknown",
+    bottom.bottom_family !== "unknown",
+    shoes.shoe_family !== "unknown",
+  ];
+  return Object.freeze({
+    value: values.join("|"),
+    comparable: knownMajorAxes.every(Boolean),
+  });
 }
 
 function buildPlannerMessages(input, fashionKnowledge) {
@@ -1501,7 +1836,7 @@ function buildSelectorMessages(shoppingIntent, group, {round = 1} = {}) {
   const content = [{
     type: "text",
     text: JSON.stringify({
-      instruction: `逐件查看随后主图；必须评估每个中性candidate_id一次。明确硬错误REJECT；证据不足UNCERTAIN。普通但没错的商品可以KEEP_NORMAL，但只有真正值得搭配师主动选用的商品才是KEEP_HIGH。评分必须严格校准：50以下明显不推荐；50-59勉强符合但审美差；60-69普通可穿；70-79好看可推荐；80-89明显有选品价值；90-94非常优秀；95以上极少使用。判断本轮是否有至少3件足以组成最终Look且有合理差异的商品。refinement_query始终给出一个不同于本轮、保留hard_constraints的简洁安全备选查询；只有refinement_needed=true时系统才会调用。`,
+      instruction: `逐件查看随后主图；必须评估每个中性candidate_id一次。明确硬错误REJECT；证据不足UNCERTAIN。普通但没错的商品可以KEEP_NORMAL，但只有真正值得搭配师主动选用的商品才是KEEP_HIGH。评分必须严格校准：50以下明显不推荐；50-59勉强符合但审美差；60-69普通可穿；70-79好看可推荐；80-89明显有选品价值；90-94非常优秀；95以上极少使用。price_context描述当前真实slot价格分布；PRICE_OUTLIER_HIGH不是硬拒绝，但若商品没有明显更强的设计、材质或审美价值，不得因品牌名给高价合理性，且outfit_potential与styling_value应反映购买价值。判断本轮是否有至少3件足以组成最终Look且有合理结构差异的商品。若候选在商品family或silhouette上同质，refinement_query应在同一overall_aesthetic与hard_constraints内补足DIVERSITY_GAP，而不是只换品牌或颜色。refinement_query始终给出一个不同于本轮、保留hard_constraints的简洁安全备选查询；只有refinement_needed=true时系统才会调用。`,
       selector_round: round,
       shopping_intent: {
         gender: shoppingIntent.gender,
@@ -1510,6 +1845,7 @@ function buildSelectorMessages(shoppingIntent, group, {round = 1} = {}) {
         body_strategy: shoppingIntent.body_strategy,
         occasion: shoppingIntent.occasion,
         weather_constraints: shoppingIntent.weather_constraints,
+        budget: shoppingIntent.budget,
       },
       slot: group.slot,
       current_query: group.query || group.slot.search_query,
@@ -1551,7 +1887,7 @@ function buildComposerMessages(shoppingIntent, selections) {
   const content = [{
     type: "text",
     text: JSON.stringify({
-      instruction: `只使用候选池中真实candidate_id组合2到3套完整Look。top_candidate_id只能从TOP_ALLOWED_IDS选择，bottom_candidate_id只能从BOTTOM_ALLOWED_IDS选择，shoes_candidate_id只能从SHOES_ALLOWED_IDS选择，禁止跨slot引用。生成前逐套自检三个candidate_id均属于对应allowed list。每套只输出look_id、top_candidate_id、bottom_candidate_id、shoes_candidate_id和scores，不得输出candidate对象。至少两套组合不能完全相同。不得创造新商品或新ID。优先使用selection_tier=HIGH，NORMAL仅作为补足。必须独立判断三件之间的体积与腰线、裤长和鞋量感、配色、材质关系、视觉主次、共同风格故事与辨识度；不能把单品分数直接平均成整套高分。评分严格校准：60为能穿但普通，70为好看，80为明显值得推荐，90为造型师级优秀，95以上极罕见。scores中的aesthetic_coherence、proportion_balance、color_harmony、material_harmony、visual_hierarchy、style_story、distinctiveness、persona_fit、body_proportion、occasion_fit、weather_fit、final_score必须全部是有限的JSON number，每个值必须大于等于0且小于等于100。正确示例为"final_score":78。禁止百分号字符串、"95/100"、null、文字评分、0到1或0到10归一化表达。特别检查身高与body_strategy下的比例风险。返回一个顶层JSON对象，业务结构为 {"looks":[...]}；不得返回JSON Schema、Markdown、解释文字或顶层数组。`,
+      instruction: `只使用候选池中真实candidate_id组合2到3套完整Look。top_candidate_id只能从TOP_ALLOWED_IDS选择，bottom_candidate_id只能从BOTTOM_ALLOWED_IDS选择，shoes_candidate_id只能从SHOES_ALLOWED_IDS选择，禁止跨slot引用。生成前逐套自检三个candidate_id均属于对应allowed list。每套只输出look_id、top_candidate_id、bottom_candidate_id、shoes_candidate_id和scores，不得输出candidate对象。多套Look必须共享overall_aesthetic，但至少在top family/silhouette、bottom family或shoe family中的一个主要结构轴真实变化；只换品牌、颜色或candidate_id仍是STRUCTURAL_DUPLICATE。不要为了不同而破坏单套审美，宁可只给2套。不得创造新商品或新ID。优先使用selection_tier=HIGH，NORMAL仅作为补足。必须独立判断三件之间的体积与腰线、裤长和鞋量感、配色、材质关系、视觉主次、共同风格故事与辨识度；不能把单品分数直接平均成整套高分。value_coherence必须判断单件价格与整套定位、价格离群商品是否真正提升造型、是否有审美相近但价值更合理的候选；品牌名本身不能证明高价合理。cross_look_distinctiveness必须判断与前面Look在主要结构轴上的真实差异。评分严格校准：60为能穿但普通，70为好看，80为明显值得推荐，90为造型师级优秀，95以上极罕见。scores中的aesthetic_coherence、proportion_balance、color_harmony、material_harmony、visual_hierarchy、style_story、distinctiveness、persona_fit、body_proportion、occasion_fit、weather_fit、value_coherence、cross_look_distinctiveness、final_score必须全部是有限的JSON number，每个值必须大于等于0且小于等于100。正确示例为"final_score":78。禁止百分号字符串、"95/100"、null、文字评分、0到1或0到10归一化表达。特别检查身高与body_strategy下的比例风险。返回一个顶层JSON对象，业务结构为 {"looks":[...]}；不得返回JSON Schema、Markdown、解释文字或顶层数组。`,
       shopping_intent: shoppingIntent,
       ...allowedIds,
       candidate_pools: Object.fromEntries(selections.map((selection) => [
@@ -1597,6 +1933,12 @@ function evidenceCandidate(candidate) {
     selection_tier: candidate.selection_tier,
     selector_quality_score: candidate.selector_quality_score,
     scores: candidate.selector_scores,
+    raw_scores: candidate.selector_raw_scores,
+    price_context: candidate.price_context,
+    price_position: candidate.price_position,
+    value_reasonableness: candidate.value_reasonableness,
+    value_reason_codes: candidate.value_reason_codes,
+    variation_axes: candidate.variation_axes || candidateVariationAxes(candidate),
     brand: text(candidate.brand, 120),
     shop: text(candidate.shop_name, 160),
   };
@@ -1620,7 +1962,14 @@ function publicCandidate(candidate) {
     selection_tier: candidate.selection_tier,
     selector_quality_score: candidate.selector_quality_score,
     selector_scores: candidate.selector_scores,
+    selector_raw_scores: candidate.selector_raw_scores,
     selector_reason_codes: candidate.selector_reason_codes,
+    price_context: candidate.price_context,
+    price_position: candidate.price_position,
+    value_reasonableness: candidate.value_reasonableness,
+    value_reason_codes: candidate.value_reason_codes,
+    value_adjustment: candidate.value_adjustment,
+    variation_axes: candidate.variation_axes || candidateVariationAxes(candidate),
   };
 }
 
@@ -2065,20 +2414,27 @@ module.exports = {
   MAX_REFINEMENT_ROUNDS,
   OUTFIT_COMPOSITION_SCHEMA,
   POOL_HOMOGENEITY,
+  PRICE_POSITION,
   PRODUCT_SELECTION_SCHEMA,
   SELECTION_TIER,
   SELECTOR_STATUS,
   SHOPPING_PLAN_SCHEMA,
   ShoppingAgentV1Error,
   TaobaoShoppingAgentV1,
+  buildPriceContext,
+  candidatePoolDiversity,
+  candidateVariationAxes,
+  enrichCandidatePriceContext,
   classifyTaobaoRetrievalError,
   explicitGenderConflict,
   hardGateCandidate,
   normalizeAgentInput,
+  normalizeBudgetContext,
   normalizeRefinementQuery,
   normalizeSearchQuery,
   normalizeShoppingIntent,
   parseAiJson,
+  refinementDecision,
   selectFinalCandidatePool,
   selectorQualityScore,
   validateComposedLooks,

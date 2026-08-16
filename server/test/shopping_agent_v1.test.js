@@ -9,15 +9,21 @@ const {
   MAX_REFINEMENT_ROUNDS,
   OUTFIT_COMPOSITION_SCHEMA,
   PRODUCT_SELECTION_SCHEMA,
+  PRICE_POSITION,
   SHOPPING_PLAN_SCHEMA,
   ShoppingAgentV1Error,
   TaobaoShoppingAgentV1,
+  buildPriceContext,
+  candidatePoolDiversity,
+  enrichCandidatePriceContext,
   classifyTaobaoRetrievalError,
   hardGateCandidate,
   normalizeAgentInput,
+  normalizeBudgetContext,
   normalizeRefinementQuery,
   normalizeShoppingIntent,
   parseAiJson,
+  refinementDecision,
   selectFinalCandidatePool,
   selectorQualityScore,
   validateComposedLooks,
@@ -147,6 +153,8 @@ function composerScores(value = 82) {
     body_proportion: value,
     occasion_fit: value,
     weather_fit: value,
+    value_coherence: value,
+    cross_look_distinctiveness: value,
     final_score: value,
   };
 }
@@ -267,6 +275,14 @@ test("Shopping Agent V1 schemas are strict objects", () => {
     OUTFIT_COMPOSITION_SCHEMA.properties.looks.items.properties.scores.properties,
     "final_score",
   ));
+  assert.ok(Object.hasOwn(
+    OUTFIT_COMPOSITION_SCHEMA.properties.looks.items.properties.scores.properties,
+    "value_coherence",
+  ));
+  assert.ok(Object.hasOwn(
+    OUTFIT_COMPOSITION_SCHEMA.properties.looks.items.properties.scores.properties,
+    "cross_look_distinctiveness",
+  ));
   assert.deepEqual(
     Object.keys(OUTFIT_COMPOSITION_SCHEMA.properties.looks.items.properties),
     [
@@ -315,6 +331,95 @@ test("Phase 2 score calibration and tiers prioritize exceptional KEEP candidates
     "candidate_001",
     "candidate_003",
   ]);
+});
+
+test("Phase 2.5 price context marks a robust high outlier without hard rejection", () => {
+  const products = [99, 159, 229, 1737].map((price, index) => ({
+    ...product("bottom", index + 1, `女款直筒牛仔裤${index + 1}`),
+    candidate_id: `candidate_00${index + 1}`,
+    price,
+  }));
+  const context = buildPriceContext(products);
+  const enriched = products.map((item) => enrichCandidatePriceContext(item, context, {}));
+
+  assert.deepEqual(context, {
+    min_price: 99,
+    median_price: 194,
+    p75_price: 606,
+    max_price: 1737,
+    observed_count: 4,
+  });
+  assert.equal(enriched.at(-1).price_position, PRICE_POSITION.OUTLIER_HIGH);
+  assert.ok(enriched.at(-1).value_reason_codes.includes("PRICE_OUTLIER_HIGH"));
+
+  const assessments = enriched.map((item, index) => ({
+    candidate_id: item.candidate_id,
+    status: "KEEP",
+    selection_tier: index === 3 ? "HIGH" : "NORMAL",
+    scores: selectorScores(index === 3 ? 72 : 76 - index),
+    reason_codes: [],
+  }));
+  const pool = selectFinalCandidatePool(enriched, assessments);
+  assert.equal(pool.length, 3);
+  assert.ok(!pool.some((item) => item.candidate_id === "candidate_004"));
+  const allCandidates = selectFinalCandidatePool(enriched, [
+    assessments[3],
+    assessments[0],
+    assessments[1],
+    assessments[2],
+  ]);
+  assert.ok(allCandidates.every((item) => item.candidate_id !== "candidate_004"));
+});
+
+test("Phase 2.5 keeps an exceptional price outlier but requires value evidence", () => {
+  const products = [99, 159, 229, 1737].map((price, index) => ({
+    ...product("bottom", index + 1, `女款直筒牛仔裤${index + 1}`),
+    candidate_id: `candidate_00${index + 1}`,
+    price,
+  }));
+  const context = buildPriceContext(products);
+  const enriched = products.map((item) => enrichCandidatePriceContext(item, context, {}));
+  const assessments = enriched.map((item, index) => ({
+    candidate_id: item.candidate_id,
+    status: "KEEP",
+    selection_tier: index === 3 ? "HIGH" : "NORMAL",
+    scores: selectorScores(index === 3 ? 90 : 72),
+    reason_codes: [],
+  }));
+  const pool = selectFinalCandidatePool(enriched, assessments);
+  const premium = pool.find((item) => item.candidate_id === "candidate_004");
+  assert.ok(premium);
+  assert.equal(premium.selection_tier, "HIGH");
+  assert.ok(premium.value_reason_codes.includes(
+    "PRICE_PREMIUM_JUSTIFIED_BY_SELECTION_EVIDENCE",
+  ));
+  assert.ok(premium.value_reasonableness >= 60);
+  assert.ok(premium.selector_scores.outfit_potential <
+    premium.selector_raw_scores.outfit_potential);
+});
+
+test("Phase 2.5 explicit high item budget avoids an automatic outlier penalty", () => {
+  const products = [99, 159, 229, 1737].map((price, index) => ({
+    ...product("bottom", index + 1, `女款直筒牛仔裤${index + 1}`),
+    candidate_id: `candidate_00${index + 1}`,
+    price,
+  }));
+  const budget = normalizeBudgetContext({item_budget: 2000}, "");
+  const context = buildPriceContext(products);
+  const enriched = products.map((item) => enrichCandidatePriceContext(item, context, budget));
+  const premium = enriched.at(-1);
+  const pool = selectFinalCandidatePool(enriched, enriched.map((item) => ({
+    candidate_id: item.candidate_id,
+    status: "KEEP",
+    selection_tier: item === premium ? "HIGH" : "NORMAL",
+    scores: selectorScores(item === premium ? 80 : 75),
+    reason_codes: [],
+  })));
+  const selectedPremium = pool.find((item) => item.candidate_id === premium.candidate_id);
+  assert.ok(selectedPremium);
+  assert.equal(selectedPremium.selection_tier, "HIGH");
+  assert.equal(selectedPremium.value_adjustment, 0);
+  assert.ok(selectedPremium.value_reason_codes.includes("WITHIN_EXPLICIT_ITEM_BUDGET"));
 });
 
 function aiResponse(content, finishReason = "stop") {
@@ -534,6 +639,25 @@ test("Shopping Intent preserves only flexible slot intent and one executable que
   assert.ok(intent.slots.every((slot) => !Object.hasOwn(slot, "product_type")));
 });
 
+test("Phase 2.5 carries explicit item and outfit budgets without inventing a cap", () => {
+  const explicit = normalizeAgentInput({
+    user_input: "出去玩",
+    gender: "female",
+    budget: {item_budget: 300, outfit_budget: 1000},
+  });
+  const intent = normalizeShoppingIntent(plan().shopping_intent, explicit);
+  assert.deepEqual(intent.budget, {item_budget: 300, outfit_budget: 1000});
+
+  const absent = normalizeAgentInput({user_input: "出去玩", gender: "female"});
+  assert.deepEqual(absent.budget, {item_budget: null, outfit_budget: null});
+
+  const natural = normalizeAgentInput({
+    user_input: "单件300左右，整套1000以内",
+    gender: "female",
+  });
+  assert.deepEqual(natural.budget, {item_budget: 300, outfit_budget: 1000});
+});
+
 test("refinement query validation uses canonical category and explicit gender", () => {
   const input = normalizeAgentInput({
     user_input: "我要出去玩，帮我搭配一套",
@@ -711,6 +835,106 @@ test("composer validates candidate references against each slot whitelist", () =
   assert.equal(mixed.looks.length, 2);
   assert.equal(mixed.invalid_candidate_reference.length, 1);
   assert.deepEqual(mixed.invalid_candidate_reference[0].categories, ["top"]);
+});
+
+test("Phase 2.5 rejects candidate swaps that are structural duplicates", () => {
+  const pools = [
+    {
+      slot: {category: "top"},
+      final_candidate_pool: [
+        {...product("top", 1, "女款短款修身针织衫"), candidate_id: "top_1"},
+        {...product("top", 2, "女款另一品牌短款修身针织衫"), candidate_id: "top_2"},
+      ],
+    },
+    {
+      slot: {category: "bottom"},
+      final_candidate_pool: [
+        {...product("bottom", 1, "女款高腰直筒牛仔裤"), candidate_id: "bottom_1"},
+        {...product("bottom", 2, "女款另一品牌高腰直筒牛仔裤"), candidate_id: "bottom_2"},
+      ],
+    },
+    {
+      slot: {category: "shoes"},
+      final_candidate_pool: [
+        {...product("shoes", 1, "女款灰色德训鞋"), candidate_id: "shoes_1"},
+        {...product("shoes", 2, "女款银色德训鞋"), candidate_id: "shoes_2"},
+      ],
+    },
+  ];
+  const looks = [1, 2].map((index) => ({
+    look_id: `look-${index}`,
+    top_candidate_id: `top_${index}`,
+    bottom_candidate_id: `bottom_${index}`,
+    shoes_candidate_id: `shoes_${index}`,
+    scores: composerScores(76),
+  }));
+  const result = validateComposedLooks({looks}, pools);
+  assert.equal(result.looks.length, 1);
+  assert.equal(result.structural_duplicate.length, 1);
+  assert.equal(result.structural_duplicate[0].error_code, "STRUCTURAL_DUPLICATE");
+  assert.equal(result.diversity_insufficient, true);
+});
+
+test("Phase 2.5 accepts a real bottom or shoe family variation in one aesthetic", () => {
+  const pools = [
+    {
+      slot: {category: "top"},
+      final_candidate_pool: [
+        {...product("top", 1, "女款短款修身针织衫"), candidate_id: "top_1"},
+        {...product("top", 2, "女款短款修身针织衫 米白"), candidate_id: "top_2"},
+      ],
+    },
+    {
+      slot: {category: "bottom"},
+      final_candidate_pool: [
+        {...product("bottom", 1, "女款高腰直筒牛仔裤"), candidate_id: "bottom_1"},
+        {...product("bottom", 2, "女款高腰A字半身裙"), candidate_id: "bottom_2"},
+      ],
+    },
+    {
+      slot: {category: "shoes"},
+      final_candidate_pool: [
+        {...product("shoes", 1, "女款灰色德训鞋"), candidate_id: "shoes_1"},
+        {...product("shoes", 2, "女款轻便乐福鞋"), candidate_id: "shoes_2"},
+      ],
+    },
+  ];
+  const looks = [1, 2].map((index) => ({
+    look_id: `look-${index}`,
+    top_candidate_id: `top_${index}`,
+    bottom_candidate_id: `bottom_${index}`,
+    shoes_candidate_id: `shoes_${index}`,
+    scores: composerScores(78),
+  }));
+  const result = validateComposedLooks({looks}, pools);
+  assert.equal(result.looks.length, 2);
+  assert.equal(result.structural_duplicate.length, 0);
+  assert.equal(result.diversity_insufficient, false);
+});
+
+test("Phase 2.5 reports a homogeneous candidate pool as a diversity gap", () => {
+  const pool = [1, 2, 3].map((index) => ({
+    ...product("shoes", index, `女款${index}号灰色德训鞋`),
+    candidate_id: `shoes_${index}`,
+  }));
+  const diversity = candidatePoolDiversity(pool, "shoes");
+  assert.equal(diversity.evidence_sufficient, true);
+  assert.equal(diversity.unique_structure_count, 1);
+  assert.equal(diversity.diversity_insufficient, true);
+  const decision = refinementDecision({
+    selector_keep: 3,
+    top_candidate_quality: 82,
+    candidate_pool_homogeneity: "LOW",
+    quality_sufficient: true,
+    refinement_needed: false,
+    refinement_reasons: [],
+    refinement_query: "女款 简洁芭蕾鞋",
+    query: "女款 灰色德训鞋",
+    slot: {category: "shoes", search_query: "女款 灰色德训鞋"},
+    diversity,
+  });
+  assert.equal(decision.needed, true);
+  assert.ok(decision.reasons.includes("DIVERSITY_GAP"));
 });
 
 test("Composer scores require raw finite JSON numbers from 0 through 100", () => {
