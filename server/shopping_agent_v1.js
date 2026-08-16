@@ -220,6 +220,7 @@ const COMPOSER_SCORE_PROPERTIES = Object.freeze({
   body_proportion: {type: "number", minimum: 0, maximum: 100},
   occasion_fit: {type: "number", minimum: 0, maximum: 100},
   weather_fit: {type: "number", minimum: 0, maximum: 100},
+  final_score: {type: "number", minimum: 0, maximum: 100},
 });
 
 const OUTFIT_COMPOSITION_SCHEMA = Object.freeze({
@@ -774,7 +775,14 @@ class TaobaoShoppingAgentV1 {
       metrics,
       messages: buildComposerMessages(shoppingIntent, selections),
     });
-    const validatedLooks = validateComposedLooks(composition, selections);
+    const validatedLooks = validateComposedLooks(composition, selections, {
+      onScoreError: (diagnostic) => {
+        this.logger.warn?.("COMPOSER_SCORE_INVALID", {
+          request_id: requestId,
+          ...diagnostic,
+        });
+      },
+    });
     for (const audit of validatedLooks.candidate_reference_audit) {
       if (audit.error_code === "COMPOSER_INVALID_CANDIDATE_REFERENCE") {
         this.logger.warn?.("COMPOSER_INVALID_CANDIDATE_REFERENCE", {
@@ -1384,7 +1392,7 @@ function selectorRoundMetric(selection) {
   });
 }
 
-function validateComposedLooks(payload, selections) {
+function validateComposedLooks(payload, selections, {onScoreError} = {}) {
   const looks = Array.isArray(payload?.looks) ? payload.looks : [];
   const pools = new Map(selections.map((selection) => [
     selection.slot.category,
@@ -1437,7 +1445,15 @@ function validateComposedLooks(payload, selections) {
     validLooks.push({
       look_id: lookId,
       candidate_ids: ids,
-      scores: normalizeScoreObject(look?.scores, Object.keys(COMPOSER_SCORE_PROPERTIES)),
+      scores: normalizeScoreObject(
+        look?.scores,
+        Object.keys(COMPOSER_SCORE_PROPERTIES),
+        {
+          requireRawNumber: true,
+          lookId,
+          onScoreError,
+        },
+      ),
       items: Object.fromEntries(CORE_CATEGORIES.map((category) => [
         category,
         publicCandidate(pools.get(category).get(ids[category])),
@@ -1535,7 +1551,7 @@ function buildComposerMessages(shoppingIntent, selections) {
   const content = [{
     type: "text",
     text: JSON.stringify({
-      instruction: `只使用候选池中真实candidate_id组合2到3套完整Look。top_candidate_id只能从TOP_ALLOWED_IDS选择，bottom_candidate_id只能从BOTTOM_ALLOWED_IDS选择，shoes_candidate_id只能从SHOES_ALLOWED_IDS选择，禁止跨slot引用。生成前逐套自检三个candidate_id均属于对应allowed list。每套只输出look_id、top_candidate_id、bottom_candidate_id、shoes_candidate_id和scores，不得输出candidate对象。至少两套组合不能完全相同。不得创造新商品或新ID。优先使用selection_tier=HIGH，NORMAL仅作为补足。必须独立判断三件之间的体积与腰线、裤长和鞋量感、配色、材质关系、视觉主次、共同风格故事与辨识度；不能把单品分数直接平均成整套高分。评分严格校准：60为能穿但普通，70为好看，80为明显值得推荐，90为造型师级优秀，95以上极罕见。特别检查身高与body_strategy下的比例风险。返回一个顶层JSON对象，业务结构为 {"looks":[...]}；不得返回JSON Schema、Markdown、解释文字或顶层数组。`,
+      instruction: `只使用候选池中真实candidate_id组合2到3套完整Look。top_candidate_id只能从TOP_ALLOWED_IDS选择，bottom_candidate_id只能从BOTTOM_ALLOWED_IDS选择，shoes_candidate_id只能从SHOES_ALLOWED_IDS选择，禁止跨slot引用。生成前逐套自检三个candidate_id均属于对应allowed list。每套只输出look_id、top_candidate_id、bottom_candidate_id、shoes_candidate_id和scores，不得输出candidate对象。至少两套组合不能完全相同。不得创造新商品或新ID。优先使用selection_tier=HIGH，NORMAL仅作为补足。必须独立判断三件之间的体积与腰线、裤长和鞋量感、配色、材质关系、视觉主次、共同风格故事与辨识度；不能把单品分数直接平均成整套高分。评分严格校准：60为能穿但普通，70为好看，80为明显值得推荐，90为造型师级优秀，95以上极罕见。scores中的aesthetic_coherence、proportion_balance、color_harmony、material_harmony、visual_hierarchy、style_story、distinctiveness、persona_fit、body_proportion、occasion_fit、weather_fit、final_score必须全部是有限的JSON number，每个值必须大于等于0且小于等于100。正确示例为"final_score":78。禁止百分号字符串、"95/100"、null、文字评分、0到1或0到10归一化表达。特别检查身高与body_strategy下的比例风险。返回一个顶层JSON对象，业务结构为 {"looks":[...]}；不得返回JSON Schema、Markdown、解释文字或顶层数组。`,
       shopping_intent: shoppingIntent,
       ...allowedIds,
       candidate_pools: Object.fromEntries(selections.map((selection) => [
@@ -1886,17 +1902,92 @@ function topLevelSchemaErrorKind(type) {
   return kinds[type] || "TOP_LEVEL_OTHER";
 }
 
-function normalizeScoreObject(value, keys) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw schemaError("score object is required");
-  }
-  return Object.fromEntries(keys.map((key) => {
-    const score = Number(value[key]);
-    if (!Number.isFinite(score) || score < 0 || score > 100) {
-      throw schemaError(`${key} must be between 0 and 100`);
+function normalizeScoreObject(value, keys, {
+  requireRawNumber = false,
+  lookId = null,
+  onScoreError,
+} = {}) {
+  if (!requireRawNumber) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw schemaError("score object is required");
     }
-    return [key, score];
+    return Object.fromEntries(keys.map((key) => {
+      const score = Number(value[key]);
+      if (!Number.isFinite(score) || score < 0 || score > 100) {
+        throw schemaError(`${key} must be between 0 and 100`);
+      }
+      return [key, score];
+    }));
+  }
+  const scoreObject = value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
+  return Object.fromEntries(keys.map((key) => {
+    const present = Object.hasOwn(scoreObject, key);
+    const rawValue = present ? scoreObject[key] : undefined;
+    let scoreErrorKind = null;
+    if (!present) {
+      scoreErrorKind = "MISSING_SCORE";
+    } else if (typeof rawValue !== "number") {
+      scoreErrorKind = "NON_NUMERIC_SCORE";
+    } else {
+      const score = rawValue;
+      if (!Number.isFinite(score)) {
+        scoreErrorKind = typeof score === "number"
+          ? "NON_FINITE_SCORE"
+          : "NON_NUMERIC_SCORE";
+      } else if (score < 0) {
+        scoreErrorKind = "SCORE_BELOW_ZERO";
+      } else if (score > 100) {
+        scoreErrorKind = "SCORE_ABOVE_100";
+      } else {
+        return [key, score];
+      }
+    }
+    const diagnostic = Object.freeze({
+      look_id: lookId,
+      score_field: key,
+      raw_type: scoreRawType(rawValue, present),
+      raw_value: safeRawScoreValue(rawValue, present),
+      score_error_kind: scoreErrorKind,
+    });
+    onScoreError?.(diagnostic);
+    throw scoreValidationError(diagnostic);
   }));
+}
+
+function scoreRawType(value, present) {
+  if (!present) return "missing";
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function safeRawScoreValue(value, present) {
+  if (!present) return null;
+  if (typeof value === "string") return value.slice(0, 120);
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "boolean" || value === null) return value;
+  return null;
+}
+
+function scoreValidationError(diagnostic) {
+  const messages = {
+    MISSING_SCORE: `${diagnostic.score_field} is required`,
+    NON_NUMERIC_SCORE: `${diagnostic.score_field} must be a JSON number`,
+    NON_FINITE_SCORE: `${diagnostic.score_field} must be finite`,
+    SCORE_BELOW_ZERO: `${diagnostic.score_field} must be at least 0`,
+    SCORE_ABOVE_100: `${diagnostic.score_field} must be at most 100`,
+  };
+  const error = schemaError(
+    messages[diagnostic.score_error_kind],
+    diagnostic.score_error_kind,
+  );
+  error.details = Object.freeze({
+    ...error.details,
+    ...diagnostic,
+  });
+  return error;
 }
 
 function neutralCandidateId(index) {

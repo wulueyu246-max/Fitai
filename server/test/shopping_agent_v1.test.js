@@ -147,6 +147,7 @@ function composerScores(value = 82) {
     body_proportion: value,
     occasion_fit: value,
     weather_fit: value,
+    final_score: value,
   };
 }
 
@@ -261,6 +262,10 @@ test("Shopping Agent V1 schemas are strict objects", () => {
   assert.ok(Object.hasOwn(
     OUTFIT_COMPOSITION_SCHEMA.properties.looks.items.properties.scores.properties,
     "visual_hierarchy",
+  ));
+  assert.ok(Object.hasOwn(
+    OUTFIT_COMPOSITION_SCHEMA.properties.looks.items.properties.scores.properties,
+    "final_score",
   ));
   assert.deepEqual(
     Object.keys(OUTFIT_COMPOSITION_SCHEMA.properties.looks.items.properties),
@@ -708,6 +713,82 @@ test("composer validates candidate references against each slot whitelist", () =
   assert.deepEqual(mixed.invalid_candidate_reference[0].categories, ["top"]);
 });
 
+test("Composer scores require raw finite JSON numbers from 0 through 100", () => {
+  const pools = ["top", "bottom", "shoes"].map((category) => ({
+    slot: {category},
+    final_candidate_pool: [{
+      ...product(category, 1, `${category} product`),
+      candidate_id: `${category}_1`,
+    }],
+  }));
+  const compose = (scores, onScoreError) => validateComposedLooks({looks: [{
+    look_id: "look-score-contract",
+    top_candidate_id: "top_1",
+    bottom_candidate_id: "bottom_1",
+    shoes_candidate_id: "shoes_1",
+    scores,
+  }]}, pools, {onScoreError});
+
+  const boundaryScores = composerScores(95);
+  boundaryScores.aesthetic_coherence = 0;
+  boundaryScores.final_score = 100;
+  const valid = compose(boundaryScores);
+  assert.equal(valid.looks[0].scores.aesthetic_coherence, 0);
+  assert.equal(valid.looks[0].scores.proportion_balance, 95);
+  assert.equal(valid.looks[0].scores.final_score, 100);
+
+  const invalidCases = [
+    {label: "numeric string", value: "95", kind: "NON_NUMERIC_SCORE", type: "string"},
+    {label: "ratio string", value: "95/100", kind: "NON_NUMERIC_SCORE", type: "string"},
+    {label: "percentage string", value: "95%", kind: "NON_NUMERIC_SCORE", type: "string"},
+    {label: "above range", value: 105, kind: "SCORE_ABOVE_100", type: "number"},
+    {label: "below range", value: -1, kind: "SCORE_BELOW_ZERO", type: "number"},
+    {label: "null", value: null, kind: "NON_NUMERIC_SCORE", type: "null"},
+    {label: "NaN", value: Number.NaN, kind: "NON_FINITE_SCORE", type: "number"},
+    {label: "Infinity", value: Number.POSITIVE_INFINITY, kind: "NON_FINITE_SCORE", type: "number"},
+  ];
+  for (const item of invalidCases) {
+    const scores = composerScores(80);
+    scores.aesthetic_coherence = item.value;
+    let diagnostic;
+    let error;
+    try {
+      compose(scores, (entry) => { diagnostic = entry; });
+    } catch (caught) {
+      error = caught;
+    }
+    assert.ok(error, item.label);
+    assert.equal(error.code, "SHOPPING_AGENT_SCHEMA_INVALID", item.label);
+    assert.equal(error.details.score_error_kind, item.kind, item.label);
+    assert.equal(error.details.look_id, "look-score-contract", item.label);
+    assert.equal(error.details.score_field, "aesthetic_coherence", item.label);
+    assert.equal(error.details.raw_type, item.type, item.label);
+    assert.deepEqual(diagnostic, {
+      look_id: "look-score-contract",
+      score_field: "aesthetic_coherence",
+      raw_type: item.type,
+      raw_value: Number.isNaN(item.value)
+        ? "NaN"
+        : item.value === Number.POSITIVE_INFINITY
+          ? "Infinity"
+          : item.value,
+      score_error_kind: item.kind,
+    }, item.label);
+  }
+
+  const missingScores = composerScores(80);
+  delete missingScores.aesthetic_coherence;
+  let missingDiagnostic;
+  assert.throws(
+    () => compose(missingScores, (entry) => { missingDiagnostic = entry; }),
+    (error) => error.code === "SHOPPING_AGENT_SCHEMA_INVALID" &&
+      error.details.score_error_kind === "MISSING_SCORE" &&
+      error.details.raw_type === "missing" &&
+      error.details.raw_value === null,
+  );
+  assert.equal(missingDiagnostic.score_error_kind, "MISSING_SCORE");
+});
+
 test("Composer wrapper keeps candidate references and minimum Look count strict", async () => {
   const wrappedAgent = new TaobaoShoppingAgentV1({
     client: new FakeAiClient({wrapComposer: true}),
@@ -805,6 +886,9 @@ test("minimal proof uses exactly five AI calls, three Taobao calls and real IDs"
   assert.ok(structuredCalls.every((call) => call.response_format.json_schema.strict === true));
   assert.ok(structuredCalls.every((call) => call.response_format.json_schema.schema));
   const composerInput = JSON.parse(composerCall.messages[1].content[0].text);
+  assert.match(composerInput.instruction, /JSON number/);
+  assert.match(composerInput.instruction, /"final_score":78/);
+  assert.match(composerInput.instruction, /0到1或0到10归一化表达/);
   for (const category of ["top", "bottom", "shoes"]) {
     const allowedIds = composerInput[`${category.toUpperCase()}_ALLOWED_IDS`];
     const candidates = composerInput.candidate_pools[category];
