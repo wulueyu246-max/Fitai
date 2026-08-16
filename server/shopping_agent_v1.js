@@ -244,7 +244,6 @@ const OUTFIT_COMPOSITION_SCHEMA = Object.freeze({
             properties: COMPOSER_SCORE_PROPERTIES,
             required: Object.keys(COMPOSER_SCORE_PROPERTIES),
           },
-          explanation: {type: "string"},
         },
         required: [
           "look_id",
@@ -252,7 +251,6 @@ const OUTFIT_COMPOSITION_SCHEMA = Object.freeze({
           "bottom_candidate_id",
           "shoes_candidate_id",
           "scores",
-          "explanation",
         ],
       },
     },
@@ -777,10 +775,19 @@ class TaobaoShoppingAgentV1 {
       messages: buildComposerMessages(shoppingIntent, selections),
     });
     const validatedLooks = validateComposedLooks(composition, selections);
+    for (const audit of validatedLooks.candidate_reference_audit) {
+      if (audit.error_code === "COMPOSER_INVALID_CANDIDATE_REFERENCE") {
+        this.logger.warn?.("COMPOSER_INVALID_CANDIDATE_REFERENCE", {
+          request_id: requestId,
+          ...audit,
+        });
+      }
+    }
     this.logger.info?.("shopping_agent_v1_composer", {
       request_id: requestId,
       composer_candidate_ids: validatedLooks.composer_candidate_ids,
       invalid_candidate_reference: validatedLooks.invalid_candidate_reference,
+      candidate_reference_audit: validatedLooks.candidate_reference_audit,
       final_look_count: validatedLooks.looks.length,
     });
     if (validatedLooks.looks.length < 2) {
@@ -838,6 +845,7 @@ class TaobaoShoppingAgentV1 {
       ])),
       composer_candidate_ids: validatedLooks.composer_candidate_ids,
       invalid_candidate_reference: validatedLooks.invalid_candidate_reference,
+      candidate_reference_audit: validatedLooks.candidate_reference_audit,
       looks: validatedLooks.looks,
       final_look_count: validatedLooks.looks.length,
       ai_call_count: metrics.ai_call_count,
@@ -1389,16 +1397,34 @@ function validateComposedLooks(payload, selections) {
   const signatures = new Set();
   const validLooks = [];
   const composerIds = [];
+  const referenceAudit = [];
   for (const [index, look] of looks.entries()) {
+    const lookId = text(look?.look_id, 80) || `look-${index + 1}`;
     const ids = {
       top: text(look?.top_candidate_id, 80),
       bottom: text(look?.bottom_candidate_id, 80),
       shoes: text(look?.shoes_candidate_id, 80),
     };
-    const invalid = CORE_CATEGORIES.filter((category) => !pools.get(category)?.has(ids[category]));
+    const validity = Object.fromEntries(CORE_CATEGORIES.map((category) => [
+      category,
+      pools.get(category)?.has(ids[category]) === true,
+    ]));
+    const invalid = CORE_CATEGORIES.filter((category) => !validity[category]);
+    referenceAudit.push({
+      look_id: lookId,
+      requested_top_id: ids.top,
+      requested_bottom_id: ids.bottom,
+      requested_shoes_id: ids.shoes,
+      top_id_valid: validity.top,
+      bottom_id_valid: validity.bottom,
+      shoes_id_valid: validity.shoes,
+      error_code: invalid.length > 0
+        ? "COMPOSER_INVALID_CANDIDATE_REFERENCE"
+        : null,
+    });
     if (invalid.length > 0) {
       invalidReferences.push({
-        look_id: text(look?.look_id, 80) || `look-${index + 1}`,
+        look_id: lookId,
         categories: invalid,
         candidate_ids: invalid.map((category) => ids[category]),
       });
@@ -1409,10 +1435,9 @@ function validateComposedLooks(payload, selections) {
     signatures.add(signature);
     composerIds.push(...Object.values(ids));
     validLooks.push({
-      look_id: text(look?.look_id, 80) || `look-${validLooks.length + 1}`,
+      look_id: lookId,
       candidate_ids: ids,
       scores: normalizeScoreObject(look?.scores, Object.keys(COMPOSER_SCORE_PROPERTIES)),
-      explanation: text(look?.explanation, 300),
       items: Object.fromEntries(CORE_CATEGORIES.map((category) => [
         category,
         publicCandidate(pools.get(category).get(ids[category])),
@@ -1423,6 +1448,7 @@ function validateComposedLooks(payload, selections) {
     looks: validLooks.slice(0, 3),
     composer_candidate_ids: [...new Set(composerIds)],
     invalid_candidate_reference: invalidReferences,
+    candidate_reference_audit: referenceAudit,
   };
 }
 
@@ -1499,11 +1525,19 @@ function buildSelectorMessages(shoppingIntent, group, {round = 1} = {}) {
 }
 
 function buildComposerMessages(shoppingIntent, selections) {
+  const allowedIds = Object.fromEntries(CORE_CATEGORIES.map((category) => {
+    const selection = selections.find((item) => item.slot.category === category);
+    return [
+      `${category.toUpperCase()}_ALLOWED_IDS`,
+      (selection?.final_candidate_pool || []).map((candidate) => candidate.candidate_id),
+    ];
+  }));
   const content = [{
     type: "text",
     text: JSON.stringify({
-      instruction: `只使用候选池中真实candidate_id组合2到3套完整Look。每套必须含top、bottom、shoes；至少两套组合不能完全相同。不得创造新商品或新ID。优先使用selection_tier=HIGH，NORMAL仅作为补足。必须独立判断三件之间的体积与腰线、裤长和鞋量感、配色、材质关系、视觉主次、共同风格故事与辨识度；不能把单品分数直接平均成整套高分。评分严格校准：60为能穿但普通，70为好看，80为明显值得推荐，90为造型师级优秀，95以上极罕见。特别检查身高与body_strategy下的比例风险。返回一个顶层JSON对象，业务结构为 {"looks":[...]}；不得返回JSON Schema、Markdown、解释文字或顶层数组。`,
+      instruction: `只使用候选池中真实candidate_id组合2到3套完整Look。top_candidate_id只能从TOP_ALLOWED_IDS选择，bottom_candidate_id只能从BOTTOM_ALLOWED_IDS选择，shoes_candidate_id只能从SHOES_ALLOWED_IDS选择，禁止跨slot引用。生成前逐套自检三个candidate_id均属于对应allowed list。每套只输出look_id、top_candidate_id、bottom_candidate_id、shoes_candidate_id和scores，不得输出candidate对象。至少两套组合不能完全相同。不得创造新商品或新ID。优先使用selection_tier=HIGH，NORMAL仅作为补足。必须独立判断三件之间的体积与腰线、裤长和鞋量感、配色、材质关系、视觉主次、共同风格故事与辨识度；不能把单品分数直接平均成整套高分。评分严格校准：60为能穿但普通，70为好看，80为明显值得推荐，90为造型师级优秀，95以上极罕见。特别检查身高与body_strategy下的比例风险。返回一个顶层JSON对象，业务结构为 {"looks":[...]}；不得返回JSON Schema、Markdown、解释文字或顶层数组。`,
       shopping_intent: shoppingIntent,
+      ...allowedIds,
       candidate_pools: Object.fromEntries(selections.map((selection) => [
         selection.slot.category,
         selection.final_candidate_pool.map(evidenceCandidate),
@@ -1530,7 +1564,7 @@ function buildComposerMessages(shoppingIntent, selections) {
   return [
     {
       role: "system",
-      content: "你是基于真实商品池工作的资深造型师。商品池是唯一可用库存。整套评分必须来自商品之间的真实视觉关系，普通基础款组合不得虚高。只返回一个包含looks数组的JSON对象；禁止返回JSON Schema、Markdown、额外解释或顶层数组，禁止幻想商品。",
+      content: "你是基于真实商品池工作的资深造型师。商品池是唯一可用库存，三个slot的allowed ID list是不可跨越的白名单。整套评分必须来自商品之间的真实视觉关系，普通基础款组合不得虚高。只返回一个包含looks数组的JSON对象，每套Look只含look_id、三个slot的candidate_id和scores；禁止返回JSON Schema、Markdown、额外解释、candidate对象或顶层数组，禁止幻想商品。",
     },
     {role: "user", content},
   ];
@@ -1540,10 +1574,13 @@ function evidenceCandidate(candidate) {
   return {
     candidate_id: candidate.candidate_id,
     title: text(candidate.title, 300),
-    main_image: text(candidate.image_url, 1000),
+    image: text(candidate.image_url, 1000),
     price: Number(candidate.price || 0),
     sales: text(candidate.sales, 80),
     category: normalizeProductCategory(candidate.category),
+    selection_tier: candidate.selection_tier,
+    selector_quality_score: candidate.selector_quality_score,
+    scores: candidate.selector_scores,
     brand: text(candidate.brand, 120),
     shop: text(candidate.shop_name, 160),
   };
@@ -1811,7 +1848,7 @@ function isComposerLookObject(value) {
       Object.keys(value).some((key) => !allowedKeys.includes(key))) {
     return false;
   }
-  if (!["look_id", "top_candidate_id", "bottom_candidate_id", "shoes_candidate_id", "explanation"]
+  if (!["look_id", "top_candidate_id", "bottom_candidate_id", "shoes_candidate_id"]
     .every((key) => typeof value[key] === "string" && value[key].trim())) {
     return false;
   }

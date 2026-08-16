@@ -222,7 +222,6 @@ class FakeAiClient {
           bottom_candidate_id: pools.bottom[index].candidate_id,
           shoes_candidate_id: pools.shoes[index].candidate_id,
           scores: composerScores(82),
-          explanation: "真实候选形成的完整外出搭配",
         })),
       };
       if (this.duplicateComposerCombination && payload.looks.length > 1) {
@@ -263,6 +262,16 @@ test("Shopping Agent V1 schemas are strict objects", () => {
     OUTFIT_COMPOSITION_SCHEMA.properties.looks.items.properties.scores.properties,
     "visual_hierarchy",
   ));
+  assert.deepEqual(
+    Object.keys(OUTFIT_COMPOSITION_SCHEMA.properties.looks.items.properties),
+    [
+      "look_id",
+      "top_candidate_id",
+      "bottom_candidate_id",
+      "shoes_candidate_id",
+      "scores",
+    ],
+  );
   assert.equal(MAX_REFINEMENT_ROUNDS, 1);
 });
 
@@ -401,7 +410,6 @@ test("Composer parser canonicalizes only the three supported response structures
     bottom_candidate_id: `bottom-${index}`,
     shoes_candidate_id: `shoes-${index}`,
     scores: composerScores(80),
-    explanation: `look ${index}`,
   }));
   const payload = {looks};
   const diagnostics = [];
@@ -635,11 +643,69 @@ test("composer rejects candidate IDs outside the real candidate pools", () => {
     bottom_candidate_id: "candidate_002",
     shoes_candidate_id: "candidate_003",
     scores: composerScores(90),
-    explanation: "invalid",
   }]}, pools);
   assert.equal(result.looks.length, 0);
   assert.equal(result.invalid_candidate_reference.length, 1);
   assert.deepEqual(result.invalid_candidate_reference[0].categories, ["top"]);
+  assert.deepEqual(result.candidate_reference_audit[0], {
+    look_id: "look-1",
+    requested_top_id: "candidate_999",
+    requested_bottom_id: "candidate_002",
+    requested_shoes_id: "candidate_003",
+    top_id_valid: false,
+    bottom_id_valid: true,
+    shoes_id_valid: true,
+    error_code: "COMPOSER_INVALID_CANDIDATE_REFERENCE",
+  });
+});
+
+test("composer validates candidate references against each slot whitelist", () => {
+  const pools = ["top", "bottom", "shoes"].map((category) => ({
+    slot: {category},
+    final_candidate_pool: [1, 2, 3].map((index) => ({
+      ...product(category, index, `${category} product ${index}`),
+      candidate_id: `${category}_${index}`,
+    })),
+  }));
+  const look = (lookId, topId, bottomId, shoesId) => ({
+    look_id: lookId,
+    top_candidate_id: topId,
+    bottom_candidate_id: bottomId,
+    shoes_candidate_id: shoesId,
+    scores: composerScores(82),
+  });
+
+  const valid = validateComposedLooks({looks: [
+    look("look-1", "top_1", "bottom_1", "shoes_1"),
+    look("look-2", "top_2", "bottom_2", "shoes_2"),
+    look("look-3", "top_3", "bottom_3", "shoes_3"),
+  ]}, pools);
+  assert.equal(valid.looks.length, 3);
+  assert.equal(valid.invalid_candidate_reference.length, 0);
+  assert.ok(valid.candidate_reference_audit.every((item) =>
+    item.top_id_valid && item.bottom_id_valid && item.shoes_id_valid));
+
+  const crossSlot = validateComposedLooks({looks: [
+    look("top-cross-slot", "bottom_1", "bottom_1", "shoes_1"),
+    look("bottom-missing", "top_1", "candidate_missing", "shoes_1"),
+    look("shoes-cross-slot", "top_1", "bottom_1", "top_1"),
+  ]}, pools);
+  assert.equal(crossSlot.looks.length, 0);
+  assert.deepEqual(
+    crossSlot.invalid_candidate_reference.map((item) => item.categories),
+    [["top"], ["bottom"], ["shoes"]],
+  );
+  assert.ok(crossSlot.candidate_reference_audit.every((item) =>
+    item.error_code === "COMPOSER_INVALID_CANDIDATE_REFERENCE"));
+
+  const mixed = validateComposedLooks({looks: [
+    look("look-1", "top_1", "bottom_1", "shoes_1"),
+    look("bad-look", "bottom_2", "bottom_2", "shoes_2"),
+    look("look-3", "top_3", "bottom_3", "shoes_3"),
+  ]}, pools);
+  assert.equal(mixed.looks.length, 2);
+  assert.equal(mixed.invalid_candidate_reference.length, 1);
+  assert.deepEqual(mixed.invalid_candidate_reference[0].categories, ["top"]);
 });
 
 test("Composer wrapper keeps candidate references and minimum Look count strict", async () => {
@@ -738,6 +804,17 @@ test("minimal proof uses exactly five AI calls, three Taobao calls and real IDs"
   assert.equal(structuredCalls.length, 4);
   assert.ok(structuredCalls.every((call) => call.response_format.json_schema.strict === true));
   assert.ok(structuredCalls.every((call) => call.response_format.json_schema.schema));
+  const composerInput = JSON.parse(composerCall.messages[1].content[0].text);
+  for (const category of ["top", "bottom", "shoes"]) {
+    const allowedIds = composerInput[`${category.toUpperCase()}_ALLOWED_IDS`];
+    const candidates = composerInput.candidate_pools[category];
+    assert.deepEqual(allowedIds, candidates.map((candidate) => candidate.candidate_id));
+    assert.ok(candidates.every((candidate) =>
+      typeof candidate.title === "string" &&
+      typeof candidate.image === "string" &&
+      Number.isFinite(candidate.price) &&
+      candidate.scores && typeof candidate.scores === "object"));
+  }
   assert.equal(result.state, "success");
   assert.equal(provider.calls.length, 3);
   assert.equal(result.final_look_count, 2);
@@ -748,6 +825,35 @@ test("minimal proof uses exactly five AI calls, three Taobao calls and real IDs"
   assert.ok(result.looks.every((look) =>
     Object.values(look.items).every((item) => item.source === "taobao" && item.is_mock === false)));
   assert.ok(result.slot_metrics.every((slot) => slot.candidate_gate_fail >= 2));
+});
+
+test("one invalid Composer reference keeps two valid Looks and logs safe ID audit", async () => {
+  const logs = [];
+  const agent = new TaobaoShoppingAgentV1({
+    client: new FakeAiClient({composerLookCount: 3, foreignComposerId: true}),
+    model: "qwen3.7-plus",
+    productProvider: new FakeProvider(),
+    logger: {
+      info(event, details) { logs.push({event, details}); },
+      warn(event, details) { logs.push({event, details}); },
+    },
+  });
+
+  const result = await agent.run({
+    user_input: "我要出去玩，帮我搭配一套",
+    authoritative_gender: "female",
+  });
+  assert.equal(result.final_look_count, 2);
+  assert.equal(result.invalid_candidate_reference.length, 1);
+  assert.equal(result.candidate_reference_audit.length, 3);
+  const invalidLog = logs.find((item) =>
+    item.event === "COMPOSER_INVALID_CANDIDATE_REFERENCE");
+  assert.ok(invalidLog);
+  assert.equal(invalidLog.details.requested_top_id, "candidate_999");
+  assert.equal(invalidLog.details.top_id_valid, false);
+  assert.equal(invalidLog.details.bottom_id_valid, true);
+  assert.equal(invalidLog.details.shoes_id_valid, true);
+  assert.equal(invalidLog.details.error_code, "COMPOSER_INVALID_CANDIDATE_REFERENCE");
 });
 
 test("Phase 2 refines only an insufficient homogeneous slot once and preserves invariants", async () => {
