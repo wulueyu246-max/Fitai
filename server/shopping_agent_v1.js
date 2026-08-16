@@ -771,6 +771,7 @@ class TaobaoShoppingAgentV1 {
       phase: "real_product_outfit_composer",
       schemaName: "fitai_real_product_outfit_composer",
       schema: OUTFIT_COMPOSITION_SCHEMA,
+      responseFormatType: "json_object",
       timeoutMs: this.composerTimeoutMs,
       metrics,
       messages: buildComposerMessages(shoppingIntent, selections),
@@ -877,20 +878,31 @@ class TaobaoShoppingAgentV1 {
     };
   }
 
-  async #aiCall({phase, schemaName, schema, timeoutMs, metrics, messages}) {
+  async #aiCall({
+    phase,
+    schemaName,
+    schema,
+    responseFormatType = "json_schema",
+    timeoutMs,
+    metrics,
+    messages,
+  }) {
     const startedAt = Date.now();
     metrics.ai_call_count += 1;
-    try {
-      const response = await this.client.chat.completions.create({
-        model: this.model,
-        response_format: {
+    const responseFormat = responseFormatType === "json_object"
+      ? {type: "json_object"}
+      : {
           type: "json_schema",
           json_schema: {
             name: schemaName,
             strict: true,
             schema,
           },
-        },
+        };
+    try {
+      const response = await this.client.chat.completions.create({
+        model: this.model,
+        response_format: responseFormat,
         enable_thinking: false,
         temperature: 0,
         messages,
@@ -906,8 +918,8 @@ class TaobaoShoppingAgentV1 {
           this.logger[level]?.("shopping_agent_v1_structured_output", {
             phase,
             model: this.model,
-            response_format_type: "json_schema",
-            strict: true,
+            response_format_type: responseFormat.type,
+            strict: responseFormat.type === "json_schema",
             ...diagnostic,
           });
         },
@@ -1490,7 +1502,7 @@ function buildComposerMessages(shoppingIntent, selections) {
   const content = [{
     type: "text",
     text: JSON.stringify({
-      instruction: `只使用候选池中真实candidate_id组合2到3套完整Look。每套必须含top、bottom、shoes；至少两套组合不能完全相同。不得创造新商品或新ID。优先使用selection_tier=HIGH，NORMAL仅作为补足。必须独立判断三件之间的体积与腰线、裤长和鞋量感、配色、材质关系、视觉主次、共同风格故事与辨识度；不能把单品分数直接平均成整套高分。评分严格校准：60为能穿但普通，70为好看，80为明显值得推荐，90为造型师级优秀，95以上极罕见。特别检查身高与body_strategy下的比例风险。`,
+      instruction: `只使用候选池中真实candidate_id组合2到3套完整Look。每套必须含top、bottom、shoes；至少两套组合不能完全相同。不得创造新商品或新ID。优先使用selection_tier=HIGH，NORMAL仅作为补足。必须独立判断三件之间的体积与腰线、裤长和鞋量感、配色、材质关系、视觉主次、共同风格故事与辨识度；不能把单品分数直接平均成整套高分。评分严格校准：60为能穿但普通，70为好看，80为明显值得推荐，90为造型师级优秀，95以上极罕见。特别检查身高与body_strategy下的比例风险。返回一个顶层JSON对象，业务结构为 {"looks":[...]}；不得返回JSON Schema、Markdown、解释文字或顶层数组。`,
       shopping_intent: shoppingIntent,
       candidate_pools: Object.fromEntries(selections.map((selection) => [
         selection.slot.category,
@@ -1518,7 +1530,7 @@ function buildComposerMessages(shoppingIntent, selections) {
   return [
     {
       role: "system",
-      content: "你是基于真实商品池工作的资深造型师。商品池是唯一可用库存。整套评分必须来自商品之间的真实视觉关系，普通基础款组合不得虚高。只返回严格JSON，禁止幻想商品。",
+      content: "你是基于真实商品池工作的资深造型师。商品池是唯一可用库存。整套评分必须来自商品之间的真实视觉关系，普通基础款组合不得虚高。只返回一个包含looks数组的JSON对象；禁止返回JSON Schema、Markdown、额外解释或顶层数组，禁止幻想商品。",
     },
     {role: "user", content},
   ];
@@ -1693,6 +1705,16 @@ function parseAiJson(response, {
     diagnostic.raw_array_length = Array.isArray(parsed) ? parsed.length : null;
     diagnostic.normalized_look_count = null;
   }
+  if (allowSingleLooksWrapper && containsJsonSchemaMetadata(parsed)) {
+    diagnostic.schema_error_kind = "COMPOSER_SCHEMA_ECHO";
+    diagnostic.composer_raw_structure = "SCHEMA_ECHO";
+    onDiagnostic?.(Object.freeze({...diagnostic}));
+    throw schemaError(
+      "Composer returned JSON Schema metadata instead of Looks",
+      "COMPOSER_SCHEMA_ECHO",
+      diagnostic,
+    );
+  }
   if (allowSingleAssessmentWrapper && isSingleAssessmentWrapper(parsed)) {
     parsed = parsed[0];
     diagnostic.parsed_json_type = "object";
@@ -1757,6 +1779,20 @@ function isComposerObjectWrapper(value) {
     typeof value === "object" &&
     !Array.isArray(value) &&
     Array.isArray(value.looks);
+}
+
+function containsJsonSchemaMetadata(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values.some((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const keys = new Set(Object.keys(item));
+    return keys.has("properties") && (
+      keys.has("type") ||
+      keys.has("additionalProperties") ||
+      keys.has("required") ||
+      keys.has("items")
+    );
+  });
 }
 
 function isDirectLookArray(value) {

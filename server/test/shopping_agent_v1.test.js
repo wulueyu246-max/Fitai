@@ -183,7 +183,9 @@ class FakeAiClient {
 
   async create(input) {
     this.calls.push(input);
-    const name = input.response_format.json_schema.name;
+    const name = input.response_format.type === "json_object"
+      ? "fitai_real_product_outfit_composer"
+      : input.response_format.json_schema.name;
     let payload;
     if (name === "fitai_shopping_agent_v1_plan") {
       payload = plan();
@@ -454,6 +456,30 @@ test("Composer parser canonicalizes only the three supported response structures
   }
 });
 
+test("Composer explicitly rejects JSON Schema echo and invalid JSON", () => {
+  const schemaEcho = {
+    type: "object",
+    additionalProperties: false,
+    properties: {looks: {type: "array", items: {type: "object"}}},
+  };
+  for (const value of [schemaEcho, [schemaEcho]]) {
+    assert.throws(
+      () => parseAiJson(aiResponse(JSON.stringify(value)), {
+        allowSingleLooksWrapper: true,
+      }),
+      (error) => error.code === "SHOPPING_AGENT_SCHEMA_INVALID" &&
+        error.schema_error_kind === "COMPOSER_SCHEMA_ECHO",
+    );
+  }
+  assert.throws(
+    () => parseAiJson(aiResponse("```json\n{\"looks\":[]}\n```"), {
+      allowSingleLooksWrapper: true,
+    }),
+    (error) => error.code === "SHOPPING_AGENT_SCHEMA_INVALID" &&
+      error.schema_error_kind === "INVALID_JSON",
+  );
+});
+
 test("Shopping Intent reports a missing top-level shopping_intent explicitly", () => {
   const input = normalizeAgentInput({user_input: "出去玩", gender: "female"});
   const parsed = parseAiJson(aiResponse("{}"));
@@ -703,6 +729,15 @@ test("minimal proof uses exactly five AI calls, three Taobao calls and real IDs"
   });
   assert.equal(result.ai_call_count, 5);
   assert.equal(result.taobao_call_count, 3);
+  const composerCall = client.calls.find((call) =>
+    call.response_format.type === "json_object");
+  const structuredCalls = client.calls.filter((call) =>
+    call.response_format.type === "json_schema");
+  assert.ok(composerCall);
+  assert.deepEqual(composerCall.response_format, {type: "json_object"});
+  assert.equal(structuredCalls.length, 4);
+  assert.ok(structuredCalls.every((call) => call.response_format.json_schema.strict === true));
+  assert.ok(structuredCalls.every((call) => call.response_format.json_schema.schema));
   assert.equal(result.state, "success");
   assert.equal(provider.calls.length, 3);
   assert.equal(result.final_look_count, 2);
