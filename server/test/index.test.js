@@ -4,6 +4,7 @@ const test = require("node:test");
 process.env.AFFILIATE_POSTBACK_SECRET = "fitai-test-affiliate-secret";
 process.env.PRODUCT_PROVIDER = "mock";
 process.env.AI_FORCE_MOCK = "true";
+process.env.SHOPPING_AGENT_V1_ENABLED = "true";
 
 const {
   app,
@@ -50,6 +51,7 @@ const {
   resolveLookTimeoutMs,
   sanitizeAiErrorMessage,
   shouldUseMockAi,
+  shoppingAgentV1,
   shouldRepairStyleInterpretation,
   isAllowedOrigin,
   isLocalDevelopmentOrigin,
@@ -273,6 +275,8 @@ test("keeps user input verbatim and validates weather and scene as structured co
   assert.equal(result.context.scene, "约会");
   assert.deepEqual(result.context.location, {country: "中国", city: "绍兴"});
   assert.equal(result.context.weather.temperature, 33);
+  assert.equal(result.weather_mode, "off");
+  assert.equal(result.context.weather_mode, "off");
   assert.deepEqual(result.context.weather_constraints, [
     "高温时优先轻薄透气材质",
     "避免闷热面料",
@@ -280,6 +284,35 @@ test("keeps user input verbatim and validates weather and scene as structured co
   assert.equal(result.context.body_profile.body_type, "纤细");
   assert.equal(result.context.body_profile.gender, "female");
   assert.doesNotMatch(result.request, /用户地区|当前实时天气|场景|穿搭方案必须遵循/u);
+});
+
+test("weather_mode is explicit only for direct weather intent or the future toggle", () => {
+  const explicitText = validateOutfitRequest({
+    height: 160,
+    weight: 49,
+    scene: "日常",
+    request: "今天很热",
+    images: {front: imageDataUrl},
+    context: {weather: {temperature: 35}},
+  });
+  const explicitToggle = validateOutfitRequest({
+    height: 160,
+    weight: 49,
+    scene: "日常",
+    request: "帮我搭配一套",
+    images: {front: imageDataUrl},
+    context: {weather_mode: "explicit", weather: {rain: true}},
+  });
+  assert.equal(explicitText.weather_mode, "explicit");
+  assert.equal(explicitToggle.weather_mode, "explicit");
+  assert.throws(() => validateOutfitRequest({
+    height: 160,
+    weight: 49,
+    scene: "日常",
+    request: "帮我搭配一套",
+    images: {front: imageDataUrl},
+    context: {weather_mode: "auto"},
+  }), /weather_mode 必须是 off 或 explicit/);
 });
 
 test("preserves female, male, and unisex as authoritative outfit genders", () => {
@@ -3656,6 +3689,95 @@ test("creates a clearly marked local mock analysis", () => {
   assert.equal(typeof result.recommendations.summary, "string");
   assert.equal(result.products.length, 3);
   assert.equal(result.analysisMode, "mock");
+});
+
+test("/outfit flag=true enters Shopping Agent directly and keeps User Truth immutable", async () => {
+  const originalRun = shoppingAgentV1.run;
+  let receivedInput;
+  let receivedOptions;
+  const candidate = (slot, index) => ({
+    candidate_id: `${slot}-direct-${index}`,
+    product_id: `tb-${slot}-direct-${index}`,
+    title: `女款 ${slot} 真实商品 ${index}`,
+    category: slot,
+    price: 100 + index,
+    image_url: `https://img.example/${slot}-${index}.jpg`,
+    purchase_url: `https://item.example/${slot}-${index}`,
+    source: "taobao",
+    selection_tier: "HIGH",
+    selector_quality_score: 82,
+    selector_scores: {aesthetic_fit: 82},
+  });
+  shoppingAgentV1.run = async (input, options) => {
+    receivedInput = input;
+    receivedOptions = options;
+    return {
+      request_id: input.request_id,
+      state: "success",
+      authoritative_gender: input.authoritative_gender,
+      shopping_intent: {
+        gender: input.authoritative_gender,
+        weather_mode: input.weather_mode,
+        persona: {expression: "女性化", maturity: "年轻成人"},
+        overall_aesthetic: {core_direction: "清新都市休闲", traits: [], anti_drift: []},
+        body_strategy: {goals: ["比例协调"], hard_constraints: [], soft_tactics: []},
+        occasion: {type: "日常外出", formality: "休闲"},
+        weather_constraints: {material: [], thickness: "", comfort: [], safety: []},
+        slots: [
+          {category: "top", role: "清爽上衣"},
+          {category: "bottom", role: "利落下装"},
+          {category: "shoes", role: "轻盈鞋履"},
+        ],
+      },
+      looks: [1, 2].map((index) => ({
+        look_id: `direct-look-${index}`,
+        items: Object.fromEntries(["top", "bottom", "shoes"].map(
+          (slot) => [slot, candidate(slot, index)],
+        )),
+        scores: {final_score: 80 + index},
+      })),
+    };
+  };
+  const server = app.listen(0);
+
+  try {
+    const address = server.address();
+    assert(address && typeof address === "object");
+    const response = await fetch(`http://127.0.0.1:${address.port}/outfit`, {
+      method: "POST",
+      headers: {"content-type": "application/json"},
+      body: JSON.stringify({
+        height: 160,
+        weight: 49,
+        scene: "出去玩",
+        request: "我要出去玩，帮我搭配一套",
+        user_input: "我要出去玩，帮我搭配一套",
+        gender: "female",
+        images: {front: imageDataUrl},
+        context: {
+          gender: "female",
+          body_profile: {shape: "slim"},
+          weather: {temperature_c: 35, rain: true},
+        },
+      }),
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.shopping_agent_status, "success");
+    assert.equal(body.analysisMode, "shopping_agent_v1");
+    assert.equal(body.outfit_plans.length, 2);
+    assert.equal(receivedInput.user_input, "我要出去玩，帮我搭配一套");
+    assert.equal(receivedInput.authoritative_gender, "female");
+    assert.equal(receivedInput.weather_mode, "off");
+    assert.deepEqual(receivedInput.weather, {constraints: []});
+    assert.equal(receivedOptions.deadlineMs, 155_000);
+  } finally {
+    shoppingAgentV1.run = originalRun;
+    await new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
 });
 
 test("/outfit returns a structured validation error", async () => {

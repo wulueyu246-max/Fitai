@@ -52,7 +52,9 @@ const {
   TaobaoShoppingAgentV1,
 } = require("./shopping_agent_v1");
 const {
+  dispatchOutfitProductionPath,
   integrateShoppingAgentMainChain,
+  resolveWeatherMode,
   shoppingAgentFeatureEnabled,
 } = require("./shopping_agent_main_chain");
 const {
@@ -154,6 +156,7 @@ const DEFAULT_AI_TIMEOUT_MS = 60_000;
 const DEFAULT_INTENT_TIMEOUT_MS = 20_000;
 const DEFAULT_BLUEPRINT_TIMEOUT_MS = 120_000;
 const DEFAULT_LOOK_TIMEOUT_MS = 90_000;
+const DEFAULT_SHOPPING_AGENT_DEADLINE_MS = 155_000;
 const INTENT_PHASE_MAX_TOKENS = 1_400;
 // Manual rollback only: set AI_MODEL=qwen-vl-plus in the environment.
 // The server never switches to this legacy model automatically.
@@ -185,6 +188,13 @@ function resolveLookTimeoutMs(value) {
   return Math.min(
     readPositiveInteger(value, DEFAULT_LOOK_TIMEOUT_MS),
     DEFAULT_LOOK_TIMEOUT_MS,
+  );
+}
+
+function resolveShoppingAgentDeadlineMs(value) {
+  return Math.min(
+    readPositiveInteger(value, DEFAULT_SHOPPING_AGENT_DEADLINE_MS),
+    DEFAULT_SHOPPING_AGENT_DEADLINE_MS,
   );
 }
 
@@ -374,6 +384,9 @@ const config = Object.freeze({
     20_000,
   ),
   shoppingAgentV1Enabled: shoppingAgentFeatureEnabled(process.env),
+  shoppingAgentDeadlineMs: resolveShoppingAgentDeadlineMs(
+    process.env.SHOPPING_AGENT_DEADLINE_MS,
+  ),
   fallbackOnAiError: readBoolean(process.env.AI_FALLBACK_ON_ERROR, false),
   useProxy: proxyConfig.useProxy,
   aiProxyUrl: proxyConfig.proxyUrl,
@@ -991,6 +1004,7 @@ function normalizeOutfitStructuredContext(value, {
   authoritativeGender,
   height,
   weight,
+  weatherMode,
 } = {}) {
   if (value != null && (typeof value !== "object" || Array.isArray(value))) {
     throw new RequestValidationError("context 必须是对象");
@@ -1016,6 +1030,7 @@ function normalizeOutfitStructuredContext(value, {
       "context.weather",
     )),
     weather_constraints: Object.freeze(weatherConstraints),
+    weather_mode: weatherMode === "explicit" ? "explicit" : "off",
     body_profile: Object.freeze({
       ...bodyProfile,
       height,
@@ -1045,6 +1060,12 @@ function validateOutfitRequest(body) {
   const request = requestValue || userInputValue;
   const contextSource = body.context && typeof body.context === "object" &&
     !Array.isArray(body.context) ? body.context : {};
+  const requestedWeatherMode = contextSource.weather_mode ||
+    contextSource.weatherMode || body.weather_mode || body.weatherMode;
+  if (requestedWeatherMode != null &&
+      !["off", "explicit"].includes(String(requestedWeatherMode).trim().toLowerCase())) {
+    throw new RequestValidationError("weather_mode 必须是 off 或 explicit");
+  }
   const gender = resolveAuthoritativeGender(
     body.gender,
     contextSource.gender,
@@ -1111,6 +1132,10 @@ function validateOutfitRequest(body) {
     authoritativeGender: gender,
     height,
     weight,
+    weatherMode: resolveWeatherMode({
+      userInput: request,
+      requestedMode: requestedWeatherMode,
+    }),
   });
   return Object.freeze({
     height,
@@ -1124,6 +1149,7 @@ function validateOutfitRequest(body) {
     outfitBudget,
     images: Object.freeze(normalizedImages),
     context: structuredContext,
+    weather_mode: structuredContext.weather_mode,
   });
 }
 
@@ -6915,6 +6941,37 @@ app.post(
       ...validateOutfitRequest(req.body),
       requestId: res.locals.requestId,
     };
+    if (config.shoppingAgentV1Enabled) {
+      const shoppingAgentStartedAt = Date.now();
+      const routed = await dispatchOutfitProductionPath({
+        enabled: true,
+        agent: shoppingAgentV1,
+        outfitRequest,
+        requestId: res.locals.requestId,
+        deadlineMs: config.shoppingAgentDeadlineMs,
+      });
+      const shoppingAgentDurationMs = Date.now() - shoppingAgentStartedAt;
+      const totalDurationMs = Date.now() - requestStartedAt;
+      setServerTiming(res, {
+        shopping_agent: shoppingAgentDurationMs,
+        total: totalDurationMs,
+      });
+      console.info("shopping_agent_production_response", {
+        request_id: res.locals.requestId,
+        status: routed.payload.shopping_agent_status,
+        authoritative_gender: outfitRequest.authoritative_gender,
+        weather_mode: outfitRequest.weather_mode,
+        final_look_count: Array.isArray(routed.payload.outfit_plans)
+          ? routed.payload.outfit_plans.length
+          : 0,
+        shopping_agent_duration_ms: shoppingAgentDurationMs,
+        total_duration_ms: totalDurationMs,
+      });
+      return res.json({
+        ...routed.payload,
+        analysisMode: "shopping_agent_v1",
+      });
+    }
     styleCacheContext = {
       user_input: outfitRequest.user_input,
       scene: outfitRequest.scene,
@@ -7877,6 +7934,7 @@ module.exports = {
   resolveIntentTimeoutMs,
   resolveBlueprintTimeoutMs,
   resolveLookTimeoutMs,
+  resolveShoppingAgentDeadlineMs,
   listenForRequests,
   shouldUseMockAi,
   validateOutfitRequest,
@@ -7896,6 +7954,7 @@ module.exports = {
   DEFAULT_INTENT_TIMEOUT_MS,
   DEFAULT_BLUEPRINT_TIMEOUT_MS,
   DEFAULT_LOOK_TIMEOUT_MS,
+  DEFAULT_SHOPPING_AGENT_DEADLINE_MS,
   LEGACY_AI_MODEL,
   OUTFIT_BLUEPRINT_JSON_SCHEMA,
   blueprintStructuredResponseFormat,

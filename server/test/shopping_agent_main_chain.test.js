@@ -5,8 +5,11 @@ const test = require("node:test");
 
 const {
   adaptShoppingAgentSuccess,
+  buildDirectShoppingAgentBasePayload,
   buildShoppingAgentMainInput,
+  dispatchOutfitProductionPath,
   integrateShoppingAgentMainChain,
+  resolveWeatherMode,
   shoppingAgentFeatureEnabled,
 } = require("../shopping_agent_main_chain");
 
@@ -34,7 +37,7 @@ test("feature flag enables test environments and supports explicit rollback", ()
   assert.equal(shoppingAgentFeatureEnabled({SHOPPING_AGENT_V1_ENABLED: "false"}, "test"), false);
 });
 
-test("main-chain input preserves user truth and styling context", () => {
+test("main-chain input preserves User Truth without depending on legacy analysis", () => {
   const input = buildShoppingAgentMainInput(outfitRequest, {
     bodyProfile: "纤细",
     style: "清新休闲",
@@ -43,8 +46,130 @@ test("main-chain input preserves user truth and styling context", () => {
   }, "request-main-1");
   assert.equal(input.user_input, outfitRequest.user_input);
   assert.equal(input.authoritative_gender, "female");
-  assert.equal(input.persona.style, "清新休闲");
-  assert.equal(input.weather.temperature_c, 28);
+  assert.equal(input.persona.gender, "female");
+  assert.equal(input.persona.source, "authoritative_user_truth");
+  assert.equal(input.persona.style, undefined);
+  assert.deepEqual(input.weather, {constraints: []});
+  assert.equal(input.weather_mode, "off");
+  assert.deepEqual(
+    input.styling_policy.decision_priority.slice(0, 2),
+    ["explicit_user_intent", "persona_gender_body"],
+  );
+});
+
+test("Weather Optional defaults off and only passes weather for explicit requests", () => {
+  assert.equal(resolveWeatherMode({
+    userInput: "我要出去玩，帮我搭配一套",
+  }), "off");
+  assert.equal(resolveWeatherMode({
+    userInput: "今天下雨，我现在要出去，帮我搭一套",
+  }), "explicit");
+
+  const explicit = buildShoppingAgentMainInput({
+    ...outfitRequest,
+    user_input: "今天下雨，我现在要出去，帮我搭一套",
+  }, null, "request-weather-1");
+  assert.equal(explicit.weather_mode, "explicit");
+  assert.equal(explicit.weather.temperature_c, 28);
+  assert.deepEqual(explicit.weather.constraints, ["透气"]);
+});
+
+test("direct base payload is Flutter-safe and keeps authoritative gender", () => {
+  const payload = buildDirectShoppingAgentBasePayload(outfitRequest, "request-main-1");
+  assert.equal(payload.gender, "female");
+  assert.equal(payload.analysisMode, "shopping_agent_v1");
+  assert.equal(payload.weather_mode, "off");
+  assert.equal(typeof payload.bodyProfile, "string");
+  assert.equal(typeof payload.recommendations.top, "string");
+});
+
+test("enabled production path bypasses wrong Blueprint, Native Look and style repair", async () => {
+  const legacyCalls = {
+    intent: 0,
+    blueprint: 0,
+    nativeLook: 0,
+    styleRepair: 0,
+  };
+  const logs = [];
+  let receivedInput;
+  let receivedOptions;
+  const routed = await dispatchOutfitProductionPath({
+    enabled: true,
+    agent: {
+      run: async (input, options) => {
+        receivedInput = input;
+        receivedOptions = options;
+        return successResult();
+      },
+    },
+    outfitRequest,
+    requestId: "request-main-1",
+    deadlineMs: 155_000,
+    legacyPath: async () => {
+      legacyCalls.intent += 1;
+      legacyCalls.blueprint += 1;
+      legacyCalls.nativeLook += 1;
+      legacyCalls.styleRepair += 1;
+      throw new Error("legacy Blueprint returned wrong gender");
+    },
+    logger: {info: (event, details) => logs.push({event, details})},
+  });
+
+  assert.equal(routed.mode, "shopping_agent_v1");
+  assert.equal(routed.payload.shopping_agent_status, "success");
+  assert.equal(routed.payload.outfit_plans.length, 2);
+  assert.deepEqual(legacyCalls, {
+    intent: 0,
+    blueprint: 0,
+    nativeLook: 0,
+    styleRepair: 0,
+  });
+  assert.equal(receivedInput.authoritative_gender, "female");
+  assert.equal(receivedOptions.deadlineMs, 155_000);
+  assert.deepEqual(logs[0].details, {
+    request_id: "request-main-1",
+    authoritative_gender: "female",
+    legacy_intent_calls: 0,
+    blueprint_calls: 0,
+    native_look_calls: 0,
+    style_repair_calls: 0,
+    legacy_purchase_specification_calls: 0,
+    hard_deadline_ms: 155_000,
+  });
+});
+
+test("disabled production path preserves the legacy rollback callback", async () => {
+  let legacyCalls = 0;
+  const routed = await dispatchOutfitProductionPath({
+    enabled: false,
+    outfitRequest,
+    legacyPath: async () => {
+      legacyCalls += 1;
+      return {legacy: true};
+    },
+  });
+  assert.equal(routed.mode, "legacy");
+  assert.deepEqual(routed.payload, {legacy: true});
+  assert.equal(legacyCalls, 1);
+});
+
+test("male, female and unisex identity remain authoritative in Agent input", () => {
+  for (const gender of ["male", "female", "unisex"]) {
+    const input = buildShoppingAgentMainInput({
+      ...outfitRequest,
+      gender,
+      authoritative_gender: gender,
+      context: {
+        ...outfitRequest.context,
+        gender,
+        authoritative_gender: gender,
+      },
+    }, null, `request-${gender}`);
+    assert.equal(input.gender, gender);
+    assert.equal(input.authoritative_gender, gender);
+    assert.equal(input.body_profile.gender, gender);
+    assert.equal(input.persona.gender, gender);
+  }
 });
 
 test("successful Agent output maps two candidate-backed Looks for Flutter", () => {

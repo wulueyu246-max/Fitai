@@ -14,6 +14,7 @@ const {
   ShoppingAgentV1Error,
   TaobaoShoppingAgentV1,
   buildPriceContext,
+  buildPlannerMessages,
   buildRecallBroadeningQuery,
   buildSearchPlan,
   buildShoppingIntent,
@@ -40,6 +41,7 @@ function plan(gender = "female", aesthetic = "清新法式休闲") {
   return {
     shopping_intent: {
       gender,
+      weather_mode: "off",
       persona: {expression: gender === "female" ? "女性化" : "利落", maturity: "年轻成人"},
       overall_aesthetic: {
         core_direction: aesthetic,
@@ -169,6 +171,91 @@ function composerScores(value = 82) {
   };
 }
 
+test("Weather Optional keeps real-time weather out of the default planner input", () => {
+  const input = normalizeAgentInput({
+    request_id: "weather-off-1",
+    user_input: "我要出去玩，帮我搭配一套",
+    authoritative_gender: "female",
+    height: 160,
+    weight: 49,
+    weather_mode: "off",
+    weather: {
+      temperature_c: 35,
+      humidity: 92,
+      rain: true,
+      wind_kph: 30,
+    },
+  });
+  const messages = buildPlannerMessages(input, {});
+  const userPayload = JSON.parse(messages[1].content);
+  const intent = buildShoppingIntent(plan().shopping_intent, input);
+
+  assert.equal(input.weather_mode, "off");
+  assert.deepEqual(input.weather, {});
+  assert.equal(userPayload.weather_mode, "off");
+  assert.deepEqual(userPayload.weather, {});
+  assert.deepEqual(intent.weather_constraints, {
+    material: [],
+    thickness: "",
+    comfort: [],
+    safety: [],
+  });
+  assert.ok(intent.slots.every((slot) =>
+    !/雨靴|雨鞋|防泼水|速干/.test(slot.search_query)));
+});
+
+test("Weather Optional explicit mode limits weather to structured support evidence", () => {
+  const input = normalizeAgentInput({
+    request_id: "weather-explicit-1",
+    user_input: "今天下雨，我现在要出去，帮我搭配一套",
+    authoritative_gender: "female",
+    weather_mode: "explicit",
+    weather: {temperature_c: 20, rain: true},
+  });
+  const rawPlan = plan();
+  rawPlan.shopping_intent.weather_mode = "explicit";
+  rawPlan.shopping_intent.weather_constraints = {
+    material: ["易打理"],
+    thickness: "轻薄",
+    comfort: ["透气"],
+    safety: ["防滑"],
+  };
+  const intent = buildShoppingIntent(rawPlan.shopping_intent, input);
+  const messages = buildPlannerMessages(input, {});
+  const userPayload = JSON.parse(messages[1].content);
+
+  assert.equal(intent.weather_mode, "explicit");
+  assert.deepEqual(userPayload.weather, {temperature_c: 20, rain: true});
+  assert.deepEqual(intent.weather_constraints.safety, ["防滑"]);
+  assert.equal(intent.overall_aesthetic.core_direction, "清新法式休闲");
+});
+
+test("Shopping Intent cannot override authoritative gender", async () => {
+  const input = normalizeAgentInput({
+    user_input: "我要出去玩，帮我搭配一套",
+    authoritative_gender: "female",
+  });
+  const rawPlan = plan("male");
+  assert.throws(
+    () => buildShoppingIntent(rawPlan.shopping_intent, input),
+    /authoritative gender/,
+  );
+  const agent = new TaobaoShoppingAgentV1({
+    client: new FakeAiClient({planGender: "male"}),
+    model: "qwen3.7-plus",
+    productProvider: new FakeProvider(),
+    logger: {info() {}, warn() {}},
+  });
+  const result = await agent.run({
+    user_input: "我要出去玩，帮我搭配一套",
+    authoritative_gender: "female",
+  });
+  assert.equal(result.state, "success");
+  assert.equal(result.authoritative_gender, "female");
+  assert.equal(result.planner_fallback_used, true);
+  assert.ok(Object.values(result.search_queries).every((query) => query.includes("女")));
+});
+
 class FakeProvider {
   constructor() {
     this.calls = [];
@@ -190,6 +277,10 @@ class FakeAiClient {
     duplicateComposerCombination = false,
     refinementCategories = [],
     emptyRefinementQueryCategories = [],
+    failRefinementCategory = null,
+    failPlanner = false,
+    failComposer = false,
+    planGender = "female",
   } = {}) {
     this.calls = [];
     this.composerLookCount = composerLookCount;
@@ -199,6 +290,10 @@ class FakeAiClient {
     this.duplicateComposerCombination = duplicateComposerCombination;
     this.refinementCategories = new Set(refinementCategories);
     this.emptyRefinementQueryCategories = new Set(emptyRefinementQueryCategories);
+    this.failRefinementCategory = failRefinementCategory;
+    this.failPlanner = failPlanner;
+    this.failComposer = failComposer;
+    this.planGender = planGender;
     this.chat = {completions: {create: this.create.bind(this)}};
   }
 
@@ -209,9 +304,20 @@ class FakeAiClient {
       : input.response_format.json_schema.name;
     let payload;
     if (name === "fitai_shopping_agent_v1_plan") {
-      payload = plan();
+      if (this.failPlanner) {
+        const error = new Error("planner timed out");
+        error.name = "AbortError";
+        throw error;
+      }
+      payload = plan(this.planGender);
     } else if (name.startsWith("fitai_product_selector_")) {
       const metadata = JSON.parse(input.messages[1].content[0].text);
+      if (metadata.selector_round === 2 &&
+          metadata.slot.category === this.failRefinementCategory) {
+        const error = new Error("refinement selector timed out");
+        error.name = "AbortError";
+        throw error;
+      }
       const requiresRefinement = this.refinementCategories.has(metadata.slot.category) &&
         metadata.selector_round === 1;
       const baseScore = requiresRefinement ? 66 : 84;
@@ -235,6 +341,11 @@ class FakeAiClient {
           }`,
       };
     } else if (name === "fitai_real_product_outfit_composer") {
+      if (this.failComposer) {
+        const error = new Error("composer timed out");
+        error.name = "AbortError";
+        throw error;
+      }
       const metadata = JSON.parse(input.messages[1].content[0].text);
       const pools = metadata.candidate_pools;
       payload = {
@@ -1515,6 +1626,50 @@ test("minimal proof uses exactly five AI calls, three Taobao calls and real IDs"
   assert.ok(result.slot_metrics.every((slot) => slot.candidate_gate_fail >= 2));
 });
 
+test("planner AI failure uses deterministic User Truth fallback without extra AI calls", async () => {
+  const client = new FakeAiClient({failPlanner: true});
+  const agent = new TaobaoShoppingAgentV1({
+    client,
+    model: "qwen3.7-plus",
+    productProvider: new FakeProvider(),
+    logger: {info() {}, warn() {}},
+  });
+  const result = await agent.run({
+    user_input: "我要出去玩，帮我搭配一套",
+    authoritative_gender: "female",
+  });
+
+  assert.equal(result.state, "success");
+  assert.equal(result.planner_fallback_used, true);
+  assert.equal(result.authoritative_gender, "female");
+  assert.ok(result.final_look_count >= 2);
+  assert.equal(result.ai_call_count, 5);
+  assert.ok(result.search_queries.top.includes("女"));
+});
+
+test("Composer AI failure uses existing candidate pools and preserves invariants", async () => {
+  const client = new FakeAiClient({failComposer: true});
+  const agent = new TaobaoShoppingAgentV1({
+    client,
+    model: "qwen3.7-plus",
+    productProvider: new FakeProvider(),
+    logger: {info() {}, warn() {}},
+  });
+  const result = await agent.run({
+    user_input: "我要出去玩，帮我搭配一套",
+    authoritative_gender: "female",
+  });
+
+  assert.equal(result.state, "success");
+  assert.equal(result.composer_fallback_used, true);
+  assert.ok(result.final_look_count >= 2);
+  assert.deepEqual(result.invalid_candidate_reference, []);
+  assert.ok(result.looks.every((look) =>
+    ["top", "bottom", "shoes"].every((slot) =>
+      result.candidate_pools[slot].some((candidate) =>
+        candidate.candidate_id === look.items[slot].candidate_id))));
+});
+
 test("selector slots settle independently and a timed-out shoes call uses gated fallback", async () => {
   class ShoesTimeoutClient extends FakeAiClient {
     async create(input) {
@@ -1946,6 +2101,54 @@ test("refinement network failure falls back to three legal first-round candidate
   assert.equal(topMetric.refinement.refinement_cause_code, "UND_ERR_CONNECT_TIMEOUT");
   assert.equal(result.candidate_pools.top.length, 3);
   assert.ok(result.candidate_pools.top.every((item) => !item.title.includes("设计感")));
+});
+
+test("refinement Selector failure keeps sufficient first-round candidates and reaches Composer", async () => {
+  class FreshRefinementProvider extends FakeProvider {
+    async searchShoppingAgentCandidates(input) {
+      this.calls.push(input);
+      if (input.category === "top" && this.calls.filter((call) =>
+        call.category === "top").length > 1) {
+        const products = [
+          product("top", 11, "女款设计感方领短袖上衣"),
+          product("top", 12, "女款短款Polo针织上衣"),
+          product("top", 13, "女款不对称领修身上衣"),
+        ];
+        return {products, raw_count: products.length, valid_count: products.length};
+      }
+      const products = candidates(input.category);
+      return {products, raw_count: products.length, valid_count: products.length};
+    }
+  }
+  const client = new FakeAiClient({
+    refinementCategories: ["top"],
+    failRefinementCategory: "top",
+  });
+  const logs = [];
+  const agent = new TaobaoShoppingAgentV1({
+    client,
+    model: "qwen3.7-plus",
+    productProvider: new FreshRefinementProvider(),
+    logger: {
+      info(event, details) { logs.push({event, details}); },
+      warn(event, details) { logs.push({event, details}); },
+    },
+  });
+
+  const result = await agent.run({
+    user_input: "我要出去玩，帮我搭配一套",
+    authoritative_gender: "female",
+  });
+  const topMetric = result.slot_metrics.find((slot) => slot.category === "top");
+  assert.equal(result.state, "success");
+  assert.ok(result.final_look_count >= 2);
+  assert.equal(topMetric.refinement_status, "failed_fallback");
+  assert.equal(topMetric.refinement_fallback_used, true);
+  assert.equal(topMetric.final_candidate_pool.length, 3);
+  assert.ok(logs.some(({event, details}) =>
+    event === "shopping_agent_v1_refinement_selector" &&
+    details.category === "top" &&
+    details.status === "failed_fallback"));
 });
 
 test("zero legal first-round candidates fail before optional refinement or Composer", async () => {

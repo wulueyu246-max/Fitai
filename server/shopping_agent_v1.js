@@ -44,6 +44,9 @@ const PRICE_POSITION = Object.freeze({
 });
 const DEFAULT_TAOBAO_SLOT_TIMEOUT_MS = 25_000;
 const DEFAULT_TAOBAO_RETRIEVAL_TIMEOUT_MS = 30_000;
+const DEFAULT_SHOPPING_AGENT_DEADLINE_MS = 155_000;
+const MIN_COMPOSER_RESERVE_MS = 30_000;
+const MIN_REFINEMENT_WINDOW_MS = 70_000;
 const QUERY_COMPLEXITY_STATUS = Object.freeze({
   PASS: "PASS",
   SIMPLIFIED: "SIMPLIFIED",
@@ -106,6 +109,7 @@ const SHOPPING_PLAN_SCHEMA = Object.freeze({
       additionalProperties: false,
       properties: {
         gender: {type: "string", enum: ["female", "male", "unisex"]},
+        weather_mode: {type: "string", enum: ["off", "explicit"]},
         persona: {
           type: "object",
           additionalProperties: false,
@@ -183,6 +187,7 @@ const SHOPPING_PLAN_SCHEMA = Object.freeze({
       },
       required: [
         "gender",
+        "weather_mode",
         "persona",
         "overall_aesthetic",
         "body_strategy",
@@ -377,6 +382,7 @@ class TaobaoShoppingAgentV1 {
     composerTimeoutMs = 45_000,
     taobaoSlotTimeoutMs = DEFAULT_TAOBAO_SLOT_TIMEOUT_MS,
     taobaoRetrievalTimeoutMs = DEFAULT_TAOBAO_RETRIEVAL_TIMEOUT_MS,
+    overallDeadlineMs = DEFAULT_SHOPPING_AGENT_DEADLINE_MS,
   } = {}) {
     this.client = client || null;
     this.model = text(model, 120);
@@ -400,6 +406,10 @@ class TaobaoShoppingAgentV1 {
       ),
       DEFAULT_TAOBAO_RETRIEVAL_TIMEOUT_MS,
     );
+    this.overallDeadlineMs = Math.min(
+      positiveInteger(overallDeadlineMs, DEFAULT_SHOPPING_AGENT_DEADLINE_MS),
+      DEFAULT_SHOPPING_AGENT_DEADLINE_MS,
+    );
   }
 
   get configured() {
@@ -411,7 +421,7 @@ class TaobaoShoppingAgentV1 {
     );
   }
 
-  async run(input = {}) {
+  async run(input = {}, {deadlineMs} = {}) {
     if (!this.configured) {
       throw new ShoppingAgentV1Error("Shopping Agent V1 未完整配置", {
         code: "SHOPPING_AGENT_V1_NOT_CONFIGURED",
@@ -419,6 +429,24 @@ class TaobaoShoppingAgentV1 {
       });
     }
     const startedAt = Date.now();
+    const effectiveDeadlineMs = Math.min(
+      positiveInteger(deadlineMs, this.overallDeadlineMs),
+      this.overallDeadlineMs,
+    );
+    const deadlineAt = startedAt + effectiveDeadlineMs;
+    const stageTimeout = (configuredTimeoutMs, {
+      reserveMs = 0,
+      phase = "shopping_agent",
+    } = {}) => {
+      const available = deadlineAt - Date.now() - reserveMs;
+      if (available <= 0) {
+        throw new ShoppingAgentV1Error("Shopping Agent 已到达服务端总时限", {
+          code: "SHOPPING_AGENT_HARD_DEADLINE",
+          details: {phase, deadline_ms: effectiveDeadlineMs},
+        });
+      }
+      return Math.max(1, Math.min(configuredTimeoutMs, available));
+    };
     const normalizedInput = normalizeAgentInput(input);
     const requestId = normalizedInput.request_id;
     const metrics = {
@@ -427,21 +455,51 @@ class TaobaoShoppingAgentV1 {
       ai_calls: [],
     };
 
-    const planning = await this.#aiCall({
-      phase: "shopping_intent_search_plan",
-      schemaName: "fitai_shopping_agent_v1_plan",
-      schema: SHOPPING_PLAN_SCHEMA,
-      timeoutMs: this.plannerTimeoutMs,
-      metrics,
-      messages: buildPlannerMessages(
+    let planning;
+    let plannerFallbackUsed = false;
+    try {
+      planning = await this.#aiCall({
+        phase: "shopping_intent_search_plan",
+        schemaName: "fitai_shopping_agent_v1_plan",
+        schema: SHOPPING_PLAN_SCHEMA,
+        timeoutMs: stageTimeout(this.plannerTimeoutMs, {
+          reserveMs: 95_000,
+          phase: "shopping_intent_search_plan",
+        }),
+        metrics,
+        messages: buildPlannerMessages(
+          normalizedInput,
+          this.#fashionKnowledge(normalizedInput),
+        ),
+      });
+    } catch (error) {
+      plannerFallbackUsed = true;
+      planning = buildDeterministicShoppingPlan(normalizedInput);
+      this.logger.warn?.("shopping_agent_v1_planner_fallback", {
+        request_id: requestId,
+        error_code: error?.code || safeErrorCode(error),
+        fallback_used: true,
+      });
+    }
+    let shoppingIntent;
+    try {
+      shoppingIntent = buildShoppingIntent(
+        planning.shopping_intent,
         normalizedInput,
-        this.#fashionKnowledge(normalizedInput),
-      ),
-    });
-    const shoppingIntent = buildShoppingIntent(
-      planning.shopping_intent,
-      normalizedInput,
-    );
+      );
+    } catch (error) {
+      plannerFallbackUsed = true;
+      planning = buildDeterministicShoppingPlan(normalizedInput);
+      shoppingIntent = buildShoppingIntent(
+        planning.shopping_intent,
+        normalizedInput,
+      );
+      this.logger.warn?.("shopping_agent_v1_planner_contract_fallback", {
+        request_id: requestId,
+        error_code: error?.code || safeErrorCode(error),
+        fallback_used: true,
+      });
+    }
     this.logger.info?.("shopping_agent_v1_intent", {
       request_id: requestId,
       shopping_intent: shoppingIntent,
@@ -477,6 +535,12 @@ class TaobaoShoppingAgentV1 {
         (round > 1 ? `:refinement-${round - 1}` : "");
       const slotStartedAt = Date.now();
       const controller = new AbortController();
+      const retrievalTimeoutMs = stageTimeout(this.taobaoSlotTimeoutMs, {
+        reserveMs: round > 1 ? MIN_COMPOSER_RESERVE_MS : 65_000,
+        phase: round > 1
+          ? "product_selector_refinement"
+          : "taobao_retrieval",
+      });
       let timeoutId;
       let result;
       let attempts = 0;
@@ -499,7 +563,7 @@ class TaobaoShoppingAgentV1 {
               const error = new Error("Taobao slot retrieval timed out");
               error.code = "TAOBAO_SLOT_TIMEOUT";
               reject(error);
-            }, this.taobaoSlotTimeoutMs);
+            }, retrievalTimeoutMs);
             timeoutId.unref?.();
           }),
         ]);
@@ -733,7 +797,12 @@ class TaobaoShoppingAgentV1 {
         schemaName: `fitai_product_selector_${group.slot.category}` +
           (round > 1 ? `_refinement_${round - 1}` : ""),
         schema: productSelectionSchema(group.slot.category),
-        timeoutMs: this.selectorTimeoutMs,
+        timeoutMs: stageTimeout(this.selectorTimeoutMs, {
+          reserveMs: MIN_COMPOSER_RESERVE_MS,
+          phase: round > 1
+            ? "product_selector_refinement"
+            : `product_selector_${group.slot.category}`,
+        }),
         metrics,
         messages: buildSelectorMessages(shoppingIntent, aiGroup, {round}),
       });
@@ -869,7 +938,36 @@ class TaobaoShoppingAgentV1 {
     }
     if (fatalSelectorError) throw fatalSelectorError;
 
+    const refinementWindowAvailable = deadlineAt - Date.now() >=
+      MIN_REFINEMENT_WINDOW_MS;
     const refinementDecisions = firstRoundSelections.map((selection) => {
+      if (!refinementWindowAvailable) {
+        const decision = Object.freeze({
+          needed: false,
+          selector_refinement_suggested:
+            selection.selector_refinement_suggested === true,
+          server_refinement_required: false,
+          refinement_reason: "DEADLINE_BUDGET",
+          refinement_query_source: "NONE",
+          query: "",
+          canonical_category: selection.slot.category,
+          reasons: Object.freeze(["DEADLINE_BUDGET"]),
+        });
+        this.logger.info?.("shopping_agent_v1_refinement_decision", {
+          request_id: requestId,
+          slot_key: selection.slot_key,
+          initial_query: selection.query || selection.slot.search_query,
+          selector_refinement_suggested: decision.selector_refinement_suggested,
+          server_refinement_required: false,
+          refinement_reason: "DEADLINE_BUDGET",
+          refinement_query_source: "NONE",
+          refinement_query: "",
+          canonical_category: selection.slot.category,
+          validation_status: "SKIPPED_FOR_DEADLINE",
+          validation_error_kind: null,
+        });
+        return {selection, decision};
+      }
       if (selection.recall_broadening_used === true) {
         const decision = Object.freeze({
           needed: false,
@@ -913,8 +1011,23 @@ class TaobaoShoppingAgentV1 {
           validation_status: "FAIL",
           validation_error_kind: error?.details?.validation_error_kind || null,
           error_code: error?.code || "REFINEMENT_QUERY_GENERATION_FAILED",
+          fallback_used: true,
         });
-        throw error;
+        return {
+          selection,
+          decision: Object.freeze({
+            needed: false,
+            selector_refinement_suggested:
+              selection.selector_refinement_suggested === true,
+            server_refinement_required: false,
+            refinement_reason: error?.details?.refinement_reason ||
+              "REFINEMENT_CONTRACT_FALLBACK",
+            refinement_query_source: "NONE",
+            query: "",
+            canonical_category: selection.slot.category,
+            reasons: Object.freeze(["REFINEMENT_CONTRACT_FALLBACK"]),
+          }),
+        };
       }
       this.logger.info?.("shopping_agent_v1_refinement_decision", {
         request_id: requestId,
@@ -988,7 +1101,32 @@ class TaobaoShoppingAgentV1 {
       if (retrieval.candidates.length === 0) {
         return {category: selection.slot.category, selection, decision, retrieval};
       }
-      const refinedSelection = await selectGroup(retrieval, {round: 2});
+      let refinedSelection;
+      try {
+        refinedSelection = await selectGroup(retrieval, {round: 2});
+      } catch (error) {
+        const failure = classifySelectorFailure(error, {
+          elapsedMs: error?.selector_elapsed_ms,
+          timeoutMs: this.selectorTimeoutMs,
+        });
+        this.logger.warn?.("shopping_agent_v1_refinement_selector", {
+          request_id: requestId,
+          category: selection.slot.category,
+          status: "failed_fallback",
+          error_code: failure.error_code,
+          refinement_fallback_used: true,
+        });
+        return {
+          category: selection.slot.category,
+          selection,
+          decision,
+          retrieval,
+          refinedSelection: null,
+          errorCode: failure.error_code,
+          causeCode: safeErrorCode(error),
+          refinementFallbackUsed: true,
+        };
+      }
       return {
         category: selection.slot.category,
         selection,
@@ -1058,23 +1196,40 @@ class TaobaoShoppingAgentV1 {
       });
     });
 
-    const composition = await this.#aiCall({
-      phase: "real_product_outfit_composer",
-      schemaName: "fitai_real_product_outfit_composer",
-      schema: OUTFIT_COMPOSITION_SCHEMA,
-      responseFormatType: "json_object",
-      timeoutMs: this.composerTimeoutMs,
-      metrics,
-      messages: buildComposerMessages(shoppingIntent, selections),
-    });
-    const validatedLooks = validateComposedLooks(composition, selections, {
-      onScoreError: (diagnostic) => {
-        this.logger.warn?.("COMPOSER_SCORE_INVALID", {
-          request_id: requestId,
-          ...diagnostic,
-        });
-      },
-    });
+    let validatedLooks;
+    let composerFallbackUsed = false;
+    try {
+      const composition = await this.#aiCall({
+        phase: "real_product_outfit_composer",
+        schemaName: "fitai_real_product_outfit_composer",
+        schema: OUTFIT_COMPOSITION_SCHEMA,
+        responseFormatType: "json_object",
+        timeoutMs: stageTimeout(this.composerTimeoutMs, {
+          reserveMs: 1_000,
+          phase: "real_product_outfit_composer",
+        }),
+        metrics,
+        messages: buildComposerMessages(shoppingIntent, selections),
+      });
+      validatedLooks = validateComposedLooks(composition, selections, {
+        onScoreError: (diagnostic) => {
+          this.logger.warn?.("COMPOSER_SCORE_INVALID", {
+            request_id: requestId,
+            ...diagnostic,
+          });
+        },
+      });
+    } catch (error) {
+      composerFallbackUsed = true;
+      const fallbackComposition = buildDeterministicComposerFallback(selections);
+      validatedLooks = validateComposedLooks(fallbackComposition, selections);
+      this.logger.warn?.("shopping_agent_v1_composer_fallback", {
+        request_id: requestId,
+        error_code: error?.code || safeErrorCode(error),
+        fallback_used: true,
+        fallback_look_count: validatedLooks.looks.length,
+      });
+    }
     for (const audit of validatedLooks.candidate_reference_audit) {
       if (audit.error_code === "COMPOSER_INVALID_CANDIDATE_REFERENCE") {
         this.logger.warn?.("COMPOSER_INVALID_CANDIDATE_REFERENCE", {
@@ -1147,6 +1302,8 @@ class TaobaoShoppingAgentV1 {
       request_id: requestId,
       source: "taobao_shopping_agent_v1",
       state: "success",
+      planner_fallback_used: plannerFallbackUsed,
+      composer_fallback_used: composerFallbackUsed,
       authoritative_gender: shoppingIntent.gender,
       shopping_intent: shoppingIntent,
       search_queries: Object.fromEntries(shoppingIntent.slots.map((slot) => [
@@ -1176,6 +1333,7 @@ class TaobaoShoppingAgentV1 {
       retrieval_budget_ms: this.taobaoRetrievalTimeoutMs,
       slot_timeout_ms: this.taobaoSlotTimeoutMs,
       max_refinement_rounds: MAX_REFINEMENT_ROUNDS,
+      hard_deadline_ms: effectiveDeadlineMs,
       candidate_pools: Object.fromEntries(selections.map((selection) => [
         selection.slot.category,
         selection.final_candidate_pool.map(publicCandidate),
@@ -1310,6 +1468,7 @@ function normalizeAgentInput(input = {}) {
   );
   const height = optionalPositiveNumber(input.height, 100, 230);
   const weight = optionalPositiveNumber(input.weight, 20, 300);
+  const weatherMode = input.weather_mode === "explicit" ? "explicit" : "off";
   return Object.freeze({
     request_id: text(input.request_id ?? input.requestId, 120) || crypto.randomUUID(),
     user_input: userInput,
@@ -1318,10 +1477,115 @@ function normalizeAgentInput(input = {}) {
     weight,
     body_profile: normalizePlainObject(input.body_profile ?? input.bodyProfile),
     persona: normalizePlainObject(input.persona),
+    styling_policy: normalizePlainObject(input.styling_policy),
     occasion: text(input.occasion ?? input.scene, 120) || "日常外出",
-    weather: normalizePlainObject(input.weather),
+    weather_mode: weatherMode,
+    weather: weatherMode === "explicit"
+      ? normalizePlainObject(input.weather)
+      : Object.freeze({}),
     budget: normalizeBudgetContext(input.budget, userInput),
   });
+}
+
+function buildDeterministicShoppingPlan(input) {
+  const genderLabel = recallGenderLabel(input.gender);
+  const weatherConstraints = input.weather_mode === "explicit"
+    ? {
+        material: [],
+        thickness: "",
+        comfort: Array.isArray(input.weather?.constraints)
+          ? input.weather.constraints.slice(0, 8)
+          : [],
+        safety: input.weather?.rain === true || input.weather?.condition === "rain"
+          ? ["注意防滑与出行安全"]
+          : [],
+      }
+    : {material: [], thickness: "", comfort: [], safety: []};
+  const roles = {
+    top: "表达用户核心审美并形成清晰上半身轮廓",
+    bottom: "建立协调比例与完整下装结构",
+    shoes: "完成整套风格并保持步行舒适",
+  };
+  return {
+    shopping_intent: {
+      gender: input.gender,
+      weather_mode: input.weather_mode,
+      persona: {
+        expression: `${input.gender}人物表达`,
+        maturity: "与用户原始需求一致",
+      },
+      overall_aesthetic: {
+        core_direction: input.user_input,
+        traits: ["忠于用户原话", "协调可穿"],
+        anti_drift: ["错性别人物表达", "天气覆盖核心审美"],
+      },
+      body_strategy: {
+        goals: ["整体比例协调"],
+        hard_constraints: [],
+        soft_tactics: ["依据结构化身体资料优化轮廓与比例"],
+      },
+      occasion: {
+        type: input.occasion,
+        formality: "由用户场景决定",
+      },
+      weather_constraints: weatherConstraints,
+      slots: CORE_CATEGORIES.map((category) => ({
+        category,
+        role: roles[category],
+        hard_constraints: [input.gender, category, "not_underwear"],
+        soft_preferences: [input.user_input],
+        avoid: ["错性别", "错品类", "内衣家居服误作外穿"],
+        search_query: `${genderLabel} ${CATEGORY_LABELS[category]}`,
+      })),
+    },
+  };
+}
+
+function buildDeterministicComposerFallback(selections) {
+  const pools = Object.fromEntries(selections.map((selection) => [
+    selection.slot.category,
+    selection.final_candidate_pool,
+  ]));
+  if (CORE_CATEGORIES.some((category) => !Array.isArray(pools[category]) ||
+      pools[category].length === 0)) {
+    return {looks: []};
+  }
+  const looks = [];
+  const signatures = new Set();
+  outer:
+  for (const top of pools.top) {
+    for (const bottom of pools.bottom) {
+      for (const shoes of pools.shoes) {
+        const items = {top, bottom, shoes};
+        const structural = lookStructuralSignature(items);
+        const candidateKey = [top, bottom, shoes]
+          .map((item) => item.candidate_id)
+          .join("|");
+        const signature = structural.comparable ? structural.value : candidateKey;
+        if (signatures.has(signature)) continue;
+        signatures.add(signature);
+        const qualityValues = [top, bottom, shoes]
+          .map((item) => Number(item.selector_quality_score))
+          .filter(Number.isFinite);
+        const quality = qualityValues.length > 0
+          ? qualityValues.reduce((sum, value) => sum + value, 0) /
+            qualityValues.length
+          : 65;
+        const conservativeScore = Math.max(60, Math.min(78, Math.round(quality)));
+        looks.push({
+          look_id: `fallback-look-${looks.length + 1}`,
+          top_candidate_id: top.candidate_id,
+          bottom_candidate_id: bottom.candidate_id,
+          shoes_candidate_id: shoes.candidate_id,
+          scores: Object.fromEntries(Object.keys(COMPOSER_SCORE_PROPERTIES).map(
+            (field) => [field, conservativeScore],
+          )),
+        });
+        if (looks.length >= 3) break outer;
+      }
+    }
+  }
+  return {looks};
 }
 
 function buildShoppingIntent(value, input) {
@@ -1373,6 +1637,7 @@ function buildShoppingIntent(value, input) {
   }
   return Object.freeze({
     gender: input.gender,
+    weather_mode: input.weather_mode,
     persona: Object.freeze({
       expression: text(value.persona?.expression, 120),
       maturity: text(value.persona?.maturity, 120),
@@ -1394,12 +1659,19 @@ function buildShoppingIntent(value, input) {
       type: text(value.occasion?.type, 120),
       formality: text(value.occasion?.formality, 120),
     }),
-    weather_constraints: Object.freeze({
-      material: Object.freeze(stringList(value.weather_constraints?.material, 8)),
-      thickness: text(value.weather_constraints?.thickness, 80),
-      comfort: Object.freeze(stringList(value.weather_constraints?.comfort, 8)),
-      safety: Object.freeze(stringList(value.weather_constraints?.safety, 8)),
-    }),
+    weather_constraints: input.weather_mode === "explicit"
+      ? Object.freeze({
+          material: Object.freeze(stringList(value.weather_constraints?.material, 8)),
+          thickness: text(value.weather_constraints?.thickness, 80),
+          comfort: Object.freeze(stringList(value.weather_constraints?.comfort, 8)),
+          safety: Object.freeze(stringList(value.weather_constraints?.safety, 8)),
+        })
+      : Object.freeze({
+          material: Object.freeze([]),
+          thickness: "",
+          comfort: Object.freeze([]),
+          safety: Object.freeze([]),
+        }),
     budget: input.budget,
     slots: Object.freeze(CORE_CATEGORIES.map((category) => slotsByCategory.get(category))),
   });
@@ -1916,10 +2188,14 @@ function classifySelectorFailure(error, {elapsedMs = 0, timeoutMs = 0} = {}) {
   ]);
   const transient = error?.code === "SHOPPING_AGENT_AI_FAILED" &&
     transientCodes.has(cause);
+  const recoverableModelFailure = [
+    "SHOPPING_AGENT_AI_FAILED",
+    "SHOPPING_AGENT_SCHEMA_INVALID",
+  ].includes(error?.code);
   return Object.freeze({
     ai_status: SELECTOR_EXECUTION_STATUS.AI_ERROR,
     error_code: transient ? "SELECTOR_AI_ERROR" : safeErrorCode(error),
-    fallback_eligible: transient,
+    fallback_eligible: transient || recoverableModelFailure,
     cause_code: cause,
   });
 }
@@ -2638,7 +2914,7 @@ function buildPlannerMessages(input, fashionKnowledge) {
     {
       role: "system",
       content: `You are FitAI Shopping Intent and Taobao Search Planner V1.
-Decide one coherent, purchasable styling direction before marketplace search. User intent and authoritative gender outrank occasion and weather. Weather may only change material, thickness, comfort and safety; it must not select a functional or sports aesthetic unless the user explicitly asks for sport.
+Decide one coherent, purchasable styling direction before marketplace search. User intent and authoritative gender outrank occasion and weather. Copy the authoritative weather_mode exactly. When weather_mode=off, ignore all real-time weather and return empty weather_constraints; weather must not affect overall_aesthetic, persona, core style, product family, search query, or composition direction. When weather_mode=explicit, weather may only change material, thickness, breathability, warmth, rain/safety and comfort; it still must not select a functional or sports aesthetic unless the user explicitly asks for sport.
 Create exactly three slots: top, bottom and shoes. Shopping Intent is flexible intent, not an imagined SKU contract. Hard constraints contain only truly non-negotiable gender/category/safety requirements. Put ordinary aesthetic choices in soft_preferences.
 Generate exactly one high-recall Chinese Taobao query per slot. A query may contain only: gender direction, a broad category/product family, one core silhouette or key feature, and at most one truly important style word. Weather, body strategy, persona detail, colors, materials, comfort explanations and secondary design elements belong in structured intent evidence, not in the query. Do not turn shoes into rain boots or a top into sun-protective/technical outerwear because of weather unless user_input explicitly requests that product. Never include reasons, prompt text, colons or multiple alternatives. Return only the strict JSON object.`,
     },
@@ -2647,14 +2923,16 @@ Generate exactly one high-recall Chinese Taobao query per slot. A query may cont
       content: JSON.stringify({
         user_input: input.user_input,
         authoritative_gender: input.gender,
+        weather_mode: input.weather_mode,
         persona: input.persona,
+        styling_policy: input.styling_policy,
         body: {
           height_cm: input.height,
           weight_kg: input.weight,
           profile: input.body_profile,
         },
         occasion: input.occasion,
-        weather: input.weather,
+        weather: input.weather_mode === "explicit" ? input.weather : {},
         budget: input.budget,
         fashion_brain_context: fashionKnowledge,
       }),
@@ -3244,6 +3522,7 @@ module.exports = {
   CORE_CATEGORIES,
   DEFAULT_TAOBAO_RETRIEVAL_TIMEOUT_MS,
   DEFAULT_TAOBAO_SLOT_TIMEOUT_MS,
+  DEFAULT_SHOPPING_AGENT_DEADLINE_MS,
   MAX_SELECTED_CANDIDATES_PER_SLOT,
   MAX_VALID_CANDIDATES_PER_SLOT,
   MAX_REFINEMENT_ROUNDS,
@@ -3258,6 +3537,9 @@ module.exports = {
   ShoppingAgentV1Error,
   TaobaoShoppingAgentV1,
   buildPriceContext,
+  buildPlannerMessages,
+  buildDeterministicComposerFallback,
+  buildDeterministicShoppingPlan,
   buildRecallBroadeningQuery,
   buildSearchPlan,
   buildShoppingIntent,
