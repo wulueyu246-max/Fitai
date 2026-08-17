@@ -109,7 +109,6 @@ const SHOPPING_PLAN_SCHEMA = Object.freeze({
       additionalProperties: false,
       properties: {
         gender: {type: "string", enum: ["female", "male", "unisex"]},
-        weather_mode: {type: "string", enum: ["off", "explicit"]},
         persona: {
           type: "object",
           additionalProperties: false,
@@ -148,17 +147,6 @@ const SHOPPING_PLAN_SCHEMA = Object.freeze({
           },
           required: ["type", "formality"],
         },
-        weather_constraints: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            material: STRING_ARRAY_SCHEMA,
-            thickness: {type: "string"},
-            comfort: STRING_ARRAY_SCHEMA,
-            safety: STRING_ARRAY_SCHEMA,
-          },
-          required: ["material", "thickness", "comfort", "safety"],
-        },
         slots: {
           type: "array",
           minItems: 3,
@@ -187,12 +175,10 @@ const SHOPPING_PLAN_SCHEMA = Object.freeze({
       },
       required: [
         "gender",
-        "weather_mode",
         "persona",
         "overall_aesthetic",
         "body_strategy",
         "occasion",
-        "weather_constraints",
         "slots",
       ],
     },
@@ -318,7 +304,6 @@ const COMPOSER_SCORE_PROPERTIES = Object.freeze({
   persona_fit: {type: "number", minimum: 0, maximum: 100},
   body_proportion: {type: "number", minimum: 0, maximum: 100},
   occasion_fit: {type: "number", minimum: 0, maximum: 100},
-  weather_fit: {type: "number", minimum: 0, maximum: 100},
   value_coherence: {type: "number", minimum: 0, maximum: 100},
   cross_look_distinctiveness: {type: "number", minimum: 0, maximum: 100},
   final_score: {type: "number", minimum: 0, maximum: 100},
@@ -502,6 +487,7 @@ class TaobaoShoppingAgentV1 {
     }
     this.logger.info?.("shopping_agent_v1_intent", {
       request_id: requestId,
+      shopping_agent_weather_input_present: false,
       shopping_intent: shoppingIntent,
       search_queries: Object.fromEntries(shoppingIntent.slots.map((slot) => [
         slot.category,
@@ -1198,6 +1184,7 @@ class TaobaoShoppingAgentV1 {
 
     let validatedLooks;
     let composerFallbackUsed = false;
+    let availabilityFallbackUsed = false;
     try {
       const composition = await this.#aiCall({
         phase: "real_product_outfit_composer",
@@ -1230,6 +1217,9 @@ class TaobaoShoppingAgentV1 {
         fallback_look_count: validatedLooks.looks.length,
       });
     }
+    const availability = ensureComposerAvailability(validatedLooks, selections);
+    validatedLooks = availability.validated;
+    availabilityFallbackUsed = availability.fallbackUsed;
     for (const audit of validatedLooks.candidate_reference_audit) {
       if (audit.error_code === "COMPOSER_INVALID_CANDIDATE_REFERENCE") {
         this.logger.warn?.("COMPOSER_INVALID_CANDIDATE_REFERENCE", {
@@ -1244,6 +1234,11 @@ class TaobaoShoppingAgentV1 {
       invalid_candidate_reference: validatedLooks.invalid_candidate_reference,
       candidate_reference_audit: validatedLooks.candidate_reference_audit,
       structural_duplicate: validatedLooks.structural_duplicate,
+      exact_duplicate: validatedLooks.exact_duplicate,
+      look_diversity_status: validatedLooks.look_diversity_status,
+      structural_duplicate_detected: validatedLooks.structural_duplicate_detected,
+      exact_duplicate_detected: validatedLooks.exact_duplicate_detected,
+      availability_fallback_used: availabilityFallbackUsed,
       diversity_insufficient: validatedLooks.diversity_insufficient,
       final_look_count: validatedLooks.looks.length,
     });
@@ -1253,6 +1248,7 @@ class TaobaoShoppingAgentV1 {
         details: {
           invalid_candidate_reference: validatedLooks.invalid_candidate_reference,
           structural_duplicate: validatedLooks.structural_duplicate,
+          exact_duplicate: validatedLooks.exact_duplicate,
           diversity_insufficient: validatedLooks.diversity_insufficient,
         },
       });
@@ -1304,6 +1300,7 @@ class TaobaoShoppingAgentV1 {
       state: "success",
       planner_fallback_used: plannerFallbackUsed,
       composer_fallback_used: composerFallbackUsed,
+      availability_fallback_used: availabilityFallbackUsed,
       authoritative_gender: shoppingIntent.gender,
       shopping_intent: shoppingIntent,
       search_queries: Object.fromEntries(shoppingIntent.slots.map((slot) => [
@@ -1341,6 +1338,10 @@ class TaobaoShoppingAgentV1 {
       composer_candidate_ids: validatedLooks.composer_candidate_ids,
       invalid_candidate_reference: validatedLooks.invalid_candidate_reference,
       structural_duplicate: validatedLooks.structural_duplicate,
+      exact_duplicate: validatedLooks.exact_duplicate,
+      look_diversity_status: validatedLooks.look_diversity_status,
+      structural_duplicate_detected: validatedLooks.structural_duplicate_detected,
+      exact_duplicate_detected: validatedLooks.exact_duplicate_detected,
       diversity_insufficient: validatedLooks.diversity_insufficient,
       candidate_reference_audit: validatedLooks.candidate_reference_audit,
       looks: validatedLooks.looks,
@@ -1360,6 +1361,10 @@ class TaobaoShoppingAgentV1 {
       composer_candidate_ids: response.composer_candidate_ids,
       invalid_candidate_reference: response.invalid_candidate_reference,
       final_look_count: response.final_look_count,
+      look_diversity_status: response.look_diversity_status,
+      structural_duplicate_detected: response.structural_duplicate_detected,
+      exact_duplicate_detected: response.exact_duplicate_detected,
+      availability_fallback_used: response.availability_fallback_used,
       diversity_insufficient: response.diversity_insufficient,
       ai_call_count: response.ai_call_count,
       taobao_call_count: response.taobao_call_count,
@@ -1468,39 +1473,24 @@ function normalizeAgentInput(input = {}) {
   );
   const height = optionalPositiveNumber(input.height, 100, 230);
   const weight = optionalPositiveNumber(input.weight, 20, 300);
-  const weatherMode = input.weather_mode === "explicit" ? "explicit" : "off";
   return Object.freeze({
     request_id: text(input.request_id ?? input.requestId, 120) || crypto.randomUUID(),
     user_input: userInput,
     gender,
     height,
     weight,
-    body_profile: normalizePlainObject(input.body_profile ?? input.bodyProfile),
-    persona: normalizePlainObject(input.persona),
-    styling_policy: normalizePlainObject(input.styling_policy),
+    body_profile: normalizePlainObject(withoutWeatherFields(
+      input.body_profile ?? input.bodyProfile,
+    )),
+    persona: normalizePlainObject(withoutWeatherFields(input.persona)),
+    styling_policy: normalizePlainObject(withoutWeatherFields(input.styling_policy)),
     occasion: text(input.occasion ?? input.scene, 120) || "日常外出",
-    weather_mode: weatherMode,
-    weather: weatherMode === "explicit"
-      ? normalizePlainObject(input.weather)
-      : Object.freeze({}),
     budget: normalizeBudgetContext(input.budget, userInput),
   });
 }
 
 function buildDeterministicShoppingPlan(input) {
   const genderLabel = recallGenderLabel(input.gender);
-  const weatherConstraints = input.weather_mode === "explicit"
-    ? {
-        material: [],
-        thickness: "",
-        comfort: Array.isArray(input.weather?.constraints)
-          ? input.weather.constraints.slice(0, 8)
-          : [],
-        safety: input.weather?.rain === true || input.weather?.condition === "rain"
-          ? ["注意防滑与出行安全"]
-          : [],
-      }
-    : {material: [], thickness: "", comfort: [], safety: []};
   const roles = {
     top: "表达用户核心审美并形成清晰上半身轮廓",
     bottom: "建立协调比例与完整下装结构",
@@ -1509,7 +1499,6 @@ function buildDeterministicShoppingPlan(input) {
   return {
     shopping_intent: {
       gender: input.gender,
-      weather_mode: input.weather_mode,
       persona: {
         expression: `${input.gender}人物表达`,
         maturity: "与用户原始需求一致",
@@ -1528,7 +1517,6 @@ function buildDeterministicShoppingPlan(input) {
         type: input.occasion,
         formality: "由用户场景决定",
       },
-      weather_constraints: weatherConstraints,
       slots: CORE_CATEGORIES.map((category) => ({
         category,
         role: roles[category],
@@ -1550,9 +1538,7 @@ function buildDeterministicComposerFallback(selections) {
       pools[category].length === 0)) {
     return {looks: []};
   }
-  const looks = [];
-  const signatures = new Set();
-  outer:
+  const combinations = [];
   for (const top of pools.top) {
     for (const bottom of pools.bottom) {
       for (const shoes of pools.shoes) {
@@ -1561,9 +1547,6 @@ function buildDeterministicComposerFallback(selections) {
         const candidateKey = [top, bottom, shoes]
           .map((item) => item.candidate_id)
           .join("|");
-        const signature = structural.comparable ? structural.value : candidateKey;
-        if (signatures.has(signature)) continue;
-        signatures.add(signature);
         const qualityValues = [top, bottom, shoes]
           .map((item) => Number(item.selector_quality_score))
           .filter(Number.isFinite);
@@ -1572,8 +1555,9 @@ function buildDeterministicComposerFallback(selections) {
             qualityValues.length
           : 65;
         const conservativeScore = Math.max(60, Math.min(78, Math.round(quality)));
-        looks.push({
-          look_id: `fallback-look-${looks.length + 1}`,
+        combinations.push({
+          candidate_key: candidateKey,
+          structural_signature: structural,
           top_candidate_id: top.candidate_id,
           bottom_candidate_id: bottom.candidate_id,
           shoes_candidate_id: shoes.candidate_id,
@@ -1581,11 +1565,101 @@ function buildDeterministicComposerFallback(selections) {
             (field) => [field, conservativeScore],
           )),
         });
-        if (looks.length >= 3) break outer;
       }
     }
   }
+  const looks = [];
+  const usedCandidates = new Set();
+  const usedStructures = new Set();
+  while (looks.length < 3 && usedCandidates.size < combinations.length) {
+    const next = combinations.find((item) =>
+      !usedCandidates.has(item.candidate_key) &&
+      item.structural_signature.comparable &&
+      !usedStructures.has(item.structural_signature.value)) ||
+      combinations.find((item) => !usedCandidates.has(item.candidate_key));
+    if (!next) break;
+    usedCandidates.add(next.candidate_key);
+    if (next.structural_signature.comparable) {
+      usedStructures.add(next.structural_signature.value);
+    }
+    looks.push({
+      look_id: `fallback-look-${looks.length + 1}`,
+      top_candidate_id: next.top_candidate_id,
+      bottom_candidate_id: next.bottom_candidate_id,
+      shoes_candidate_id: next.shoes_candidate_id,
+      scores: next.scores,
+    });
+  }
   return {looks};
+}
+
+function ensureComposerAvailability(validated, selections) {
+  if (validated.looks.length >= 2) {
+    return {validated: {...validated, availability_fallback_used: false}, fallbackUsed: false};
+  }
+  const fallback = validateComposedLooks(
+    buildDeterministicComposerFallback(selections),
+    selections,
+  );
+  const looks = [...validated.looks];
+  const signatures = new Set(looks.map((look) => exactLookSignature(look.candidate_ids)));
+  for (const look of fallback.looks) {
+    const signature = exactLookSignature(look.candidate_ids);
+    if (signatures.has(signature)) continue;
+    signatures.add(signature);
+    looks.push({...look, availability_fallback: true});
+    if (looks.length >= 3) break;
+  }
+  const fallbackUsed = looks.length > validated.looks.length;
+  const structuralDuplicate = uniqueDiagnostics([
+    ...validated.structural_duplicate,
+    ...fallback.structural_duplicate,
+  ]);
+  const exactDuplicate = uniqueDiagnostics([
+    ...validated.exact_duplicate,
+    ...fallback.exact_duplicate,
+  ]);
+  const structuralDuplicateDetected = structuralDuplicate.length > 0 ||
+    looks.some((look) => look.structural_diversity_status === "LIMITED");
+  const lookDiversityStatus = looks.length < 2 || structuralDuplicateDetected ||
+    candidatePoolsCannotDiversify(selections)
+    ? "LIMITED"
+    : "PASS";
+  return {
+    fallbackUsed,
+    validated: {
+      ...validated,
+      looks: looks.slice(0, 3),
+      composer_candidate_ids: [...new Set(looks.flatMap((look) =>
+        Object.values(look.candidate_ids)))],
+      candidate_reference_audit: [
+        ...validated.candidate_reference_audit,
+        ...fallback.candidate_reference_audit,
+      ],
+      structural_duplicate: structuralDuplicate,
+      exact_duplicate: exactDuplicate,
+      look_diversity_status: lookDiversityStatus,
+      structural_duplicate_detected: structuralDuplicateDetected,
+      exact_duplicate_detected: exactDuplicate.length > 0,
+      availability_fallback_used: fallbackUsed,
+      diversity_insufficient: lookDiversityStatus === "LIMITED",
+    },
+  };
+}
+
+function exactLookSignature(ids) {
+  return CORE_CATEGORIES.map((category) => text(ids?.[category], 80)).join("|");
+}
+
+function uniqueDiagnostics(values) {
+  const seen = new Set();
+  return values.filter((value) => {
+    const key = `${value.look_id}|${value.error_code}|${value.structural_signature ||
+      value.exact_signature || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function buildShoppingIntent(value, input) {
@@ -1637,7 +1711,6 @@ function buildShoppingIntent(value, input) {
   }
   return Object.freeze({
     gender: input.gender,
-    weather_mode: input.weather_mode,
     persona: Object.freeze({
       expression: text(value.persona?.expression, 120),
       maturity: text(value.persona?.maturity, 120),
@@ -1659,19 +1732,6 @@ function buildShoppingIntent(value, input) {
       type: text(value.occasion?.type, 120),
       formality: text(value.occasion?.formality, 120),
     }),
-    weather_constraints: input.weather_mode === "explicit"
-      ? Object.freeze({
-          material: Object.freeze(stringList(value.weather_constraints?.material, 8)),
-          thickness: text(value.weather_constraints?.thickness, 80),
-          comfort: Object.freeze(stringList(value.weather_constraints?.comfort, 8)),
-          safety: Object.freeze(stringList(value.weather_constraints?.safety, 8)),
-        })
-      : Object.freeze({
-          material: Object.freeze([]),
-          thickness: "",
-          comfort: Object.freeze([]),
-          safety: Object.freeze([]),
-        }),
     budget: input.budget,
     slots: Object.freeze(CORE_CATEGORIES.map((category) => slotsByCategory.get(category))),
   });
@@ -2800,6 +2860,7 @@ function validateComposedLooks(payload, selections, {onScoreError} = {}) {
   const signatures = new Set();
   const structuralSignatures = new Set();
   const structuralDuplicates = [];
+  const exactDuplicates = [];
   const validLooks = [];
   const composerIds = [];
   const referenceAudit = [];
@@ -2836,26 +2897,36 @@ function validateComposedLooks(payload, selections, {onScoreError} = {}) {
       continue;
     }
     const signature = CORE_CATEGORIES.map((category) => ids[category]).join("|");
-    if (signatures.has(signature)) continue;
+    if (signatures.has(signature)) {
+      exactDuplicates.push(Object.freeze({
+        look_id: lookId,
+        error_code: "EXACT_DUPLICATE",
+        exact_signature: signature,
+      }));
+      continue;
+    }
     signatures.add(signature);
     const selectedCandidates = Object.fromEntries(CORE_CATEGORIES.map((category) => [
       category,
       pools.get(category).get(ids[category]),
     ]));
     const structuralSignature = lookStructuralSignature(selectedCandidates);
-    if (structuralSignature.comparable && structuralSignatures.has(structuralSignature.value)) {
+    const structuralDuplicate = structuralSignature.comparable &&
+      structuralSignatures.has(structuralSignature.value);
+    if (structuralDuplicate) {
       structuralDuplicates.push(Object.freeze({
         look_id: lookId,
         error_code: "STRUCTURAL_DUPLICATE",
         structural_signature: structuralSignature.value,
+        fatal: false,
       }));
-      continue;
     }
     if (structuralSignature.comparable) structuralSignatures.add(structuralSignature.value);
     composerIds.push(...Object.values(ids));
     validLooks.push({
       look_id: lookId,
       candidate_ids: ids,
+      structural_diversity_status: structuralDuplicate ? "LIMITED" : "PASS",
       scores: normalizeScoreObject(
         look?.scores,
         Object.keys(COMPOSER_SCORE_PROPERTIES),
@@ -2871,13 +2942,23 @@ function validateComposedLooks(payload, selections, {onScoreError} = {}) {
       ])),
     });
   }
+  const structuralDuplicateDetected = structuralDuplicates.length > 0;
+  const lookDiversityStatus = validLooks.length < 2 || structuralDuplicateDetected ||
+    candidatePoolsCannotDiversify(selections)
+    ? "LIMITED"
+    : "PASS";
   return {
     looks: validLooks.slice(0, 3),
     composer_candidate_ids: [...new Set(composerIds)],
     invalid_candidate_reference: invalidReferences,
     candidate_reference_audit: referenceAudit,
     structural_duplicate: structuralDuplicates,
-    diversity_insufficient: validLooks.length < 2 || candidatePoolsCannotDiversify(selections),
+    exact_duplicate: exactDuplicates,
+    look_diversity_status: lookDiversityStatus,
+    structural_duplicate_detected: structuralDuplicateDetected,
+    exact_duplicate_detected: exactDuplicates.length > 0,
+    availability_fallback_used: false,
+    diversity_insufficient: lookDiversityStatus === "LIMITED",
   };
 }
 
@@ -2914,16 +2995,15 @@ function buildPlannerMessages(input, fashionKnowledge) {
     {
       role: "system",
       content: `You are FitAI Shopping Intent and Taobao Search Planner V1.
-Decide one coherent, purchasable styling direction before marketplace search. User intent and authoritative gender outrank occasion and weather. Copy the authoritative weather_mode exactly. When weather_mode=off, ignore all real-time weather and return empty weather_constraints; weather must not affect overall_aesthetic, persona, core style, product family, search query, or composition direction. When weather_mode=explicit, weather may only change material, thickness, breathability, warmth, rain/safety and comfort; it still must not select a functional or sports aesthetic unless the user explicitly asks for sport.
+Decide one coherent, purchasable styling direction before marketplace search. Real-time weather is disabled and is not an input to this Shopping Agent. Do not infer or add temperature, humidity, rain, wind, weather constraints, weather materials, weather comfort or weather safety rules. Treat the user's raw text as immutable user_input, but never call or assume any real-time weather service.
 Create exactly three slots: top, bottom and shoes. Shopping Intent is flexible intent, not an imagined SKU contract. Hard constraints contain only truly non-negotiable gender/category/safety requirements. Put ordinary aesthetic choices in soft_preferences.
-Generate exactly one high-recall Chinese Taobao query per slot. A query may contain only: gender direction, a broad category/product family, one core silhouette or key feature, and at most one truly important style word. Weather, body strategy, persona detail, colors, materials, comfort explanations and secondary design elements belong in structured intent evidence, not in the query. Do not turn shoes into rain boots or a top into sun-protective/technical outerwear because of weather unless user_input explicitly requests that product. Never include reasons, prompt text, colons or multiple alternatives. Return only the strict JSON object.`,
+Generate exactly one high-recall Chinese Taobao query per slot. A query may contain only: gender direction, a broad category/product family, one core silhouette or key feature, and at most one truly important style word. Body strategy, persona detail, colors, materials, comfort explanations and secondary design elements do not belong in the query. Never include reasons, prompt text, colons or multiple alternatives. Return only the strict JSON object.`,
     },
     {
       role: "user",
       content: JSON.stringify({
         user_input: input.user_input,
         authoritative_gender: input.gender,
-        weather_mode: input.weather_mode,
         persona: input.persona,
         styling_policy: input.styling_policy,
         body: {
@@ -2932,9 +3012,8 @@ Generate exactly one high-recall Chinese Taobao query per slot. A query may cont
           profile: input.body_profile,
         },
         occasion: input.occasion,
-        weather: input.weather_mode === "explicit" ? input.weather : {},
         budget: input.budget,
-        fashion_brain_context: fashionKnowledge,
+        fashion_brain_context: withoutWeatherFields(fashionKnowledge),
       }),
     },
   ];
@@ -2952,7 +3031,6 @@ function buildSelectorMessages(shoppingIntent, group, {round = 1} = {}) {
         overall_aesthetic: shoppingIntent.overall_aesthetic,
         body_strategy: shoppingIntent.body_strategy,
         occasion: shoppingIntent.occasion,
-        weather_constraints: shoppingIntent.weather_constraints,
         budget: shoppingIntent.budget,
       },
       slot: group.slot,
@@ -2995,7 +3073,7 @@ function buildComposerMessages(shoppingIntent, selections) {
   const content = [{
     type: "text",
     text: JSON.stringify({
-      instruction: `只使用候选池中真实candidate_id组合2到3套完整Look。top_candidate_id只能从TOP_ALLOWED_IDS选择，bottom_candidate_id只能从BOTTOM_ALLOWED_IDS选择，shoes_candidate_id只能从SHOES_ALLOWED_IDS选择，禁止跨slot引用。生成前逐套自检三个candidate_id均属于对应allowed list。每套只输出look_id、top_candidate_id、bottom_candidate_id、shoes_candidate_id和scores，不得输出candidate对象。多套Look必须共享overall_aesthetic，但至少在top family/silhouette、bottom family或shoe family中的一个主要结构轴真实变化；只换品牌、颜色或candidate_id仍是STRUCTURAL_DUPLICATE。不要为了不同而破坏单套审美，宁可只给2套。不得创造新商品或新ID。优先使用selection_tier=HIGH，NORMAL仅作为补足。必须独立判断三件之间的体积与腰线、裤长和鞋量感、配色、材质关系、视觉主次、共同风格故事与辨识度；不能把单品分数直接平均成整套高分。value_coherence必须判断单件价格与整套定位、价格离群商品是否真正提升造型、是否有审美相近但价值更合理的候选；品牌名本身不能证明高价合理。cross_look_distinctiveness必须判断与前面Look在主要结构轴上的真实差异。评分严格校准：60为能穿但普通，70为好看，80为明显值得推荐，90为造型师级优秀，95以上极罕见。scores中的aesthetic_coherence、proportion_balance、color_harmony、material_harmony、visual_hierarchy、style_story、distinctiveness、persona_fit、body_proportion、occasion_fit、weather_fit、value_coherence、cross_look_distinctiveness、final_score必须全部是有限的JSON number，每个值必须大于等于0且小于等于100。正确示例为"final_score":78。禁止百分号字符串、"95/100"、null、文字评分、0到1或0到10归一化表达。特别检查身高与body_strategy下的比例风险。返回一个顶层JSON对象，业务结构为 {"looks":[...]}；不得返回JSON Schema、Markdown、解释文字或顶层数组。`,
+      instruction: `只使用候选池中真实candidate_id组合2到3套完整Look。top_candidate_id只能从TOP_ALLOWED_IDS选择，bottom_candidate_id只能从BOTTOM_ALLOWED_IDS选择，shoes_candidate_id只能从SHOES_ALLOWED_IDS选择，禁止跨slot引用。生成前逐套自检三个candidate_id均属于对应allowed list。每套只输出look_id、top_candidate_id、bottom_candidate_id、shoes_candidate_id和scores，不得输出candidate对象。多套Look必须共享overall_aesthetic，并优先在top family/silhouette、bottom family或shoe family中的主要结构轴产生真实变化；如果现有候选池无法支持结构变化，必须仍返回至少2套candidate_id组合不同的完整Look，不得为了结构多样性少于2套。完全相同的top、bottom、shoes ID组合禁止重复。不得创造新商品或新ID。优先使用selection_tier=HIGH，NORMAL仅作为补足。必须独立判断三件之间的体积与腰线、裤长和鞋量感、配色、材质关系、视觉主次、共同风格故事与辨识度；不能把单品分数直接平均成整套高分。value_coherence必须判断单件价格与整套定位、价格离群商品是否真正提升造型、是否有审美相近但价值更合理的候选；品牌名本身不能证明高价合理。cross_look_distinctiveness必须判断与前面Look在主要结构轴上的真实差异。评分严格校准：60为能穿但普通，70为好看，80为明显值得推荐，90为造型师级优秀，95以上极罕见。scores中的aesthetic_coherence、proportion_balance、color_harmony、material_harmony、visual_hierarchy、style_story、distinctiveness、persona_fit、body_proportion、occasion_fit、value_coherence、cross_look_distinctiveness、final_score必须全部是有限的JSON number，每个值必须大于等于0且小于等于100。正确示例为"final_score":78。禁止百分号字符串、"95/100"、null、文字评分、0到1或0到10归一化表达。特别检查身高与body_strategy下的比例风险。返回一个顶层JSON对象，业务结构为 {"looks":[...]}；不得返回JSON Schema、Markdown、解释文字或顶层数组。`,
       shopping_intent: shoppingIntent,
       ...allowedIds,
       candidate_pools: Object.fromEntries(selections.map((selection) => [
@@ -3473,6 +3551,14 @@ function normalizePlainObject(value) {
   ]));
 }
 
+function withoutWeatherFields(value) {
+  if (Array.isArray(value)) return value.map(withoutWeatherFields);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => !/^(?:weather|weather_constraints|weatherConstraints|temperature|temperature_c|humidity|rain|wind|wind_kph|condition|forecast)$/i.test(key))
+    .map(([key, item]) => [key, withoutWeatherFields(item)]));
+}
+
 function stringList(value, limit) {
   if (!Array.isArray(value)) throw schemaError("expected an array");
   return [...new Set(value.map((item) => text(item, 160)).filter(Boolean))].slice(0, limit);
@@ -3537,11 +3623,13 @@ module.exports = {
   ShoppingAgentV1Error,
   TaobaoShoppingAgentV1,
   buildPriceContext,
+  buildComposerMessages,
   buildPlannerMessages,
   buildDeterministicComposerFallback,
   buildDeterministicShoppingPlan,
   buildRecallBroadeningQuery,
   buildSearchPlan,
+  buildSelectorMessages,
   buildShoppingIntent,
   candidatePoolDiversity,
   candidateVariationAxes,

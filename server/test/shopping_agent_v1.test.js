@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  COMPOSER_SCORE_PROPERTIES,
   DEFAULT_TAOBAO_RETRIEVAL_TIMEOUT_MS,
   DEFAULT_TAOBAO_SLOT_TIMEOUT_MS,
   MAX_REFINEMENT_ROUNDS,
@@ -14,9 +15,11 @@ const {
   ShoppingAgentV1Error,
   TaobaoShoppingAgentV1,
   buildPriceContext,
+  buildComposerMessages,
   buildPlannerMessages,
   buildRecallBroadeningQuery,
   buildSearchPlan,
+  buildSelectorMessages,
   buildShoppingIntent,
   candidatePoolDiversity,
   enrichCandidatePriceContext,
@@ -41,7 +44,6 @@ function plan(gender = "female", aesthetic = "清新法式休闲") {
   return {
     shopping_intent: {
       gender,
-      weather_mode: "off",
       persona: {expression: gender === "female" ? "女性化" : "利落", maturity: "年轻成人"},
       overall_aesthetic: {
         core_direction: aesthetic,
@@ -54,12 +56,6 @@ function plan(gender = "female", aesthetic = "清新法式休闲") {
         soft_tactics: ["腰线清晰"],
       },
       occasion: {type: "日常外出", formality: "休闲"},
-      weather_constraints: {
-        material: ["透气"],
-        thickness: "轻薄",
-        comfort: ["活动方便"],
-        safety: [],
-      },
       slots: [
         {
           category: "top",
@@ -164,70 +160,71 @@ function composerScores(value = 82) {
     persona_fit: value,
     body_proportion: value,
     occasion_fit: value,
-    weather_fit: value,
     value_coherence: value,
     cross_look_distinctiveness: value,
     final_score: value,
   };
 }
 
-test("Weather Optional keeps real-time weather out of the default planner input", () => {
-  const input = normalizeAgentInput({
-    request_id: "weather-off-1",
+function containsWeatherKey(value) {
+  if (Array.isArray(value)) return value.some(containsWeatherKey);
+  if (!value || typeof value !== "object") return false;
+  return Object.entries(value).some(([key, item]) =>
+    /^(?:weather|weather_mode|weather_constraints|temperature|temperature_c|humidity|rain|wind|wind_kph|condition|forecast)$/i.test(key) ||
+    containsWeatherKey(item));
+}
+
+test("real-time weather is absent from every Shopping Agent AI boundary", () => {
+  const base = {
+    request_id: "weather-disabled-1",
     user_input: "我要出去玩，帮我搭配一套",
     authoritative_gender: "female",
     height: 160,
     weight: 49,
-    weather_mode: "off",
+  };
+  const withoutWeather = normalizeAgentInput(base);
+  const withWeather = normalizeAgentInput({
+    ...base,
+    weather_mode: "explicit",
     weather: {
       temperature_c: 35,
       humidity: 92,
       rain: true,
       wind_kph: 30,
     },
+    weather_constraints: ["防泼水", "透气"],
   });
-  const messages = buildPlannerMessages(input, {});
-  const userPayload = JSON.parse(messages[1].content);
-  const intent = buildShoppingIntent(plan().shopping_intent, input);
+  assert.deepEqual(withWeather, withoutWeather);
 
-  assert.equal(input.weather_mode, "off");
-  assert.deepEqual(input.weather, {});
-  assert.equal(userPayload.weather_mode, "off");
-  assert.deepEqual(userPayload.weather, {});
-  assert.deepEqual(intent.weather_constraints, {
-    material: [],
-    thickness: "",
-    comfort: [],
-    safety: [],
-  });
-  assert.ok(intent.slots.every((slot) =>
-    !/雨靴|雨鞋|防泼水|速干/.test(slot.search_query)));
-});
-
-test("Weather Optional explicit mode limits weather to structured support evidence", () => {
-  const input = normalizeAgentInput({
-    request_id: "weather-explicit-1",
-    user_input: "今天下雨，我现在要出去，帮我搭配一套",
-    authoritative_gender: "female",
-    weather_mode: "explicit",
-    weather: {temperature_c: 20, rain: true},
-  });
-  const rawPlan = plan();
-  rawPlan.shopping_intent.weather_mode = "explicit";
-  rawPlan.shopping_intent.weather_constraints = {
-    material: ["易打理"],
-    thickness: "轻薄",
-    comfort: ["透气"],
-    safety: ["防滑"],
+  const plannerPayload = JSON.parse(buildPlannerMessages(withWeather, {})[1].content);
+  const intent = buildShoppingIntent(plan().shopping_intent, withWeather);
+  const group = {
+    slot: intent.slots[0],
+    query: intent.slots[0].search_query,
+    candidates: candidates("top").slice(0, 3).map((item, index) => ({
+      ...item,
+      candidate_id: `candidate_${index + 1}`,
+    })),
   };
-  const intent = buildShoppingIntent(rawPlan.shopping_intent, input);
-  const messages = buildPlannerMessages(input, {});
-  const userPayload = JSON.parse(messages[1].content);
+  const selectorMessages = buildSelectorMessages(intent, group);
+  const selections = ["top", "bottom", "shoes"].map((category) => ({
+    slot: intent.slots.find((slot) => slot.category === category),
+    final_candidate_pool: candidates(category).slice(0, 2).map((item, index) => ({
+      ...item,
+      candidate_id: `${category}_${index + 1}`,
+      selection_tier: "HIGH",
+      selector_quality_score: 80,
+      selector_scores: selectorScores(80),
+    })),
+  }));
+  const composerMessages = buildComposerMessages(intent, selections);
 
-  assert.equal(intent.weather_mode, "explicit");
-  assert.deepEqual(userPayload.weather, {temperature_c: 20, rain: true});
-  assert.deepEqual(intent.weather_constraints.safety, ["防滑"]);
-  assert.equal(intent.overall_aesthetic.core_direction, "清新法式休闲");
+  assert.equal(containsWeatherKey(withWeather), false);
+  assert.equal(containsWeatherKey(plannerPayload), false);
+  assert.equal(containsWeatherKey(intent), false);
+  assert.equal(containsWeatherKey(selectorMessages), false);
+  assert.equal(containsWeatherKey(composerMessages), false);
+  assert.equal(Object.hasOwn(COMPOSER_SCORE_PROPERTIES, "weather_fit"), false);
 });
 
 test("Shopping Intent cannot override authoritative gender", async () => {
@@ -1228,7 +1225,7 @@ test("composer validates candidate references against each slot whitelist", () =
   assert.deepEqual(mixed.invalid_candidate_reference[0].categories, ["top"]);
 });
 
-test("Phase 2.5 rejects candidate swaps that are structural duplicates", () => {
+test("Availability First keeps candidate-different Looks with limited structural diversity", () => {
   const pools = [
     {
       slot: {category: "top"},
@@ -1260,10 +1257,40 @@ test("Phase 2.5 rejects candidate swaps that are structural duplicates", () => {
     scores: composerScores(76),
   }));
   const result = validateComposedLooks({looks}, pools);
-  assert.equal(result.looks.length, 1);
+  assert.equal(result.looks.length, 2);
   assert.equal(result.structural_duplicate.length, 1);
   assert.equal(result.structural_duplicate[0].error_code, "STRUCTURAL_DUPLICATE");
+  assert.equal(result.structural_duplicate[0].fatal, false);
+  assert.equal(result.structural_duplicate_detected, true);
+  assert.equal(result.exact_duplicate_detected, false);
+  assert.equal(result.look_diversity_status, "LIMITED");
+  assert.deepEqual(
+    result.looks.map((look) => look.structural_diversity_status),
+    ["PASS", "LIMITED"],
+  );
   assert.equal(result.diversity_insufficient, true);
+});
+
+test("Availability First still rejects an exact candidate combination duplicate", () => {
+  const pools = ["top", "bottom", "shoes"].map((category) => ({
+    slot: {category},
+    final_candidate_pool: [{
+      ...product(category, 1, `${category} product`),
+      candidate_id: `${category}_1`,
+    }],
+  }));
+  const look = (lookId) => ({
+    look_id: lookId,
+    top_candidate_id: "top_1",
+    bottom_candidate_id: "bottom_1",
+    shoes_candidate_id: "shoes_1",
+    scores: composerScores(76),
+  });
+  const result = validateComposedLooks({looks: [look("look-1"), look("look-2")]}, pools);
+  assert.equal(result.looks.length, 1);
+  assert.equal(result.exact_duplicate.length, 1);
+  assert.equal(result.exact_duplicate[0].error_code, "EXACT_DUPLICATE");
+  assert.equal(result.exact_duplicate_detected, true);
 });
 
 test("Phase 2.5 accepts a real bottom or shoe family variation in one aesthetic", () => {
@@ -1504,7 +1531,7 @@ test("Composer scores require raw finite JSON numbers from 0 through 100", () =>
   assert.equal(missingDiagnostic.score_error_kind, "MISSING_SCORE");
 });
 
-test("Composer wrapper keeps candidate references and minimum Look count strict", async () => {
+test("Composer wrapper keeps references strict and uses existing candidates for availability", async () => {
   const wrappedAgent = new TaobaoShoppingAgentV1({
     client: new FakeAiClient({wrapComposer: true}),
     model: "qwen3.7-plus",
@@ -1523,10 +1550,13 @@ test("Composer wrapper keeps candidate references and minimum Look count strict"
     productProvider: new FakeProvider(),
     logger: {info() {}},
   });
-  await assert.rejects(
-    () => foreignAgent.run({user_input: "出去玩", authoritative_gender: "female"}),
-    (error) => error.code === "SHOPPING_AGENT_INSUFFICIENT_LOOKS",
-  );
+  const foreignResult = await foreignAgent.run({
+    user_input: "出去玩",
+    authoritative_gender: "female",
+  });
+  assert.equal(foreignResult.final_look_count, 3);
+  assert.equal(foreignResult.invalid_candidate_reference.length, 1);
+  assert.equal(foreignResult.availability_fallback_used, true);
 
   const oneLookAgent = new TaobaoShoppingAgentV1({
     client: new FakeAiClient({composerLookCount: 1, wrapComposer: true}),
@@ -1534,10 +1564,12 @@ test("Composer wrapper keeps candidate references and minimum Look count strict"
     productProvider: new FakeProvider(),
     logger: {info() {}},
   });
-  await assert.rejects(
-    () => oneLookAgent.run({user_input: "出去玩", authoritative_gender: "female"}),
-    (error) => error.code === "SHOPPING_AGENT_INSUFFICIENT_LOOKS",
-  );
+  const oneLookResult = await oneLookAgent.run({
+    user_input: "出去玩",
+    authoritative_gender: "female",
+  });
+  assert.ok(oneLookResult.final_look_count >= 2);
+  assert.equal(oneLookResult.availability_fallback_used, true);
 
   const directForeignAgent = new TaobaoShoppingAgentV1({
     client: new FakeAiClient({foreignComposerId: true, directComposerArray: true}),
@@ -1545,10 +1577,13 @@ test("Composer wrapper keeps candidate references and minimum Look count strict"
     productProvider: new FakeProvider(),
     logger: {info() {}},
   });
-  await assert.rejects(
-    () => directForeignAgent.run({user_input: "出去玩", authoritative_gender: "female"}),
-    (error) => error.code === "SHOPPING_AGENT_INSUFFICIENT_LOOKS",
-  );
+  const directForeignResult = await directForeignAgent.run({
+    user_input: "出去玩",
+    authoritative_gender: "female",
+  });
+  assert.ok(directForeignResult.final_look_count >= 2);
+  assert.equal(directForeignResult.invalid_candidate_reference.length, 1);
+  assert.equal(directForeignResult.availability_fallback_used, true);
 
   const directOneLookAgent = new TaobaoShoppingAgentV1({
     client: new FakeAiClient({composerLookCount: 1, directComposerArray: true}),
@@ -1556,10 +1591,12 @@ test("Composer wrapper keeps candidate references and minimum Look count strict"
     productProvider: new FakeProvider(),
     logger: {info() {}},
   });
-  await assert.rejects(
-    () => directOneLookAgent.run({user_input: "出去玩", authoritative_gender: "female"}),
-    (error) => error.code === "SHOPPING_AGENT_INSUFFICIENT_LOOKS",
-  );
+  const directOneLookResult = await directOneLookAgent.run({
+    user_input: "出去玩",
+    authoritative_gender: "female",
+  });
+  assert.ok(directOneLookResult.final_look_count >= 2);
+  assert.equal(directOneLookResult.availability_fallback_used, true);
 
   const directDuplicateAgent = new TaobaoShoppingAgentV1({
     client: new FakeAiClient({directComposerArray: true, duplicateComposerCombination: true}),
@@ -1567,8 +1604,31 @@ test("Composer wrapper keeps candidate references and minimum Look count strict"
     productProvider: new FakeProvider(),
     logger: {info() {}},
   });
+  const directDuplicateResult = await directDuplicateAgent.run({
+    user_input: "出去玩",
+    authoritative_gender: "female",
+  });
+  assert.ok(directDuplicateResult.final_look_count >= 2);
+  assert.equal(directDuplicateResult.exact_duplicate_detected, true);
+  assert.equal(directDuplicateResult.availability_fallback_used, true);
+});
+
+test("Availability First fails only when the real pools cannot form two exact combinations", async () => {
+  class SingleCombinationProvider extends FakeProvider {
+    async searchShoppingAgentCandidates(input) {
+      this.calls.push(input);
+      const products = [candidates(input.category)[0]];
+      return {products, raw_count: 1, valid_count: 1};
+    }
+  }
+  const agent = new TaobaoShoppingAgentV1({
+    client: new FakeAiClient({composerLookCount: 1}),
+    model: "qwen3.7-plus",
+    productProvider: new SingleCombinationProvider(),
+    logger: {info() {}, warn() {}},
+  });
   await assert.rejects(
-    () => directDuplicateAgent.run({user_input: "出去玩", authoritative_gender: "female"}),
+    () => agent.run({user_input: "出去玩", authoritative_gender: "female"}),
     (error) => error.code === "SHOPPING_AGENT_INSUFFICIENT_LOOKS",
   );
 });

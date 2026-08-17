@@ -54,7 +54,6 @@ const {
 const {
   dispatchOutfitProductionPath,
   integrateShoppingAgentMainChain,
-  resolveWeatherMode,
   shoppingAgentFeatureEnabled,
 } = require("./shopping_agent_main_chain");
 const {
@@ -1004,7 +1003,6 @@ function normalizeOutfitStructuredContext(value, {
   authoritativeGender,
   height,
   weight,
-  weatherMode,
 } = {}) {
   if (value != null && (typeof value !== "object" || Array.isArray(value))) {
     throw new RequestValidationError("context 必须是对象");
@@ -1030,7 +1028,6 @@ function normalizeOutfitStructuredContext(value, {
       "context.weather",
     )),
     weather_constraints: Object.freeze(weatherConstraints),
-    weather_mode: weatherMode === "explicit" ? "explicit" : "off",
     body_profile: Object.freeze({
       ...bodyProfile,
       height,
@@ -1060,12 +1057,6 @@ function validateOutfitRequest(body) {
   const request = requestValue || userInputValue;
   const contextSource = body.context && typeof body.context === "object" &&
     !Array.isArray(body.context) ? body.context : {};
-  const requestedWeatherMode = contextSource.weather_mode ||
-    contextSource.weatherMode || body.weather_mode || body.weatherMode;
-  if (requestedWeatherMode != null &&
-      !["off", "explicit"].includes(String(requestedWeatherMode).trim().toLowerCase())) {
-    throw new RequestValidationError("weather_mode 必须是 off 或 explicit");
-  }
   const gender = resolveAuthoritativeGender(
     body.gender,
     contextSource.gender,
@@ -1132,10 +1123,6 @@ function validateOutfitRequest(body) {
     authoritativeGender: gender,
     height,
     weight,
-    weatherMode: resolveWeatherMode({
-      userInput: request,
-      requestedMode: requestedWeatherMode,
-    }),
   });
   return Object.freeze({
     height,
@@ -1149,7 +1136,6 @@ function validateOutfitRequest(body) {
     outfitBudget,
     images: Object.freeze(normalizedImages),
     context: structuredContext,
-    weather_mode: structuredContext.weather_mode,
   });
 }
 
@@ -6960,7 +6946,7 @@ app.post(
         request_id: res.locals.requestId,
         status: routed.payload.shopping_agent_status,
         authoritative_gender: outfitRequest.authoritative_gender,
-        weather_mode: outfitRequest.weather_mode,
+        shopping_agent_weather_input_present: false,
         final_look_count: Array.isArray(routed.payload.outfit_plans)
           ? routed.payload.outfit_plans.length
           : 0,

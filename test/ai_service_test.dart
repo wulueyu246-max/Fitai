@@ -145,8 +145,6 @@ void main() {
       'context': {
         'scene': '工作',
         'location': <String, dynamic>{},
-        'weather': <String, dynamic>{},
-        'weather_constraints': <String>[],
         'body_profile': {
           'height': 173.0,
           'weight': 55.0,
@@ -289,7 +287,7 @@ void main() {
     });
   }
 
-  test('keeps user input separate from structured scene and weather context',
+  test('keeps the weather card data out of the Shopping Agent request payload',
       () {
     const userInput = '我想出去玩，帮我搭一套';
     const request = OutfitRequest(
@@ -314,11 +312,8 @@ void main() {
     expect(payload['request'], isNot(contains('场景：')));
     expect(context['scene'], '约会');
     expect(context['location'], {'country': '中国', 'city': '绍兴'});
-    expect((context['weather'] as Map<String, dynamic>)['temperature'], 33);
-    expect(context['weather_constraints'], [
-      '高温时优先轻薄透气材质',
-      '避免闷热面料',
-    ]);
+    expect(context.containsKey('weather'), isFalse);
+    expect(context.containsKey('weather_constraints'), isFalse);
     expect(
         (context['body_profile'] as Map<String, dynamic>)['gender'], 'female');
   });

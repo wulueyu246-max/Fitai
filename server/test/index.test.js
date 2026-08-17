@@ -275,8 +275,8 @@ test("keeps user input verbatim and validates weather and scene as structured co
   assert.equal(result.context.scene, "约会");
   assert.deepEqual(result.context.location, {country: "中国", city: "绍兴"});
   assert.equal(result.context.weather.temperature, 33);
-  assert.equal(result.weather_mode, "off");
-  assert.equal(result.context.weather_mode, "off");
+  assert.equal(Object.hasOwn(result, "weather_mode"), false);
+  assert.equal(Object.hasOwn(result.context, "weather_mode"), false);
   assert.deepEqual(result.context.weather_constraints, [
     "高温时优先轻薄透气材质",
     "避免闷热面料",
@@ -286,33 +286,19 @@ test("keeps user input verbatim and validates weather and scene as structured co
   assert.doesNotMatch(result.request, /用户地区|当前实时天气|场景|穿搭方案必须遵循/u);
 });
 
-test("weather_mode is explicit only for direct weather intent or the future toggle", () => {
-  const explicitText = validateOutfitRequest({
+test("legacy weather context remains structured without creating a production mode", () => {
+  const result = validateOutfitRequest({
     height: 160,
     weight: 49,
     scene: "日常",
     request: "今天很热",
     images: {front: imageDataUrl},
-    context: {weather: {temperature: 35}},
+    context: {weather_mode: "explicit", weather: {temperature: 35, rain: true}},
   });
-  const explicitToggle = validateOutfitRequest({
-    height: 160,
-    weight: 49,
-    scene: "日常",
-    request: "帮我搭配一套",
-    images: {front: imageDataUrl},
-    context: {weather_mode: "explicit", weather: {rain: true}},
-  });
-  assert.equal(explicitText.weather_mode, "explicit");
-  assert.equal(explicitToggle.weather_mode, "explicit");
-  assert.throws(() => validateOutfitRequest({
-    height: 160,
-    weight: 49,
-    scene: "日常",
-    request: "帮我搭配一套",
-    images: {front: imageDataUrl},
-    context: {weather_mode: "auto"},
-  }), /weather_mode 必须是 off 或 explicit/);
+  assert.equal(result.user_input, "今天很热");
+  assert.deepEqual(result.context.weather, {temperature: 35, rain: true});
+  assert.equal(Object.hasOwn(result, "weather_mode"), false);
+  assert.equal(Object.hasOwn(result.context, "weather_mode"), false);
 });
 
 test("preserves female, male, and unisex as authoritative outfit genders", () => {
@@ -3717,12 +3703,10 @@ test("/outfit flag=true enters Shopping Agent directly and keeps User Truth immu
       authoritative_gender: input.authoritative_gender,
       shopping_intent: {
         gender: input.authoritative_gender,
-        weather_mode: input.weather_mode,
         persona: {expression: "女性化", maturity: "年轻成人"},
         overall_aesthetic: {core_direction: "清新都市休闲", traits: [], anti_drift: []},
         body_strategy: {goals: ["比例协调"], hard_constraints: [], soft_tactics: []},
         occasion: {type: "日常外出", formality: "休闲"},
-        weather_constraints: {material: [], thickness: "", comfort: [], safety: []},
         slots: [
           {category: "top", role: "清爽上衣"},
           {category: "bottom", role: "利落下装"},
@@ -3769,8 +3753,9 @@ test("/outfit flag=true enters Shopping Agent directly and keeps User Truth immu
     assert.equal(body.outfit_plans.length, 2);
     assert.equal(receivedInput.user_input, "我要出去玩，帮我搭配一套");
     assert.equal(receivedInput.authoritative_gender, "female");
-    assert.equal(receivedInput.weather_mode, "off");
-    assert.deepEqual(receivedInput.weather, {constraints: []});
+    assert.equal(Object.hasOwn(receivedInput, "weather_mode"), false);
+    assert.equal(Object.hasOwn(receivedInput, "weather"), false);
+    assert.equal(Object.hasOwn(receivedInput, "weather_constraints"), false);
     assert.equal(receivedOptions.deadlineMs, 155_000);
   } finally {
     shoppingAgentV1.run = originalRun;

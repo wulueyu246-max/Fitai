@@ -111,12 +111,6 @@ class OutfitRequest {
 
     final normalizedGender = gender.trim().isEmpty ? 'unisex' : gender.trim();
     final normalizedScene = scene.trim();
-    final normalizedWeatherConstraints = weatherConstraints
-        .map((value) => value.trim())
-        .where((value) => value.isNotEmpty)
-        .toSet()
-        .toList(growable: false);
-
     final immutableUserInput = request.trim();
     return {
       'height': height,
@@ -131,8 +125,6 @@ class OutfitRequest {
       'context': {
         'scene': normalizedScene,
         'location': Map<String, dynamic>.from(location),
-        'weather': Map<String, dynamic>.from(weather),
-        'weather_constraints': normalizedWeatherConstraints,
         'body_profile': {
           ...bodyProfile,
           'height': height,

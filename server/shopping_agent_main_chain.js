@@ -8,7 +8,6 @@ const SHOPPING_PRODUCTION_POLICY = Object.freeze({
     "aesthetic_direction",
     "body_proportion_strategy",
     "occasion",
-    "weather_comfort",
   ]),
   persona_principles: Object.freeze([
     "authoritative_gender_is_immutable",
@@ -19,14 +18,6 @@ const SHOPPING_PRODUCTION_POLICY = Object.freeze({
     "use_structured_body_evidence",
     "optimize_proportion_without_rigid_item_rules",
     "preserve_wearability_and_user_intent",
-  ]),
-  weather_role_boundary: Object.freeze([
-    "material",
-    "thickness",
-    "breathability",
-    "comfort",
-    "layering",
-    "safety",
   ]),
 });
 
@@ -44,13 +35,6 @@ function shoppingAgentFeatureEnabled(
 
 function buildShoppingAgentMainInput(outfitRequest, _analysis, requestId) {
   const context = plainObject(outfitRequest?.context);
-  const weatherMode = resolveWeatherMode({
-    userInput: outfitRequest?.user_input || outfitRequest?.request,
-    requestedMode: context.weather_mode || outfitRequest?.weather_mode,
-  });
-  const weather = weatherMode === "explicit"
-    ? plainObject(context.weather)
-    : {};
   const authoritativeGender = normalizeGender(
     outfitRequest?.authoritative_gender || outfitRequest?.gender,
   );
@@ -64,7 +48,7 @@ function buildShoppingAgentMainInput(outfitRequest, _analysis, requestId) {
     height: outfitRequest?.height,
     weight: outfitRequest?.weight,
     body_profile: {
-      ...plainObject(context.body_profile),
+      ...withoutWeatherFields(plainObject(context.body_profile)),
       gender: authoritativeGender,
     },
     persona: {
@@ -73,28 +57,11 @@ function buildShoppingAgentMainInput(outfitRequest, _analysis, requestId) {
     },
     styling_policy: SHOPPING_PRODUCTION_POLICY,
     occasion: String(context.scene || outfitRequest?.scene || "").trim(),
-    weather_mode: weatherMode,
-    weather: {
-      ...weather,
-      constraints: weatherMode === "explicit" &&
-        Array.isArray(context.weather_constraints)
-        ? context.weather_constraints
-        : [],
-    },
     budget: {
       item_budget: numericBudget(outfitRequest?.itemBudget),
       outfit_budget: numericBudget(outfitRequest?.outfitBudget),
     },
   };
-}
-
-function resolveWeatherMode({userInput, requestedMode} = {}) {
-  const normalizedMode = String(requestedMode || "").trim().toLowerCase();
-  if (normalizedMode === "explicit") return "explicit";
-  const input = String(userInput || "").replace(/\s+/g, "");
-  if (!input) return "off";
-  const explicitWeatherRequest = /(?:根据|按照|结合).{0,6}(?:天气|气温)|天气.{0,6}(?:搭|穿)|(?:今天|今日|明天|现在|此刻).{0,10}(?:天气|气温|下雨|雨天|很热|太热|高温|很冷|降温|大风|刮风|潮湿|闷热|穿什么|怎么穿|搭一套|搭配|出门|出去)|(?:下雨|雨天|暴雨|很热|太热|高温|很冷|降温|大风|刮风|潮湿|闷热)(?:$|.{0,12}(?:穿|搭|出门|出去|怎么办))/.test(input);
-  return explicitWeatherRequest ? "explicit" : "off";
 }
 
 function buildDirectShoppingAgentBasePayload(outfitRequest, requestId) {
@@ -122,10 +89,6 @@ function buildDirectShoppingAgentBasePayload(outfitRequest, requestId) {
     style_expression: "auto",
     analysisMode: "shopping_agent_v1",
     analysis_mode: "shopping_agent_v1",
-    weather_mode: resolveWeatherMode({
-      userInput: outfitRequest?.user_input || outfitRequest?.request,
-      requestedMode: context.weather_mode || outfitRequest?.weather_mode,
-    }),
     gender,
     looks: [],
     products: [],
@@ -172,6 +135,7 @@ async function dispatchOutfitProductionPath({
     native_look_calls: 0,
     style_repair_calls: 0,
     legacy_purchase_specification_calls: 0,
+    shopping_agent_weather_input_present: false,
     hard_deadline_ms: deadlineMs ?? null,
   });
   const payload = await integrateShoppingAgentMainChain({
@@ -255,7 +219,6 @@ function adaptShoppingAgentSuccess(result, {
   const persona = plainObject(result.shopping_intent?.persona);
   const bodyStrategy = plainObject(result.shopping_intent?.body_strategy);
   const occasion = plainObject(result.shopping_intent?.occasion);
-  const weatherConstraints = plainObject(result.shopping_intent?.weather_constraints);
   const scene = String(outfitRequest.scene || "日常").trim() || "日常";
   const createdTime = now().toISOString();
   const productsById = new Map();
@@ -317,7 +280,6 @@ function adaptShoppingAgentSuccess(result, {
       persona,
       body_strategy: bodyStrategy,
       occasion,
-      weather_constraints: weatherConstraints,
     },
     shopping_agent_status: "success",
     shopping_agent_request_id: requestId,
@@ -449,6 +411,12 @@ function plainObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
+function withoutWeatherFields(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter(([key]) =>
+    !/^(?:weather|weather_constraints|weatherConstraints|temperature|temperature_c|humidity|rain|wind|wind_kph|condition|forecast)$/i.test(key)));
+}
+
 function normalizeGender(value) {
   const normalized = String(value || "").trim().toLowerCase();
   if (["female", "女", "女性", "女士"].includes(normalized)) return "female";
@@ -473,7 +441,6 @@ module.exports = {
   buildShoppingAgentMainInput,
   dispatchOutfitProductionPath,
   integrateShoppingAgentMainChain,
-  resolveWeatherMode,
   SHOPPING_PRODUCTION_POLICY,
   shoppingAgentFeatureEnabled,
 };

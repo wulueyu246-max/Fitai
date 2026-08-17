@@ -9,7 +9,6 @@ const {
   buildShoppingAgentMainInput,
   dispatchOutfitProductionPath,
   integrateShoppingAgentMainChain,
-  resolveWeatherMode,
   shoppingAgentFeatureEnabled,
 } = require("../shopping_agent_main_chain");
 
@@ -49,36 +48,39 @@ test("main-chain input preserves User Truth without depending on legacy analysis
   assert.equal(input.persona.gender, "female");
   assert.equal(input.persona.source, "authoritative_user_truth");
   assert.equal(input.persona.style, undefined);
-  assert.deepEqual(input.weather, {constraints: []});
-  assert.equal(input.weather_mode, "off");
+  assert.equal(Object.hasOwn(input, "weather"), false);
+  assert.equal(Object.hasOwn(input, "weather_mode"), false);
   assert.deepEqual(
     input.styling_policy.decision_priority.slice(0, 2),
     ["explicit_user_intent", "persona_gender_body"],
   );
 });
 
-test("Weather Optional defaults off and only passes weather for explicit requests", () => {
-  assert.equal(resolveWeatherMode({
-    userInput: "我要出去玩，帮我搭配一套",
-  }), "off");
-  assert.equal(resolveWeatherMode({
-    userInput: "今天下雨，我现在要出去，帮我搭一套",
-  }), "explicit");
-
-  const explicit = buildShoppingAgentMainInput({
+test("weather context and a failing weather source never enter Agent input", () => {
+  const context = {
+    ...outfitRequest.context,
+    humidity: 95,
+  };
+  Object.defineProperty(context, "weather", {
+    enumerable: true,
+    get() {
+      throw new Error("weather service unavailable");
+    },
+  });
+  const input = buildShoppingAgentMainInput({
     ...outfitRequest,
-    user_input: "今天下雨，我现在要出去，帮我搭一套",
-  }, null, "request-weather-1");
-  assert.equal(explicit.weather_mode, "explicit");
-  assert.equal(explicit.weather.temperature_c, 28);
-  assert.deepEqual(explicit.weather.constraints, ["透气"]);
+    context,
+  }, null, "request-weather-disabled");
+  assert.equal(Object.hasOwn(input, "weather"), false);
+  assert.equal(Object.hasOwn(input, "weather_mode"), false);
+  assert.equal(Object.hasOwn(input, "weather_constraints"), false);
 });
 
 test("direct base payload is Flutter-safe and keeps authoritative gender", () => {
   const payload = buildDirectShoppingAgentBasePayload(outfitRequest, "request-main-1");
   assert.equal(payload.gender, "female");
   assert.equal(payload.analysisMode, "shopping_agent_v1");
-  assert.equal(payload.weather_mode, "off");
+  assert.equal(Object.hasOwn(payload, "weather_mode"), false);
   assert.equal(typeof payload.bodyProfile, "string");
   assert.equal(typeof payload.recommendations.top, "string");
 });
@@ -134,6 +136,7 @@ test("enabled production path bypasses wrong Blueprint, Native Look and style re
     native_look_calls: 0,
     style_repair_calls: 0,
     legacy_purchase_specification_calls: 0,
+    shopping_agent_weather_input_present: false,
     hard_deadline_ms: 155_000,
   });
 });
