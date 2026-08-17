@@ -1515,6 +1515,218 @@ test("minimal proof uses exactly five AI calls, three Taobao calls and real IDs"
   assert.ok(result.slot_metrics.every((slot) => slot.candidate_gate_fail >= 2));
 });
 
+test("selector slots settle independently and a timed-out shoes call uses gated fallback", async () => {
+  class ShoesTimeoutClient extends FakeAiClient {
+    async create(input) {
+      const name = input.response_format.type === "json_object"
+        ? "fitai_real_product_outfit_composer"
+        : input.response_format.json_schema.name;
+      if (name === "fitai_product_selector_shoes") {
+        this.calls.push(input);
+        const error = new Error("shoes selector timed out");
+        error.code = "ETIMEDOUT";
+        throw error;
+      }
+      return super.create(input);
+    }
+  }
+  class LargeShoesProvider extends FakeProvider {
+    async searchShoppingAgentCandidates(input) {
+      this.calls.push(input);
+      if (input.category !== "shoes") {
+        const products = candidates(input.category);
+        return {products, raw_count: products.length, valid_count: products.length};
+      }
+      const families = ["浅口芭蕾鞋", "轻便乐福鞋", "低跟玛丽珍鞋"];
+      const products = Array.from({length: 27}, (_, index) => ({
+        ...product("shoes", index + 1, `女款${families[index % families.length]}${index + 1}`),
+        product_aesthetic_score: 82 - (index % 3),
+        style_match_score: 84 - (index % 3),
+        body_strategy_match_score: 80,
+        relevance_score: 86 - (index % 3),
+        shoe_refinement_score: 82,
+        visual_weight_score: 84,
+        material_quality_score: 81,
+        hardware_quality_score: 80,
+        proportion_score: 83,
+      }));
+      return {products, raw_count: products.length, valid_count: products.length};
+    }
+  }
+
+  const logs = [];
+  const agent = new TaobaoShoppingAgentV1({
+    client: new ShoesTimeoutClient(),
+    model: "qwen3.7-plus",
+    productProvider: new LargeShoesProvider(),
+    logger: {
+      info(event, details) { logs.push({event, details}); },
+      warn(event, details) { logs.push({event, details}); },
+    },
+  });
+  const result = await agent.run({user_input: "出去玩", authoritative_gender: "female"});
+  const byCategory = Object.fromEntries(result.slot_metrics.map((slot) => [
+    slot.category,
+    slot,
+  ]));
+
+  assert.equal(result.state, "success");
+  assert.equal(result.final_look_count, 2);
+  assert.equal(byCategory.top.selector_status, "SUCCESS");
+  assert.equal(byCategory.bottom.selector_status, "SUCCESS");
+  assert.equal(byCategory.shoes.selector_status, "FALLBACK_USED");
+  assert.equal(byCategory.shoes.selector_ai_status, "AI_TIMEOUT");
+  assert.equal(byCategory.shoes.selector_error_code, "SELECTOR_AI_TIMEOUT");
+  assert.equal(byCategory.shoes.selector_fallback_used, true);
+  assert.equal(byCategory.shoes.selector_fallback_candidate_count, 3);
+  assert.equal(result.candidate_pools.shoes.length, 3);
+  assert.equal(result.per_slot_selector_summary.length, 3);
+  assert.equal(result.per_slot_selector_summary.find((slot) =>
+    slot.category === "shoes").gate_pass_count, 27);
+  assert.equal(result.per_slot_selector_summary.find((slot) =>
+    slot.category === "top").selector_error_code, null);
+  assert.equal(logs.filter(({event}) => event === "per_slot_selector_summary").length, 3);
+});
+
+test("a selector timeout cannot revive an AI-rejected candidate from another slot", async () => {
+  class RejectTopAndTimeoutShoesClient extends FakeAiClient {
+    constructor() {
+      super();
+      this.rejectedTopId = null;
+    }
+
+    async create(input) {
+      const name = input.response_format.type === "json_object"
+        ? "fitai_real_product_outfit_composer"
+        : input.response_format.json_schema.name;
+      if (name === "fitai_product_selector_shoes") {
+        this.calls.push(input);
+        const error = new Error("temporary connection reset");
+        error.code = "ECONNRESET";
+        throw error;
+      }
+      if (name === "fitai_product_selector_top") {
+        this.calls.push(input);
+        const metadata = JSON.parse(input.messages[1].content[0].text);
+        this.rejectedTopId = metadata.candidates[0].candidate_id;
+        const payload = {
+          assessments: metadata.candidates.map((candidate, index) => ({
+            candidate_id: candidate.candidate_id,
+            status: index === 0 ? "REJECT" : "KEEP",
+            selection_tier: index === 0 ? "NONE" : "HIGH",
+            scores: selectorScores(84 - index),
+            reason_codes: index === 0 ? ["AI_VISUAL_REJECT"] : [],
+          })),
+          quality_sufficient: true,
+          refinement_needed: false,
+          refinement_reasons: [],
+          candidate_pool_homogeneity: "LOW",
+          refinement_query: "",
+        };
+        return {choices: [{finish_reason: "stop", message: {content: JSON.stringify(payload)}}]};
+      }
+      return super.create(input);
+    }
+  }
+  class PreScoredProvider extends FakeProvider {
+    async searchShoppingAgentCandidates(input) {
+      this.calls.push(input);
+      const products = candidates(input.category).map((item) => input.category === "shoes" ? {
+        ...item,
+        product_aesthetic_score: 82,
+        style_match_score: 82,
+        body_strategy_match_score: 82,
+        relevance_score: 82,
+        shoe_refinement_score: 82,
+        visual_weight_score: 82,
+        material_quality_score: 82,
+        hardware_quality_score: 82,
+        proportion_score: 82,
+      } : item);
+      return {products, raw_count: products.length, valid_count: products.length};
+    }
+  }
+
+  const client = new RejectTopAndTimeoutShoesClient();
+  const result = await new TaobaoShoppingAgentV1({
+    client,
+    model: "qwen3.7-plus",
+    productProvider: new PreScoredProvider(),
+    logger: {info() {}, warn() {}},
+  }).run({user_input: "出去玩", authoritative_gender: "female"});
+
+  assert.equal(result.state, "success");
+  assert.ok(client.rejectedTopId);
+  assert.ok(!result.candidate_pools.top.some((candidate) =>
+    candidate.candidate_id === client.rejectedTopId));
+  assert.equal(result.slot_metrics.find((slot) =>
+    slot.category === "top").selector_fallback_used, false);
+  assert.equal(result.slot_metrics.find((slot) =>
+    slot.category === "shoes").selector_fallback_used, true);
+});
+
+test("selector AI input is pre-ranked and capped at eight images per slot", async () => {
+  class TenCandidateProvider extends FakeProvider {
+    async searchShoppingAgentCandidates(input) {
+      this.calls.push(input);
+      const family = input.category === "top" ? "上衣" :
+        input.category === "bottom" ? "直筒裤" : "乐福鞋";
+      const products = Array.from({length: 10}, (_, index) => ({
+        ...product(input.category, index + 1, `女款${index + 1}号${family}`),
+        product_aesthetic_score: 70 + index,
+        relevance_score: 70 + index,
+      }));
+      return {products, raw_count: products.length, valid_count: products.length};
+    }
+  }
+  const client = new FakeAiClient();
+  const result = await new TaobaoShoppingAgentV1({
+    client,
+    model: "qwen3.7-plus",
+    productProvider: new TenCandidateProvider(),
+    logger: {info() {}, warn() {}},
+  }).run({user_input: "出去玩", authoritative_gender: "female"});
+
+  assert.equal(result.state, "success");
+  for (const category of ["top", "bottom", "shoes"]) {
+    const call = client.calls.find((item) => item.response_format.type === "json_schema" &&
+      item.response_format.json_schema.name === `fitai_product_selector_${category}`);
+    const metadata = JSON.parse(call.messages[1].content[0].text);
+    assert.equal(metadata.candidates.length, 8);
+    assert.equal(call.messages[1].content.filter((item) =>
+      item.type === "image_url").length, 8);
+    assert.equal(result.slot_metrics.find((slot) =>
+      slot.category === category).selector_ai_input_count, 8);
+    assert.equal(result.slot_metrics.find((slot) =>
+      slot.category === category).selector_fallback_used, false);
+  }
+});
+
+test("zero gated shoes fail without selector fallback or Composer", async () => {
+  const client = new FakeAiClient();
+  const provider = {
+    async searchShoppingAgentCandidates(input) {
+      const products = input.category === "shoes"
+        ? [product("bottom", 1, "女款直筒裤")]
+        : candidates(input.category);
+      return {products, raw_count: products.length, valid_count: products.length};
+    },
+  };
+  const agent = new TaobaoShoppingAgentV1({
+    client,
+    model: "qwen3.7-plus",
+    productProvider: provider,
+    logger: {info() {}, warn() {}},
+  });
+
+  await assert.rejects(
+    () => agent.run({user_input: "出去玩", authoritative_gender: "female"}),
+    (error) => error.code === "SHOPPING_AGENT_NO_HARD_GATE_CANDIDATES" &&
+      error.details.category === "shoes",
+  );
+  assert.equal(client.calls.length, 1);
+});
+
 test("one invalid Composer reference keeps two valid Looks and logs safe ID audit", async () => {
   const logs = [];
   const agent = new TaobaoShoppingAgentV1({

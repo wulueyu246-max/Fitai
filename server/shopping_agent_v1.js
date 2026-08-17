@@ -30,6 +30,7 @@ const POOL_HOMOGENEITY = Object.freeze({
   HIGH: "HIGH",
 });
 const MAX_VALID_CANDIDATES_PER_SLOT = 10;
+const MAX_SELECTOR_AI_CANDIDATES_PER_SLOT = 8;
 const MAX_SELECTED_CANDIDATES_PER_SLOT = 3;
 const MAX_REFINEMENT_ROUNDS = 1;
 const SELECTOR_RECOMMENDABLE_SCORE = 75;
@@ -48,6 +49,12 @@ const QUERY_COMPLEXITY_STATUS = Object.freeze({
   SIMPLIFIED: "SIMPLIFIED",
 });
 const RECALL_BROADENING_REASON = "ZERO_RESULT_RECALL";
+const SELECTOR_EXECUTION_STATUS = Object.freeze({
+  SUCCESS: "SUCCESS",
+  AI_TIMEOUT: "AI_TIMEOUT",
+  AI_ERROR: "AI_ERROR",
+  FALLBACK_USED: "FALLBACK_USED",
+});
 
 const QUERY_FAMILY_TERMS = Object.freeze({
   top: Object.freeze([
@@ -714,6 +721,12 @@ class TaobaoShoppingAgentV1 {
     }
 
     const selectGroup = async (group, {round = 1} = {}) => {
+      const selectorStartedAt = Date.now();
+      const aiCandidates = rankCandidatesForSelectorInput(
+        group.candidates,
+        group.slot.category,
+      ).slice(0, MAX_SELECTOR_AI_CANDIDATES_PER_SLOT);
+      const aiGroup = {...group, candidates: aiCandidates};
       const payload = await this.#aiCall({
         phase: `product_selector_${group.slot.category}` +
           (round > 1 ? `_refinement_${round - 1}` : ""),
@@ -722,12 +735,12 @@ class TaobaoShoppingAgentV1 {
         schema: productSelectionSchema(group.slot.category),
         timeoutMs: this.selectorTimeoutMs,
         metrics,
-        messages: buildSelectorMessages(shoppingIntent, group, {round}),
+        messages: buildSelectorMessages(shoppingIntent, aiGroup, {round}),
       });
-      const normalized = validateProductSelection(payload, group.candidates, {
+      const normalized = validateProductSelection(payload, aiCandidates, {
         category: group.slot.category,
       });
-      const pool = selectFinalCandidatePool(group.candidates, normalized.assessments);
+      const pool = selectFinalCandidatePool(aiCandidates, normalized.assessments);
       if (pool.length === 0) {
         throw new ShoppingAgentV1Error(
           `${group.slot.category} 经 AI 真实图片选择后没有可用候选`,
@@ -740,6 +753,17 @@ class TaobaoShoppingAgentV1 {
       const selection = {
         ...group,
         round,
+        selector_status: SELECTOR_EXECUTION_STATUS.SUCCESS,
+        selector_elapsed_ms: Date.now() - selectorStartedAt,
+        selector_error_code: null,
+        selector_ai_status: SELECTOR_EXECUTION_STATUS.SUCCESS,
+        selector_ai_input_count: aiCandidates.length,
+        selector_ai_keep: normalized.assessments.filter((item) =>
+          item.status === SELECTOR_STATUS.KEEP).length,
+        selector_ai_reject: normalized.assessments.filter((item) =>
+          item.status === SELECTOR_STATUS.REJECT).length,
+        selector_fallback_used: false,
+        selector_fallback_candidate_count: 0,
         selector_keep: normalized.assessments.filter((item) =>
           item.status === SELECTOR_STATUS.KEEP).length,
         selector_reject: normalized.assessments.filter((item) =>
@@ -767,6 +791,10 @@ class TaobaoShoppingAgentV1 {
         request_id: requestId,
         category: group.slot.category,
         round,
+        selector_status: selection.selector_status,
+        selector_elapsed_ms: selection.selector_elapsed_ms,
+        selector_error_code: selection.selector_error_code,
+        ai_input_count: selection.selector_ai_input_count,
         selector_keep: selection.selector_keep,
         selector_reject: selection.selector_reject,
         selector_uncertain: selection.selector_uncertain,
@@ -793,8 +821,53 @@ class TaobaoShoppingAgentV1 {
       });
       return selection;
     };
-    const firstRoundSelections = await Promise.all(effectiveRetrievals.map((group) =>
-      selectGroup(group)));
+    const settledSelectors = await Promise.allSettled(effectiveRetrievals.map(async (group) => {
+      const selectorStartedAt = Date.now();
+      try {
+        return await selectGroup(group);
+      } catch (error) {
+        error.selector_elapsed_ms = Date.now() - selectorStartedAt;
+        error.selector_ai_input_count = Math.min(
+          group.candidates.length,
+          MAX_SELECTOR_AI_CANDIDATES_PER_SLOT,
+        );
+        throw error;
+      }
+    }));
+    const firstRoundSelections = [];
+    let fatalSelectorError = null;
+    for (const [index, settled] of settledSelectors.entries()) {
+      const group = effectiveRetrievals[index];
+      let selection;
+      let failure = null;
+      if (settled.status === "fulfilled") {
+        selection = settled.value;
+      } else {
+        failure = classifySelectorFailure(settled.reason, {
+          elapsedMs: settled.reason?.selector_elapsed_ms,
+          timeoutMs: this.selectorTimeoutMs,
+        });
+        if (failure.fallback_eligible &&
+            group.candidate_gate_pass >= MAX_SELECTED_CANDIDATES_PER_SLOT &&
+            group.candidates.length >= MAX_SELECTED_CANDIDATES_PER_SLOT) {
+          selection = buildSelectorFallbackSelection(group, {
+            elapsedMs: settled.reason?.selector_elapsed_ms,
+            errorCode: failure.error_code,
+            aiStatus: failure.ai_status,
+            aiInputCount: settled.reason?.selector_ai_input_count,
+          });
+        } else if (!fatalSelectorError) {
+          fatalSelectorError = settled.reason;
+        }
+      }
+      const summary = selectorExecutionSummary(group, selection, failure, settled.reason);
+      this.logger[selection ? "info" : "warn"]?.("per_slot_selector_summary", {
+        request_id: requestId,
+        ...summary,
+      });
+      if (selection) firstRoundSelections.push(selection);
+    }
+    if (fatalSelectorError) throw fatalSelectorError;
 
     const refinementDecisions = firstRoundSelections.map((selection) => {
       if (selection.recall_broadening_used === true) {
@@ -1032,6 +1105,15 @@ class TaobaoShoppingAgentV1 {
 
     const slotMetrics = selections.map((selection) => ({
       ...retrievalMetric(selection),
+      selector_status: selection.selector_status,
+      selector_elapsed_ms: selection.selector_elapsed_ms,
+      selector_error_code: selection.selector_error_code,
+      selector_ai_status: selection.selector_ai_status,
+      selector_ai_input_count: selection.selector_ai_input_count,
+      selector_ai_keep: selection.selector_ai_keep,
+      selector_ai_reject: selection.selector_ai_reject,
+      selector_fallback_used: selection.selector_fallback_used,
+      selector_fallback_candidate_count: selection.selector_fallback_candidate_count,
       selector_keep: selection.selector_keep,
       selector_reject: selection.selector_reject,
       selector_uncertain: selection.selector_uncertain,
@@ -1076,6 +1158,21 @@ class TaobaoShoppingAgentV1 {
         selection.refinement?.second_query || null,
       ])),
       slot_metrics: slotMetrics,
+      per_slot_selector_summary: slotMetrics.map((slot) => ({
+        slot_key: slot.slot_key,
+        category: slot.category,
+        gate_pass_count: slot.candidate_gate_pass,
+        ai_input_count: slot.selector_ai_input_count,
+        selector_status: slot.selector_status,
+        ai_status: slot.selector_ai_status,
+        ai_elapsed_ms: slot.selector_elapsed_ms,
+        ai_keep: slot.selector_ai_keep,
+        ai_reject: slot.selector_ai_reject,
+        fallback_used: slot.selector_fallback_used,
+        fallback_candidate_count: slot.selector_fallback_candidate_count,
+        final_candidate_count: slot.final_candidate_pool.length,
+        selector_error_code: slot.selector_error_code,
+      })),
       retrieval_budget_ms: this.taobaoRetrievalTimeoutMs,
       slot_timeout_ms: this.taobaoSlotTimeoutMs,
       max_refinement_rounds: MAX_REFINEMENT_ROUNDS,
@@ -1101,6 +1198,7 @@ class TaobaoShoppingAgentV1 {
       request_id: requestId,
       search_queries: response.search_queries,
       slot_metrics: slotMetrics,
+      per_slot_selector_summary: response.per_slot_selector_summary,
       composer_candidate_ids: response.composer_candidate_ids,
       invalid_candidate_reference: response.invalid_candidate_reference,
       final_look_count: response.final_look_count,
@@ -1690,6 +1788,164 @@ function selectFinalCandidatePool(candidates, assessments) {
       byId.get(evaluatedItem.assessment.candidate_id),
     ),
   }));
+}
+
+function rankCandidatesForSelectorInput(candidates, category) {
+  return candidates.map((candidate, index) => ({
+    candidate,
+    index,
+    score: localCandidateRankingScore(candidate, category),
+  })).sort((left, right) => right.score - left.score || left.index - right.index)
+    .map(({candidate}) => candidate);
+}
+
+function localCandidateRankingScore(candidate, category) {
+  const components = [
+    [candidate?.product_aesthetic_score ?? candidate?.product_aesthetic_match?.score, 0.3],
+    [candidate?.style_match_score ?? candidate?.aesthetic_score, 0.18],
+    [candidate?.body_strategy_match_score ?? candidate?.fit_score, 0.14],
+    [candidate?.relevance_score ?? candidate?.final_score, 0.16],
+    [candidate?.value_reasonableness, 0.14],
+  ];
+  if (category === "shoes") {
+    const shoeScores = [
+      candidate?.shoe_refinement_score,
+      candidate?.visual_weight_score,
+      candidate?.material_quality_score,
+      candidate?.hardware_quality_score,
+      candidate?.proportion_score,
+    ].map(Number).filter(Number.isFinite);
+    if (shoeScores.length > 0) {
+      components.push([
+        shoeScores.reduce((sum, score) => sum + score, 0) / shoeScores.length,
+        0.22,
+      ]);
+    }
+  }
+  const observed = components.map(([value, weight]) => [Number(value), weight])
+    .filter(([value]) => Number.isFinite(value));
+  if (observed.length === 0) return 60;
+  const totalWeight = observed.reduce((sum, [, weight]) => sum + weight, 0);
+  return roundScore(observed.reduce((sum, [value, weight]) =>
+    sum + Math.max(0, Math.min(100, value)) * weight, 0) / totalWeight);
+}
+
+function buildSelectorFallbackSelection(group, {
+  elapsedMs,
+  errorCode,
+  aiStatus,
+  aiInputCount,
+} = {}) {
+  const category = group.slot.category;
+  const pool = rankCandidatesForSelectorInput(group.candidates, category)
+    .slice(0, MAX_SELECTED_CANDIDATES_PER_SLOT)
+    .map((candidate) => ({
+      ...candidate,
+      selector_status: SELECTOR_STATUS.UNCERTAIN,
+      selection_tier: SELECTION_TIER.NORMAL,
+      selector_quality_score: localCandidateRankingScore(candidate, category),
+      selector_raw_quality_score: null,
+      selector_scores: Object.freeze({}),
+      selector_raw_scores: Object.freeze({}),
+      selector_reason_codes: Object.freeze(["SELECTOR_AI_FALLBACK"]),
+      variation_axes: candidateVariationAxes(candidate),
+    }));
+  const diversity = candidatePoolDiversity(pool, category);
+  const localScores = pool.map((candidate) => candidate.selector_quality_score);
+  const shoeScores = category === "shoes" ? pool.map((candidate) => [
+    candidate.shoe_refinement_score,
+    candidate.visual_weight_score,
+    candidate.material_quality_score,
+    candidate.hardware_quality_score,
+    candidate.proportion_score,
+  ].map(Number).filter(Number.isFinite)).filter((scores) => scores.length > 0)
+    .map((scores) => roundScore(scores.reduce((sum, score) => sum + score, 0) /
+      scores.length)) : [];
+  return {
+    ...group,
+    round: 1,
+    selector_status: SELECTOR_EXECUTION_STATUS.FALLBACK_USED,
+    selector_elapsed_ms: Number(elapsedMs || 0),
+    selector_error_code: errorCode || "SELECTOR_AI_ERROR",
+    selector_ai_status: aiStatus || SELECTOR_EXECUTION_STATUS.AI_ERROR,
+    selector_ai_input_count: Number(aiInputCount || 0),
+    selector_ai_keep: 0,
+    selector_ai_reject: 0,
+    selector_fallback_used: true,
+    selector_fallback_candidate_count: pool.length,
+    selector_keep: pool.length,
+    selector_reject: 0,
+    selector_uncertain: pool.length,
+    quality_sufficient: pool.length >= MAX_SELECTED_CANDIDATES_PER_SLOT,
+    refinement_needed: false,
+    selector_refinement_suggested: false,
+    refinement_reasons: [],
+    refinement_query: "",
+    candidate_pool_homogeneity: diversity.diversity_insufficient
+      ? POOL_HOMOGENEITY.HIGH
+      : diversity.evidence_sufficient ? POOL_HOMOGENEITY.LOW : POOL_HOMOGENEITY.MEDIUM,
+    top_candidate_quality: localScores.length > 0 ? Math.max(...localScores) : 0,
+    shoe_aesthetic_quality: shoeScores.length > 0 ? Math.max(...shoeScores) : null,
+    assessments: [],
+    final_candidate_pool: pool,
+    diversity,
+  };
+}
+
+function classifySelectorFailure(error, {elapsedMs = 0, timeoutMs = 0} = {}) {
+  const cause = String(error?.details?.cause || error?.cause?.code ||
+    error?.code || error?.name || "UNKNOWN_ERROR").toUpperCase();
+  const elapsed = Number(elapsedMs || 0);
+  const timeout = Number(timeoutMs || 0);
+  const timeoutDetected = /TIME(?:D)?OUT|ABORT/.test(cause) ||
+    (error?.code === "SHOPPING_AGENT_AI_FAILED" && timeout > 0 &&
+      elapsed >= Math.max(1, timeout - 250));
+  if (timeoutDetected) {
+    return Object.freeze({
+      ai_status: SELECTOR_EXECUTION_STATUS.AI_TIMEOUT,
+      error_code: "SELECTOR_AI_TIMEOUT",
+      fallback_eligible: true,
+      cause_code: cause,
+    });
+  }
+  const transientCodes = new Set([
+    "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH",
+    "EPIPE", "ETIMEDOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_SOCKET", "408", "429", "500", "502",
+    "503", "504",
+  ]);
+  const transient = error?.code === "SHOPPING_AGENT_AI_FAILED" &&
+    transientCodes.has(cause);
+  return Object.freeze({
+    ai_status: SELECTOR_EXECUTION_STATUS.AI_ERROR,
+    error_code: transient ? "SELECTOR_AI_ERROR" : safeErrorCode(error),
+    fallback_eligible: transient,
+    cause_code: cause,
+  });
+}
+
+function selectorExecutionSummary(group, selection, failure, error) {
+  return Object.freeze({
+    slot_key: group.slot_key,
+    category: group.slot.category,
+    gate_pass_count: group.candidate_gate_pass,
+    ai_input_count: selection?.selector_ai_input_count ??
+      Number(error?.selector_ai_input_count || 0),
+    selector_status: selection?.selector_status || failure?.ai_status ||
+      SELECTOR_EXECUTION_STATUS.AI_ERROR,
+    ai_status: selection?.selector_ai_status || failure?.ai_status ||
+      SELECTOR_EXECUTION_STATUS.AI_ERROR,
+    ai_elapsed_ms: selection?.selector_elapsed_ms ??
+      Number(error?.selector_elapsed_ms || 0),
+    ai_keep: Number(selection?.selector_ai_keep || 0),
+    ai_reject: Number(selection?.selector_ai_reject || 0),
+    fallback_used: selection?.selector_fallback_used === true,
+    fallback_candidate_count: Number(selection?.selector_fallback_candidate_count || 0),
+    final_candidate_count: Number(selection?.final_candidate_pool?.length || 0),
+    selector_error_code: selection
+      ? selection.selector_error_code
+      : failure?.error_code || safeErrorCode(error),
+  });
 }
 
 function buildPriceContext(candidates) {
