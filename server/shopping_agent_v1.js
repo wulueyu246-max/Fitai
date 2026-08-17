@@ -42,6 +42,47 @@ const PRICE_POSITION = Object.freeze({
 });
 const DEFAULT_TAOBAO_SLOT_TIMEOUT_MS = 25_000;
 const DEFAULT_TAOBAO_RETRIEVAL_TIMEOUT_MS = 30_000;
+const QUERY_COMPLEXITY_STATUS = Object.freeze({
+  PASS: "PASS",
+  SIMPLIFIED: "SIMPLIFIED",
+});
+const RECALL_BROADENING_REASON = "ZERO_RESULT_RECALL";
+
+const QUERY_FAMILY_TERMS = Object.freeze({
+  top: Object.freeze([
+    "针织衫", "防晒衣", "皮肤衣", "Polo衫", "衬衫", "T恤", "背心", "罩衫",
+    "外套", "上衣",
+  ]),
+  bottom: Object.freeze([
+    "阔腿裤", "直筒裤", "牛仔裤", "工装裤", "运动裤", "七分裤", "短裤",
+    "A字裙", "半身裙", "铅笔裙", "长裙", "短裙", "裤", "裙", "下装",
+  ]),
+  shoes: Object.freeze([
+    "玛丽珍鞋", "芭蕾鞋", "德训鞋", "乐福鞋", "高跟鞋", "运动鞋", "跑鞋",
+    "凉鞋", "雨靴", "雨鞋", "短靴", "长靴", "靴", "鞋",
+  ]),
+});
+const QUERY_FEATURE_TERMS = Object.freeze({
+  top: Object.freeze([
+    "短款", "短袖", "长袖", "方领", "V领", "圆领", "修身", "合身", "宽松",
+  ]),
+  bottom: Object.freeze([
+    "A字", "高腰", "直筒", "阔腿", "微喇", "修身", "宽松", "迷你", "及踝",
+  ]),
+  shoes: Object.freeze([
+    "低跟", "粗跟", "细跟", "浅口", "尖头", "圆头", "薄底", "厚底", "轻量",
+  ]),
+});
+const QUERY_STYLE_TERMS = Object.freeze([
+  "法式", "韩系", "复古", "可爱", "甜美", "轻熟", "极简", "学院", "通勤", "休闲",
+]);
+const QUERY_NON_RECALL_TERMS = Object.freeze([
+  "防泼水", "防水", "透气", "防晒", "速干", "吸湿", "排汗", "轻薄", "保暖",
+  "奶油白", "薄荷绿", "米白", "纯白", "黑色", "白色", "灰色", "蓝色", "绿色",
+  "粉色", "红色", "黄色", "紫色", "棕色", "咖色", "卡其", "银色", "金色",
+  "棉", "真丝", "亚麻", "皮革", "羊毛", "雪纺", "透明",
+]);
+const WEATHER_PRODUCT_TERMS = Object.freeze(["雨靴", "雨鞋", "防晒衣", "皮肤衣"]);
 
 const STRING_ARRAY_SCHEMA = Object.freeze({
   type: "array",
@@ -351,7 +392,7 @@ class TaobaoShoppingAgentV1 {
         this.#fashionKnowledge(normalizedInput),
       ),
     });
-    const shoppingIntent = normalizeShoppingIntent(
+    const shoppingIntent = buildShoppingIntent(
       planning.shopping_intent,
       normalizedInput,
     );
@@ -363,6 +404,23 @@ class TaobaoShoppingAgentV1 {
         slot.search_query,
       ])),
     });
+    for (const slot of shoppingIntent.slots) {
+      this.logger.info?.("shopping_agent_v1_search_query", {
+        request_id: requestId,
+        slot_key: `${requestId}:shopping-agent-v1:${slot.category}`,
+        category: slot.category,
+        raw_semantic_constraints: {
+          role: slot.role,
+          hard_constraints: slot.hard_constraints,
+          soft_preferences: slot.soft_preferences,
+          avoid: slot.avoid,
+        },
+        original_query: slot.original_search_query,
+        search_query: slot.search_query,
+        query_attribute_count: slot.query_attribute_count,
+        query_complexity_status: slot.query_complexity_status,
+      });
+    }
 
     let candidateCounter = 0;
     const retrieveSlot = async ({slot, query, round = 1, exclude = []}) => {
@@ -450,6 +508,10 @@ class TaobaoShoppingAgentV1 {
         attempts: Number(result?.attempts || attempts || 1),
         status: "SUCCESS",
         error_code: null,
+        zero_result_recall: result?.zero_result_recall === true ||
+          (Number(result?.raw_count ?? rawProducts.length) === 0 &&
+            Number(result?.valid_count ?? rawProducts.length) === 0),
+        recall_error_code: result?.recall_error_code || null,
         round,
         query,
         raw_count: Number(result?.raw_count ?? rawProducts.length),
@@ -556,7 +618,49 @@ class TaobaoShoppingAgentV1 {
       };
     }
 
-    for (const group of retrievals) {
+    const effectiveRetrievals = await Promise.all(retrievals.map(async (group) => {
+      if (group.candidates.length > 0 || group.zero_result_recall !== true) {
+        return group;
+      }
+      const broadening = buildRecallBroadeningQuery({
+        shoppingIntent,
+        slot: group.slot,
+        originalQuery: group.query,
+      });
+      this.logger.info?.("shopping_agent_v1_recall_broadening", {
+        request_id: requestId,
+        slot_key: group.slot_key,
+        category: group.slot.category,
+        original_query: group.query,
+        broadened_query: broadening.query,
+        broadening_reason: RECALL_BROADENING_REASON,
+        query_attribute_count: broadening.query_attribute_count,
+        query_complexity_status: broadening.query_complexity_status,
+      });
+      if (!broadening.query || canonicalQuery(broadening.query) ===
+          canonicalQuery(group.query)) {
+        return {
+          ...group,
+          recall_broadening_used: false,
+          recall_broadening_reason: RECALL_BROADENING_REASON,
+        };
+      }
+      const broadened = await retrieveSlot({
+        slot: group.slot,
+        query: broadening.query,
+        round: 2,
+      });
+      return {
+        ...broadened,
+        original_query: group.query,
+        recall_broadening_used: true,
+        recall_broadening_reason: RECALL_BROADENING_REASON,
+        broadened_query: broadening.query,
+        first_round_retrieval: group,
+      };
+    }));
+
+    for (const group of effectiveRetrievals) {
       if (group.candidates.length === 0) {
         throw new ShoppingAgentV1Error(
           `${group.slot.category} 没有通过核心 Gate 的真实淘宝候选`,
@@ -630,10 +734,37 @@ class TaobaoShoppingAgentV1 {
       });
       return selection;
     };
-    const firstRoundSelections = await Promise.all(retrievals.map((group) =>
+    const firstRoundSelections = await Promise.all(effectiveRetrievals.map((group) =>
       selectGroup(group)));
 
     const refinementDecisions = firstRoundSelections.map((selection) => {
+      if (selection.recall_broadening_used === true) {
+        const decision = Object.freeze({
+          needed: false,
+          selector_refinement_suggested:
+            selection.selector_refinement_suggested === true,
+          server_refinement_required: false,
+          refinement_reason: RECALL_BROADENING_REASON,
+          refinement_query_source: "NONE",
+          query: "",
+          canonical_category: selection.slot.category,
+          reasons: Object.freeze([RECALL_BROADENING_REASON]),
+        });
+        this.logger.info?.("shopping_agent_v1_refinement_decision", {
+          request_id: requestId,
+          slot_key: selection.slot_key,
+          initial_query: selection.query || selection.slot.search_query,
+          selector_refinement_suggested: decision.selector_refinement_suggested,
+          server_refinement_required: false,
+          refinement_reason: RECALL_BROADENING_REASON,
+          refinement_query_source: "NONE",
+          refinement_query: "",
+          canonical_category: selection.slot.category,
+          validation_status: "BUDGET_USED_BY_RECALL_BROADENING",
+          validation_error_kind: null,
+        });
+        return {selection, decision};
+      }
       let decision;
       try {
         decision = refinementDecision(selection, {shoppingIntent});
@@ -1035,7 +1166,7 @@ function normalizeAgentInput(input = {}) {
   });
 }
 
-function normalizeShoppingIntent(value, input) {
+function buildShoppingIntent(value, input) {
   if (value == null) {
     throw schemaError("shopping_intent is required", "MISSING_SHOPPING_INTENT");
   }
@@ -1058,13 +1189,21 @@ function normalizeShoppingIntent(value, input) {
         "INVALID_SLOTS",
       );
     }
+    const searchPlan = buildSearchPlan(rawSlot, {
+      gender: input.gender,
+      category,
+      userInput: input.user_input,
+    });
     const slot = {
       category,
       role: text(rawSlot.role, 160),
       hard_constraints: stringList(rawSlot.hard_constraints, 12),
       soft_preferences: stringList(rawSlot.soft_preferences, 12),
       avoid: stringList(rawSlot.avoid, 12),
-      search_query: normalizeSearchQuery(rawSlot.search_query, input.gender, category),
+      original_search_query: searchPlan.original_query,
+      search_query: searchPlan.query,
+      query_attribute_count: searchPlan.query_attribute_count,
+      query_complexity_status: searchPlan.query_complexity_status,
     };
     if (!slot.role) throw schemaError(`${category}.role is required`);
     slotsByCategory.set(category, Object.freeze(slot));
@@ -1106,6 +1245,8 @@ function normalizeShoppingIntent(value, input) {
   });
 }
 
+const normalizeShoppingIntent = buildShoppingIntent;
+
 function normalizeBudgetContext(value, userInput = "") {
   const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const explicitItem = positiveBudgetNumber(source.item_budget ?? source.itemBudget);
@@ -1124,24 +1265,126 @@ function positiveBudgetNumber(value) {
   return Number.isFinite(number) && number > 0 ? roundPrice(number) : null;
 }
 
-function normalizeSearchQuery(value, gender, category) {
+function buildSearchPlan(rawSlot, {gender, category, userInput = ""} = {}) {
+  const rawQuery = rawSlot && typeof rawSlot === "object" && !Array.isArray(rawSlot)
+    ? rawSlot.search_query
+    : rawSlot;
+  return normalizeSearchQueryBoundary(rawQuery, gender, category, {userInput});
+}
+
+function normalizeSearchQuery(value, gender, category, options = {}) {
+  return normalizeSearchQueryBoundary(value, gender, category, options).query;
+}
+
+function normalizeSearchQueryBoundary(value, gender, category, {userInput = ""} = {}) {
   const query = text(value, 80).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ");
   const genderPattern = gender === "female" ? /女/ : gender === "male" ? /男/ : null;
-  const categoryPatterns = {
-    top: /上衣|衬衫|针织|T恤|背心|外套|罩衫/,
-    bottom: /下装|裤|裙/,
-    shoes: /鞋|靴/,
-  };
   if (!query || query.length > 50 || /天气|气温|身材策略|穿搭方案必须|因为|所以|：|:/.test(query)) {
     throw schemaError(`${category}.search_query is not concise executable product language`);
   }
   if (genderPattern && !genderPattern.test(query)) {
     throw schemaError(`${category}.search_query must contain gender`);
   }
-  if (!categoryPatterns[category].test(query)) {
+  if (explicitGenderConflict(query, gender)) {
+    throw schemaError(`${category}.search_query conflicts with authoritative gender`);
+  }
+  const canonicalCategory = normalizeProductCategory(query);
+  if (canonicalCategory !== category) {
     throw schemaError(`${category}.search_query must contain category`);
   }
-  return query;
+  const genderLabel = recallGenderLabel(gender);
+  let family = firstMatchingTerm(query, QUERY_FAMILY_TERMS[category]) ||
+    CATEGORY_LABELS[category];
+  const explicitWeatherProduct = userExplicitlyRequestsTerm(userInput, family);
+  if (category === "shoes" && WEATHER_PRODUCT_TERMS.includes(family) &&
+      !explicitWeatherProduct) {
+    family = CATEGORY_LABELS.shoes;
+  }
+  if (category === "top" && WEATHER_PRODUCT_TERMS.includes(family) &&
+      !explicitWeatherProduct) {
+    family = CATEGORY_LABELS.top;
+  }
+  const features = matchingTerms(query, QUERY_FEATURE_TERMS[category]);
+  const styles = matchingTerms(query, QUERY_STYLE_TERMS);
+  const nonRecall = matchingTerms(query, QUERY_NON_RECALL_TERMS);
+  const rawAttributeCount = new Set([...features, ...styles, ...nonRecall]).size;
+  const feature = features[0] || "";
+  const style = styles[0] || "";
+  const simplifiedQuery = [genderLabel, style, feature, family]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const normalizedOriginal = query.replace(/\s+/g, "").toLowerCase();
+  const normalizedSimplified = simplifiedQuery.replace(/\s+/g, "").toLowerCase();
+  const simplified = rawAttributeCount > 2 || nonRecall.length > 0 ||
+    styles.length > 1 || features.length > 1 ||
+    normalizedOriginal !== normalizedSimplified;
+  return Object.freeze({
+    original_query: query,
+    query: simplifiedQuery,
+    canonical_category: category,
+    query_attribute_count: Number(Boolean(style)) + Number(Boolean(feature)),
+    raw_attribute_count: rawAttributeCount,
+    query_complexity_status: simplified
+      ? QUERY_COMPLEXITY_STATUS.SIMPLIFIED
+      : QUERY_COMPLEXITY_STATUS.PASS,
+  });
+}
+
+function buildRecallBroadeningQuery({shoppingIntent, slot, originalQuery} = {}) {
+  const category = slot?.category;
+  const gender = normalizeGender(shoppingIntent?.gender);
+  const query = text(originalQuery, 80);
+  if (!CORE_CATEGORIES.includes(category) || !query) {
+    return Object.freeze({
+      query: "",
+      query_attribute_count: 0,
+      query_complexity_status: QUERY_COMPLEXITY_STATUS.SIMPLIFIED,
+    });
+  }
+  const family = firstMatchingTerm(query, QUERY_FAMILY_TERMS[category]) ||
+    CATEGORY_LABELS[category];
+  const genericFamily = CATEGORY_LABELS[category];
+  const features = matchingTerms(query, QUERY_FEATURE_TERMS[category]);
+  const styles = matchingTerms(query, QUERY_STYLE_TERMS);
+  let parts;
+  if (styles.length > 0 || features.length > 0) {
+    parts = [recallGenderLabel(gender), family];
+  } else if (canonicalQuery(family) !== canonicalQuery(genericFamily)) {
+    parts = [recallGenderLabel(gender), genericFamily];
+  } else {
+    parts = [recallGenderLabel(gender), genericFamily];
+  }
+  const broadened = parts.filter(Boolean).join(" ").trim();
+  return Object.freeze({
+    query: broadened,
+    query_attribute_count: 0,
+    query_complexity_status: QUERY_COMPLEXITY_STATUS.SIMPLIFIED,
+  });
+}
+
+function recallGenderLabel(gender) {
+  return gender === "female" ? "女" : gender === "male" ? "男" : "中性";
+}
+
+function matchingTerms(value, terms = []) {
+  const source = String(value || "");
+  return [...new Set(terms.filter((term) => source.includes(term)))];
+}
+
+function firstMatchingTerm(value, terms = []) {
+  return matchingTerms(value, terms)[0] || "";
+}
+
+function userExplicitlyRequestsTerm(userInput, term) {
+  const input = String(userInput || "").replace(/\s+/g, "");
+  if (!input || !term) return false;
+  if (input.includes(term)) return true;
+  if (["雨靴", "雨鞋"].includes(term)) return /(?:要|想要|需要|买|找).{0,8}(?:雨靴|雨鞋)/.test(input);
+  if (["防晒衣", "皮肤衣"].includes(term)) {
+    return /(?:要|想要|需要|买|找).{0,8}(?:防晒衣|皮肤衣)/.test(input);
+  }
+  return false;
 }
 
 function normalizeRefinementQuery(value, gender, category) {
@@ -1927,7 +2170,7 @@ function buildPlannerMessages(input, fashionKnowledge) {
       content: `You are FitAI Shopping Intent and Taobao Search Planner V1.
 Decide one coherent, purchasable styling direction before marketplace search. User intent and authoritative gender outrank occasion and weather. Weather may only change material, thickness, comfort and safety; it must not select a functional or sports aesthetic unless the user explicitly asks for sport.
 Create exactly three slots: top, bottom and shoes. Shopping Intent is flexible intent, not an imagined SKU contract. Hard constraints contain only truly non-negotiable gender/category/safety requirements. Put ordinary aesthetic choices in soft_preferences.
-Generate exactly one concise Chinese Taobao query per slot. Every query must contain the gender direction, the product category and only one or two key styling traits. Never include weather prose, body-strategy explanations, reasons, prompt text, colons or multiple alternatives. Return only the strict JSON object.`,
+Generate exactly one high-recall Chinese Taobao query per slot. A query may contain only: gender direction, a broad category/product family, one core silhouette or key feature, and at most one truly important style word. Weather, body strategy, persona detail, colors, materials, comfort explanations and secondary design elements belong in structured intent evidence, not in the query. Do not turn shoes into rain boots or a top into sun-protective/technical outerwear because of weather unless user_input explicitly requests that product. Never include reasons, prompt text, colons or multiple alternatives. Return only the strict JSON object.`,
     },
     {
       role: "user",
@@ -2120,7 +2363,12 @@ function retrievalMetric(retrieval) {
   return {
     slot_key: retrieval.slot_key,
     category: retrieval.slot.category,
-    query: retrieval.slot.search_query,
+    query: retrieval.query || retrieval.slot.search_query,
+    original_query: retrieval.original_query || retrieval.slot.original_search_query ||
+      retrieval.slot.search_query,
+    broadened_query: retrieval.broadened_query || null,
+    broadening_reason: retrieval.recall_broadening_reason || null,
+    recall_broadening_used: retrieval.recall_broadening_used === true,
     start_time: retrieval.start_time,
     end_time: retrieval.end_time,
     elapsed_ms: retrieval.elapsed_ms,
@@ -2536,9 +2784,13 @@ module.exports = {
   SELECTION_TIER,
   SELECTOR_STATUS,
   SHOPPING_PLAN_SCHEMA,
+  QUERY_COMPLEXITY_STATUS,
   ShoppingAgentV1Error,
   TaobaoShoppingAgentV1,
   buildPriceContext,
+  buildRecallBroadeningQuery,
+  buildSearchPlan,
+  buildShoppingIntent,
   candidatePoolDiversity,
   candidateVariationAxes,
   enrichCandidatePriceContext,
@@ -2549,6 +2801,7 @@ module.exports = {
   normalizeBudgetContext,
   normalizeRefinementQuery,
   normalizeSearchQuery,
+  normalizeSearchQueryBoundary,
   normalizeShoppingIntent,
   parseAiJson,
   refinementDecision,

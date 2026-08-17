@@ -14,6 +14,9 @@ const {
   ShoppingAgentV1Error,
   TaobaoShoppingAgentV1,
   buildPriceContext,
+  buildRecallBroadeningQuery,
+  buildSearchPlan,
+  buildShoppingIntent,
   candidatePoolDiversity,
   enrichCandidatePriceContext,
   classifyTaobaoRetrievalError,
@@ -21,6 +24,7 @@ const {
   normalizeAgentInput,
   normalizeBudgetContext,
   normalizeRefinementQuery,
+  normalizeSearchQueryBoundary,
   normalizeShoppingIntent,
   parseAiJson,
   refinementDecision,
@@ -643,6 +647,156 @@ test("Shopping Intent preserves only flexible slot intent and one executable que
   assert.ok(intent.slots.every((slot) => !Object.hasOwn(slot, "product_type")));
 });
 
+test("Search Recall Boundary strips weather, color and excess attributes before Taobao", () => {
+  const input = normalizeAgentInput({
+    user_input: "我要出去玩，帮我搭一套",
+    gender: "female",
+    weather: {condition: "下雨", temperature_c: 32},
+  });
+  const rawPlan = plan();
+  rawPlan.shopping_intent.overall_aesthetic.core_direction =
+    "都市轻浪漫 (Urban Light Romantic)";
+  rawPlan.shopping_intent.slots[0].search_query =
+    "女式法式防泼水短袖衬衫奶油白";
+  rawPlan.shopping_intent.slots[1].search_query =
+    "女式高腰A字迷你半身裙薄荷绿";
+  rawPlan.shopping_intent.slots[2].search_query =
+    "女式透明粗跟雨靴可爱风";
+
+  const intent = buildShoppingIntent(rawPlan.shopping_intent, input);
+  assert.equal(intent.slots[0].search_query, "女 法式 短袖 衬衫");
+  assert.equal(intent.slots[1].search_query, "女 A字 半身裙");
+  assert.equal(intent.slots[2].search_query, "女 可爱 粗跟 鞋");
+  assert.ok(intent.slots.every((slot) => slot.query_attribute_count <= 2));
+  assert.ok(intent.slots.every((slot) =>
+    slot.query_complexity_status === "SIMPLIFIED"));
+  assert.doesNotMatch(intent.slots[0].search_query, /防泼水|奶油白/);
+  assert.doesNotMatch(intent.slots[1].search_query, /薄荷绿/);
+  assert.doesNotMatch(intent.slots[2].search_query, /雨靴/);
+});
+
+test("weather cannot choose rain boots but an explicit user request can", () => {
+  const rawSlot = {category: "shoes", search_query: "女式透明粗跟雨靴可爱风"};
+  const weatherOnly = buildSearchPlan(rawSlot, {
+    gender: "female",
+    category: "shoes",
+    userInput: "今天下雨，帮我搭一套",
+  });
+  const explicit = buildSearchPlan(rawSlot, {
+    gender: "female",
+    category: "shoes",
+    userInput: "我要一双雨靴",
+  });
+  assert.doesNotMatch(weatherOnly.query, /雨靴|雨鞋/);
+  assert.match(explicit.query, /雨靴/);
+});
+
+test("Golden and Flutter contexts share the same Shopping Intent and Search Plan boundary", () => {
+  const rawPlan = plan();
+  rawPlan.shopping_intent.slots[0].search_query =
+    "女式法式防泼水短袖衬衫奶油白";
+  rawPlan.shopping_intent.slots[2].search_query =
+    "女式透明粗跟雨靴可爱风";
+  const golden = normalizeAgentInput({
+    user_input: "我要出去玩，帮我搭一套",
+    gender: "female",
+    height: 160,
+    weight: 49,
+  });
+  const flutter = normalizeAgentInput({
+    user_input: "我要出去玩，帮我搭一套",
+    gender: "female",
+    height: 160,
+    weight: 49,
+    persona: {style: "都市轻浪漫", outfit_blueprint: {source: "flutter"}},
+    occasion: "约会",
+    weather: {condition: "rain", constraints: ["防泼水", "透气"]},
+  });
+  const goldenIntent = buildShoppingIntent(rawPlan.shopping_intent, golden);
+  const flutterIntent = buildShoppingIntent(rawPlan.shopping_intent, flutter);
+  assert.deepEqual(
+    flutterIntent.slots.map((slot) => slot.search_query),
+    goldenIntent.slots.map((slot) => slot.search_query),
+  );
+  assert.ok(flutterIntent.slots.every((slot) => slot.query_attribute_count <= 2));
+});
+
+test("ZERO_RESULT_RECALL uses one deterministic broadening round before selectors", async () => {
+  class ZeroThenBroadProvider {
+    constructor() {
+      this.calls = [];
+      this.counts = new Map();
+    }
+
+    async searchShoppingAgentCandidates(input) {
+      this.calls.push(input);
+      const count = (this.counts.get(input.category) || 0) + 1;
+      this.counts.set(input.category, count);
+      if (count === 1) {
+        return {
+          products: [],
+          raw_count: 0,
+          valid_count: 0,
+          attempts: 1,
+          zero_result_recall: true,
+          recall_error_code: "ZERO_RESULT_RECALL",
+        };
+      }
+      const products = candidates(input.category);
+      return {products, raw_count: products.length, valid_count: products.length, attempts: 1};
+    }
+  }
+
+  const logs = [];
+  const provider = new ZeroThenBroadProvider();
+  const client = new FakeAiClient();
+  const agent = new TaobaoShoppingAgentV1({
+    client,
+    model: "qwen3.7-plus",
+    productProvider: provider,
+    logger: {
+      info(event, details) { logs.push({event, details}); },
+      warn(event, details) { logs.push({event, details}); },
+    },
+  });
+  const result = await agent.run({
+    user_input: "我要出去玩，帮我搭一套",
+    authoritative_gender: "female",
+    height: 160,
+    weight: 49,
+  });
+
+  assert.equal(result.state, "success");
+  assert.equal(result.taobao_call_count, 6);
+  assert.equal(result.ai_call_count, 5);
+  assert.ok(result.final_look_count >= 2);
+  for (const category of ["top", "bottom", "shoes"]) {
+    const calls = provider.calls.filter((call) => call.category === category);
+    assert.equal(calls.length, 2);
+    assert.notEqual(calls[0].query, calls[1].query);
+    const metric = result.slot_metrics.find((item) => item.category === category);
+    assert.equal(metric.recall_broadening_used, true);
+    assert.equal(metric.broadening_reason, "ZERO_RESULT_RECALL");
+    assert.equal(metric.refinement_attempted, false);
+  }
+  assert.equal(logs.filter(({event}) =>
+    event === "shopping_agent_v1_recall_broadening").length, 3);
+});
+
+test("recall broadening removes optional traits without changing gender or category", () => {
+  const broadening = buildRecallBroadeningQuery({
+    shoppingIntent: {gender: "female"},
+    slot: {category: "top"},
+    originalQuery: "女 法式 短袖 衬衫",
+  });
+  assert.equal(broadening.query, "女 衬衫");
+  assert.equal(normalizeSearchQueryBoundary(
+    broadening.query,
+    "female",
+    "top",
+  ).canonical_category, "top");
+});
+
 test("Phase 2.5 carries explicit item and outfit budgets without inventing a cap", () => {
   const explicit = normalizeAgentInput({
     user_input: "出去玩",
@@ -670,7 +824,7 @@ test("refinement query validation uses canonical category and explicit gender", 
   const initialPlan = plan();
   initialPlan.shopping_intent.slots[0].search_query = "女短款修身针织衫";
   const initialIntent = normalizeShoppingIntent(initialPlan.shopping_intent, input);
-  assert.equal(initialIntent.slots[0].search_query, "女短款修身针织衫");
+  assert.equal(initialIntent.slots[0].search_query, "女 短款 针织衫");
 
   assert.deepEqual(
     normalizeRefinementQuery("女 方领 修身 短袖", "female", "top"),
@@ -1353,7 +1507,7 @@ test("Phase 2 refines only an insufficient homogeneous slot once and preserves i
     details.slot_key.endsWith(":top") &&
     details.validation_status === "PASS");
   assert.ok(refinementValidation);
-  assert.equal(refinementValidation.details.initial_query, "女款 方领 合身 上衣");
+  assert.equal(refinementValidation.details.initial_query, "女 方领 上衣");
   assert.match(refinementValidation.details.refinement_query, /女.*上衣/);
   assert.equal(refinementValidation.details.canonical_category, "top");
   assert.equal(refinementValidation.details.validation_error_kind, null);

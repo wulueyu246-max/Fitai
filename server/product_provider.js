@@ -259,6 +259,11 @@ class TaobaoProductProvider extends ProductProvider {
       raw_count: metrics.taobaoCount,
       valid_count: metrics.semanticPassCount,
       attempts: metrics.attempts,
+      zero_result_recall: metrics.zeroResultRecall === true ||
+        (Number(metrics.taobaoCount || 0) === 0 && products.length === 0),
+      recall_error_code: metrics.zeroResultRecall === true
+        ? "ZERO_RESULT_RECALL"
+        : null,
     };
   }
 
@@ -912,6 +917,10 @@ class TaobaoProductProvider extends ProductProvider {
       });
     } catch (error) {
       if (isEmptyTaobaoResult(error)) {
+        if (metrics) {
+          metrics.zeroResultRecall = true;
+          metrics.recallErrorCode = "ZERO_RESULT_RECALL";
+        }
         this.logger.info?.("淘宝商品搜索无结果", {
           requestId: filters.requestId || undefined,
           provider: "taobao",

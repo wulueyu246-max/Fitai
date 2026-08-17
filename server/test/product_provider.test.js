@@ -488,6 +488,34 @@ test("a Taobao 50001 empty result runs at most two category-specific fallbacks",
   assert.ok(products.every((product) => product.source === "taobao"));
 });
 
+test("Shopping Agent exposes Taobao 50001 as zero-result recall metadata", async () => {
+  const provider = providerWithClient({
+    call: async () => {
+      throw new TaobaoApiError("no result", {
+        code: "TAOBAO_API_15",
+        details: {
+          taobao_error_code: "15",
+          taobao_sub_code: "50001",
+          taobao_sub_msg: "无结果",
+        },
+      });
+    },
+  });
+
+  const result = await provider.searchShoppingAgentCandidates({
+    query: "女 短袖 衬衫",
+    category: "top",
+    gender: "female",
+    requestId: "shopping-agent-zero-result",
+  });
+
+  assert.deepEqual(result.products, []);
+  assert.equal(result.raw_count, 0);
+  assert.equal(result.valid_count, 0);
+  assert.equal(result.zero_result_recall, true);
+  assert.equal(result.recall_error_code, "ZERO_RESULT_RECALL");
+});
+
 test("an empty accessory result preserves matching core products", async () => {
   const provider = providerWithClient({
     call: async (method, params) => {
