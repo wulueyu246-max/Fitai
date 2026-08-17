@@ -265,6 +265,7 @@ function firstFailureStage(value) {
   if (explicit) return String(explicit);
   const code = String(value?.code || value?.reason || "").toUpperCase();
   if (/TAOBAO|RETRIEVAL|PROVIDER/.test(code)) return "taobao_retrieval";
+  if (/REFINEMENT_QUERY/.test(code)) return "product_selector_refinement";
   if (/SELECTOR/.test(code)) return "product_selector";
   if (/COMPOSER|LOOK/.test(code)) return "real_product_outfit_composer";
   if (/INTENT|SEARCH_PLAN|SCHEMA/.test(code)) return "shopping_intent_search_plan";

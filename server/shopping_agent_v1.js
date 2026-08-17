@@ -579,42 +579,7 @@ class TaobaoShoppingAgentV1 {
         metrics,
         messages: buildSelectorMessages(shoppingIntent, group, {round}),
       });
-      const initialQuery = group.query || group.slot.search_query;
-      let normalized;
-      try {
-        normalized = validateProductSelection(payload, group.candidates, {
-          slot: group.slot,
-          gender: shoppingIntent.gender,
-          originalQuery: initialQuery,
-        });
-        this.logger.info?.("shopping_agent_v1_refinement_query_validation", {
-          request_id: requestId,
-          slot_key: group.slot_key,
-          initial_query: initialQuery,
-          refinement_query: normalized.refinement_query,
-          canonical_category: normalized.refinement_query
-            ? normalizeProductCategory(normalized.refinement_query)
-            : null,
-          validation_status: normalized.refinement_query ? "PASS" : "NOT_REQUIRED",
-          validation_error_kind: null,
-        });
-      } catch (error) {
-        const validationErrorKind = error?.schema_error_kind || "INVALID_STRUCTURE";
-        if (!String(validationErrorKind).startsWith("REFINEMENT_QUERY_")) throw error;
-        const refinementQuery = text(payload?.refinement_query, 80);
-        this.logger.warn?.("shopping_agent_v1_refinement_query_validation", {
-          request_id: requestId,
-          slot_key: group.slot_key,
-          initial_query: initialQuery,
-          refinement_query: refinementQuery,
-          canonical_category: refinementQuery
-            ? normalizeProductCategory(refinementQuery)
-            : null,
-          validation_status: "FAIL",
-          validation_error_kind: validationErrorKind,
-        });
-        throw error;
-      }
+      const normalized = validateProductSelection(payload, group.candidates);
       const pool = selectFinalCandidatePool(group.candidates, normalized.assessments);
       if (pool.length === 0) {
         throw new ShoppingAgentV1Error(
@@ -636,6 +601,7 @@ class TaobaoShoppingAgentV1 {
           item.status === SELECTOR_STATUS.UNCERTAIN).length,
         quality_sufficient: normalized.quality_sufficient,
         refinement_needed: normalized.refinement_needed,
+        selector_refinement_suggested: normalized.refinement_needed,
         refinement_reasons: normalized.refinement_reasons,
         refinement_query: normalized.refinement_query,
         candidate_pool_homogeneity: normalized.candidate_pool_homogeneity,
@@ -653,6 +619,7 @@ class TaobaoShoppingAgentV1 {
         selector_uncertain: selection.selector_uncertain,
         quality_sufficient: selection.quality_sufficient,
         refinement_needed: selection.refinement_needed,
+        selector_refinement_suggested: selection.selector_refinement_suggested,
         refinement_reasons: selection.refinement_reasons,
         refinement_query: selection.refinement_query,
         candidate_pool_homogeneity: selection.candidate_pool_homogeneity,
@@ -666,10 +633,42 @@ class TaobaoShoppingAgentV1 {
     const firstRoundSelections = await Promise.all(retrievals.map((group) =>
       selectGroup(group)));
 
-    const refinementPlans = firstRoundSelections.map((selection) => ({
-      selection,
-      decision: refinementDecision(selection),
-    })).filter(({decision}) => decision.needed);
+    const refinementDecisions = firstRoundSelections.map((selection) => {
+      let decision;
+      try {
+        decision = refinementDecision(selection, {shoppingIntent});
+      } catch (error) {
+        this.logger.warn?.("shopping_agent_v1_refinement_decision", {
+          request_id: requestId,
+          slot_key: selection.slot_key,
+          initial_query: selection.query || selection.slot.search_query,
+          selector_refinement_suggested: selection.selector_refinement_suggested,
+          server_refinement_required: true,
+          refinement_reason: error?.details?.refinement_reason || null,
+          refinement_query_source: error?.details?.refinement_query_source || "NONE",
+          refinement_query: error?.details?.refinement_query || "",
+          validation_status: "FAIL",
+          validation_error_kind: error?.details?.validation_error_kind || null,
+          error_code: error?.code || "REFINEMENT_QUERY_GENERATION_FAILED",
+        });
+        throw error;
+      }
+      this.logger.info?.("shopping_agent_v1_refinement_decision", {
+        request_id: requestId,
+        slot_key: selection.slot_key,
+        initial_query: selection.query || selection.slot.search_query,
+        selector_refinement_suggested: decision.selector_refinement_suggested,
+        server_refinement_required: decision.server_refinement_required,
+        refinement_reason: decision.refinement_reason,
+        refinement_query_source: decision.refinement_query_source,
+        refinement_query: decision.query,
+        canonical_category: decision.canonical_category,
+        validation_status: decision.server_refinement_required ? "PASS" : "NOT_REQUIRED",
+        validation_error_kind: null,
+      });
+      return {selection, decision};
+    });
+    const refinementPlans = refinementDecisions.filter(({decision}) => decision.needed);
     const refinementResults = await Promise.all(refinementPlans.map(async ({
       selection,
       decision,
@@ -763,6 +762,12 @@ class TaobaoShoppingAgentV1 {
             first_query: selection.query || selection.slot.search_query,
             second_query: refinement.decision.query,
             reasons: refinement.decision.reasons,
+            selector_refinement_suggested:
+              refinement.decision.selector_refinement_suggested,
+            server_refinement_required: refinement.decision.server_refinement_required,
+            refinement_reason: refinement.decision.refinement_reason,
+            refinement_query_source: refinement.decision.refinement_query_source,
+            refinement_query: refinement.decision.query,
             rounds: [selectorRoundMetric(selection)],
           } : {
             triggered: false,
@@ -776,6 +781,11 @@ class TaobaoShoppingAgentV1 {
             first_query: selection.query || selection.slot.search_query,
             second_query: null,
             reasons: [],
+            selector_refinement_suggested: selection.selector_refinement_suggested,
+            server_refinement_required: false,
+            refinement_reason: null,
+            refinement_query_source: "NONE",
+            refinement_query: "",
             rounds: [selectorRoundMetric(selection)],
           },
         };
@@ -845,6 +855,12 @@ class TaobaoShoppingAgentV1 {
       price_context: selection.price_context,
       diversity: selection.diversity,
       top_candidate_quality: selection.top_candidate_quality,
+      selector_refinement_suggested:
+        selection.refinement.selector_refinement_suggested,
+      server_refinement_required: selection.refinement.server_refinement_required,
+      refinement_reason: selection.refinement.refinement_reason,
+      refinement_query_source: selection.refinement.refinement_query_source,
+      refinement_query: selection.refinement.refinement_query,
       refinement_status: selection.refinement.refinement_status,
       refinement_attempted: selection.refinement.refinement_attempted,
       refinement_succeeded: selection.refinement.refinement_succeeded,
@@ -1219,11 +1235,7 @@ function explicitHardConstraintConflict(constraint, evidence) {
   return false;
 }
 
-function validateProductSelection(payload, candidates, {
-  slot,
-  gender,
-  originalQuery,
-} = {}) {
+function validateProductSelection(payload, candidates) {
   const assessments = Array.isArray(payload?.assessments) ? payload.assessments : null;
   if (!assessments) throw schemaError("selector assessments must be an array");
   const allowedIds = new Set(candidates.map((candidate) => candidate.candidate_id));
@@ -1268,46 +1280,13 @@ function validateProductSelection(payload, candidates, {
     throw schemaError("selector returned invalid candidate_pool_homogeneity");
   }
   const refinementReasons = Object.freeze(stringList(payload.refinement_reasons, 8));
-  let refinementQuery = text(payload.refinement_query, 80);
-  if (payload.refinement_needed) {
-    if (!slot || !gender || !originalQuery) {
-      throw schemaError(
-        "selector refinement_query validation context is required",
-        "REFINEMENT_QUERY_CONTEXT_MISSING",
-      );
-    } else {
-      refinementQuery = normalizeRefinementQuery(
-        refinementQuery,
-        gender,
-        slot.category,
-      ).query;
-      if (canonicalQuery(refinementQuery) === canonicalQuery(originalQuery)) {
-        throw schemaError(
-          `${slot.category}.refinement_query must differ from initial_query`,
-          "REFINEMENT_QUERY_NOT_DISTINCT",
-        );
-      }
-    }
-  } else if (refinementQuery) {
-    if (!slot || !gender) {
-      throw schemaError(
-        "selector refinement_query validation context is required",
-        "REFINEMENT_QUERY_CONTEXT_MISSING",
-      );
-    }
-    refinementQuery = normalizeRefinementQuery(
-      refinementQuery,
-      gender,
-      slot.category,
-    ).query;
-  }
   return {
     assessments: normalized,
     quality_sufficient: payload.quality_sufficient,
     refinement_needed: payload.refinement_needed,
     refinement_reasons: refinementReasons,
     candidate_pool_homogeneity: homogeneity,
-    refinement_query: refinementQuery,
+    refinement_query: text(payload.refinement_query, 80),
   };
 }
 
@@ -1586,8 +1565,12 @@ function candidatePoolDiversity(pool, category) {
   });
 }
 
-function refinementDecision(selection) {
-  const reasons = new Set(selection.refinement_reasons || []);
+function refinementDecision(selection, {
+  shoppingIntent,
+  maxRefinementRounds = MAX_REFINEMENT_ROUNDS,
+  queryBuilder = buildServerRefinementQuery,
+} = {}) {
+  const reasons = new Set();
   if (selection.selector_keep < MAX_SELECTED_CANDIDATES_PER_SLOT) {
     reasons.add("KEEP_BELOW_THREE");
   }
@@ -1598,19 +1581,148 @@ function refinementDecision(selection) {
     reasons.add("CANDIDATE_POOL_HOMOGENEITY_HIGH");
   }
   if (selection.diversity?.diversity_insufficient) reasons.add("DIVERSITY_GAP");
-  if (!selection.quality_sufficient) reasons.add("QUALITY_INSUFFICIENT");
-  if (selection.refinement_needed) reasons.add("SELECTOR_REQUESTED_REFINEMENT");
-  const needed = reasons.size > 0;
-  const query = needed ? text(selection.refinement_query, 80) : "";
-  if (needed && !query) {
-    throw schemaError("refinement is required but selector returned no refinement_query");
+  const selectorSuggested = selection.selector_refinement_suggested === true ||
+    selection.refinement_needed === true;
+  const needed = maxRefinementRounds > 0 && reasons.size > 0;
+  const refinementReasons = Object.freeze([...reasons]);
+  const refinementReason = refinementReasons[0] || null;
+  if (!needed) {
+    return Object.freeze({
+      needed: false,
+      selector_refinement_suggested: selectorSuggested,
+      server_refinement_required: false,
+      refinement_reason: null,
+      refinement_query_source: "NONE",
+      query: "",
+      canonical_category: null,
+      reasons: refinementReasons,
+    });
   }
-  if (needed && canonicalQuery(query) === canonicalQuery(
-    selection.query || selection.slot.search_query,
-  )) {
-    throw schemaError("refinement query must differ from first query");
+
+  const selectorQuery = text(selection.refinement_query, 80);
+  const querySource = selectorQuery ? "SELECTOR" : "SERVER_BUILDER";
+  let proposedQuery = selectorQuery;
+  if (!proposedQuery) {
+    try {
+      proposedQuery = text(queryBuilder({
+        shoppingIntent,
+        selection,
+        reasons: refinementReasons,
+      }), 80);
+    } catch (error) {
+      throw refinementContractError(
+        "服务端无法生成 refinement query",
+        "REFINEMENT_QUERY_GENERATION_FAILED",
+        {
+          refinement_reason: refinementReason,
+          refinement_query_source: querySource,
+          cause_code: safeErrorCode(error),
+        },
+      );
+    }
+    if (!proposedQuery) {
+      throw refinementContractError(
+        "服务端无法生成 refinement query",
+        "REFINEMENT_QUERY_GENERATION_FAILED",
+        {
+          refinement_reason: refinementReason,
+          refinement_query_source: querySource,
+        },
+      );
+    }
   }
-  return Object.freeze({needed, query, reasons: Object.freeze([...reasons])});
+
+  let normalized;
+  try {
+    normalized = normalizeRefinementQuery(
+      proposedQuery,
+      shoppingIntent?.gender,
+      selection.slot?.category,
+    );
+    if (canonicalQuery(normalized.query) === canonicalQuery(
+      selection.query || selection.slot?.search_query,
+    )) {
+      throw schemaError(
+        `${selection.slot?.category}.refinement_query must differ from initial_query`,
+        "REFINEMENT_QUERY_NOT_DISTINCT",
+      );
+    }
+  } catch (error) {
+    throw refinementContractError(
+      "refinement query 未通过合同校验",
+      "REFINEMENT_QUERY_VALIDATION_FAILED",
+      {
+        refinement_reason: refinementReason,
+        refinement_query_source: querySource,
+        refinement_query: proposedQuery,
+        validation_error_kind: error?.schema_error_kind || "REFINEMENT_QUERY_INVALID",
+      },
+    );
+  }
+  return Object.freeze({
+    needed: true,
+    selector_refinement_suggested: selectorSuggested,
+    server_refinement_required: true,
+    refinement_reason: refinementReason,
+    refinement_query_source: querySource,
+    query: normalized.query,
+    canonical_category: normalized.canonical_category,
+    reasons: refinementReasons,
+  });
+}
+
+function buildServerRefinementQuery({shoppingIntent, selection, reasons} = {}) {
+  const slot = selection?.slot;
+  const category = slot?.category;
+  if (!CORE_CATEGORIES.includes(category)) return "";
+  const gender = normalizeGender(shoppingIntent?.gender);
+  const genderLabel = gender === "female" ? "女款" : gender === "male" ? "男款" : "中性";
+  const initialQuery = text(selection?.query || slot.search_query, 80);
+  const sourceTerms = [
+    ...(Array.isArray(slot.soft_preferences) ? slot.soft_preferences : []),
+    ...(Array.isArray(shoppingIntent?.overall_aesthetic?.traits)
+      ? shoppingIntent.overall_aesthetic.traits : []),
+    shoppingIntent?.overall_aesthetic?.core_direction,
+    slot.role,
+    ...(Array.isArray(reasons) ? reasons.map(refinementReasonTerm) : []),
+  ].map(refinementQueryTerm).filter(Boolean);
+  const distinctTerms = sourceTerms.filter((term) =>
+    !canonicalQuery(initialQuery).includes(canonicalQuery(term)));
+  const attributes = (distinctTerms.length > 0 ? distinctTerms : sourceTerms).slice(0, 2);
+  return [genderLabel, CATEGORY_LABELS[category], ...attributes]
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 50)
+    .trim();
+}
+
+function refinementReasonTerm(reason) {
+  const terms = {
+    KEEP_BELOW_THREE: "更多可搭配选择",
+    TOP_CANDIDATE_QUALITY_BELOW_75: "更高质感",
+    CANDIDATE_POOL_HOMOGENEITY_HIGH: "不同版型",
+    DIVERSITY_GAP: "不同结构",
+  };
+  return terms[reason] || "";
+}
+
+function refinementQueryTerm(value) {
+  return text(value, 24)
+    .replace(/[\r\n\t:：,，;；|/\\]+/g, " ")
+    .replace(/因为|所以|天气|气温|身材策略|穿搭方案必须/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function refinementContractError(message, code, details = {}) {
+  return new ShoppingAgentV1Error(message, {
+    code,
+    status: 502,
+    details: {
+      phase: "product_selector_refinement",
+      ...details,
+    },
+  });
 }
 
 function mergeSelectionRounds(first, second, {decision} = {}) {
@@ -1654,6 +1766,11 @@ function mergeSelectionRounds(first, second, {decision} = {}) {
       first_query: first.query || first.slot.search_query,
       second_query: second.query,
       reasons: decision?.reasons || [],
+      selector_refinement_suggested: decision?.selector_refinement_suggested === true,
+      server_refinement_required: decision?.server_refinement_required === true,
+      refinement_reason: decision?.refinement_reason || null,
+      refinement_query_source: decision?.refinement_query_source || "NONE",
+      refinement_query: decision?.query || "",
       first_round_candidate_ids: first.final_candidate_pool.map((item) => item.candidate_id),
       second_round_candidate_ids: second.final_candidate_pool.map((item) => item.candidate_id),
       rounds: [selectorRoundMetric(first), selectorRoundMetric(second)],
@@ -1836,7 +1953,7 @@ function buildSelectorMessages(shoppingIntent, group, {round = 1} = {}) {
   const content = [{
     type: "text",
     text: JSON.stringify({
-      instruction: `逐件查看随后主图；必须评估每个中性candidate_id一次。明确硬错误REJECT；证据不足UNCERTAIN。普通但没错的商品可以KEEP_NORMAL，但只有真正值得搭配师主动选用的商品才是KEEP_HIGH。评分必须严格校准：50以下明显不推荐；50-59勉强符合但审美差；60-69普通可穿；70-79好看可推荐；80-89明显有选品价值；90-94非常优秀；95以上极少使用。price_context描述当前真实slot价格分布；PRICE_OUTLIER_HIGH不是硬拒绝，但若商品没有明显更强的设计、材质或审美价值，不得因品牌名给高价合理性，且outfit_potential与styling_value应反映购买价值。判断本轮是否有至少3件足以组成最终Look且有合理结构差异的商品。若候选在商品family或silhouette上同质，refinement_query应在同一overall_aesthetic与hard_constraints内补足DIVERSITY_GAP，而不是只换品牌或颜色。refinement_query始终给出一个不同于本轮、保留hard_constraints的简洁安全备选查询；只有refinement_needed=true时系统才会调用。`,
+      instruction: `逐件查看随后主图；必须评估每个中性candidate_id一次。明确硬错误REJECT；证据不足UNCERTAIN。普通但没错的商品可以KEEP_NORMAL，但只有真正值得搭配师主动选用的商品才是KEEP_HIGH。评分必须严格校准：50以下明显不推荐；50-59勉强符合但审美差；60-69普通可穿；70-79好看可推荐；80-89明显有选品价值；90-94非常优秀；95以上极少使用。price_context描述当前真实slot价格分布；PRICE_OUTLIER_HIGH不是硬拒绝，但若商品没有明显更强的设计、材质或审美价值，不得因品牌名给高价合理性，且outfit_potential与styling_value应反映购买价值。判断本轮是否有至少3件足以组成最终Look且有合理结构差异的商品。若候选在商品family或silhouette上同质，refinement_query应在同一overall_aesthetic与hard_constraints内补足DIVERSITY_GAP，而不是只换品牌或颜色。refinement_needed只是供服务端参考的建议，不拥有流程决定权；refinement_query是可选建议，服务端会根据统一规则决定是否执行并在缺失时自行构建。`,
       selector_round: round,
       shopping_intent: {
         gender: shoppingIntent.gender,

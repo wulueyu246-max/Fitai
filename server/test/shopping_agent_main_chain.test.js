@@ -91,6 +91,23 @@ test("Agent failure is explicit and never exposes legacy products", async () => 
   assert.deepEqual(response.outfit_plans, []);
 });
 
+test("refinement contract failures keep the product selector refinement stage", async () => {
+  const error = new Error("refinement query validation failed");
+  error.code = "REFINEMENT_QUERY_VALIDATION_FAILED";
+  error.details = {phase: "product_selector_refinement"};
+  const response = await integrateShoppingAgentMainChain({
+    enabled: true,
+    agent: {run: async () => { throw error; }},
+    basePayload: basePayload(),
+    outfitRequest,
+    analysis: {},
+    requestId: "request-main-1",
+  });
+  assert.equal(response.shopping_agent_status, "failed");
+  assert.equal(response.shopping_agent_first_failure_stage, "product_selector_refinement");
+  assert.equal(response.shopping_agent_error_code, "REFINEMENT_QUERY_VALIDATION_FAILED");
+});
+
 test("disabled flag preserves the old response for rollback", async () => {
   let calls = 0;
   const original = basePayload();

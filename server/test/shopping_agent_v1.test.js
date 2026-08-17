@@ -179,6 +179,7 @@ class FakeAiClient {
     directComposerArray = false,
     duplicateComposerCombination = false,
     refinementCategories = [],
+    emptyRefinementQueryCategories = [],
   } = {}) {
     this.calls = [];
     this.composerLookCount = composerLookCount;
@@ -187,6 +188,7 @@ class FakeAiClient {
     this.directComposerArray = directComposerArray;
     this.duplicateComposerCombination = duplicateComposerCombination;
     this.refinementCategories = new Set(refinementCategories);
+    this.emptyRefinementQueryCategories = new Set(emptyRefinementQueryCategories);
     this.chat = {completions: {create: this.create.bind(this)}};
   }
 
@@ -215,10 +217,12 @@ class FakeAiClient {
         refinement_needed: requiresRefinement,
         refinement_reasons: requiresRefinement ? ["商品普通且同质"] : [],
         candidate_pool_homogeneity: requiresRefinement ? "HIGH" : "LOW",
-        refinement_query: `${metadata.shopping_intent.gender === "female" ? "女款" : "男款"} ${
-          metadata.slot.category === "top" ? "设计感短袖上衣" :
-          metadata.slot.category === "bottom" ? "高腰垂感下装" : "轻盈精致鞋"
-        }`,
+        refinement_query: this.emptyRefinementQueryCategories.has(metadata.slot.category)
+          ? ""
+          : `${metadata.shopping_intent.gender === "female" ? "女款" : "男款"} ${
+            metadata.slot.category === "top" ? "设计感短袖上衣" :
+            metadata.slot.category === "bottom" ? "高腰垂感下装" : "轻盈精致鞋"
+          }`,
       };
     } else if (name === "fitai_real_product_outfit_composer") {
       const metadata = JSON.parse(input.messages[1].content[0].text);
@@ -932,9 +936,109 @@ test("Phase 2.5 reports a homogeneous candidate pool as a diversity gap", () => 
     query: "女款 灰色德训鞋",
     slot: {category: "shoes", search_query: "女款 灰色德训鞋"},
     diversity,
-  });
+  }, {shoppingIntent: plan().shopping_intent});
   assert.equal(decision.needed, true);
   assert.ok(decision.reasons.includes("DIVERSITY_GAP"));
+});
+
+test("server is the sole refinement authority and selector suggestion is advisory", () => {
+  const shoppingIntent = plan().shopping_intent;
+  const base = {
+    selector_keep: 3,
+    top_candidate_quality: 82,
+    candidate_pool_homogeneity: "LOW",
+    quality_sufficient: true,
+    selector_refinement_suggested: true,
+    refinement_needed: true,
+    refinement_reasons: ["SELECTOR_WANTS_MORE"],
+    refinement_query: "女款 设计感 上衣",
+    query: shoppingIntent.slots[0].search_query,
+    slot: shoppingIntent.slots[0],
+    diversity: {diversity_insufficient: false},
+  };
+  const notRequired = refinementDecision(base, {shoppingIntent});
+  assert.equal(notRequired.selector_refinement_suggested, true);
+  assert.equal(notRequired.server_refinement_required, false);
+  assert.equal(notRequired.refinement_query_source, "NONE");
+  assert.equal(notRequired.query, "");
+  const budgetExhausted = refinementDecision({
+    ...base,
+    top_candidate_quality: 60,
+  }, {shoppingIntent, maxRefinementRounds: 0});
+  assert.equal(budgetExhausted.server_refinement_required, false);
+
+  const required = refinementDecision({
+    ...base,
+    top_candidate_quality: 70,
+  }, {shoppingIntent});
+  assert.equal(required.server_refinement_required, true);
+  assert.equal(required.refinement_query_source, "SELECTOR");
+  assert.equal(required.query, "女款 设计感 上衣");
+});
+
+test("server builder supplies a valid query when diversity requires refinement", () => {
+  const shoppingIntent = plan().shopping_intent;
+  const decision = refinementDecision({
+    selector_keep: 3,
+    top_candidate_quality: 82,
+    candidate_pool_homogeneity: "LOW",
+    quality_sufficient: true,
+    selector_refinement_suggested: false,
+    refinement_needed: false,
+    refinement_reasons: [],
+    refinement_query: "",
+    query: shoppingIntent.slots[2].search_query,
+    slot: shoppingIntent.slots[2],
+    diversity: {diversity_insufficient: true},
+  }, {shoppingIntent});
+  assert.equal(decision.server_refinement_required, true);
+  assert.equal(decision.selector_refinement_suggested, false);
+  assert.equal(decision.refinement_query_source, "SERVER_BUILDER");
+  assert.equal(decision.canonical_category, "shoes");
+  assert.match(decision.query, /女/);
+  assert.notEqual(
+    decision.query.replace(/\s/g, ""),
+    shoppingIntent.slots[2].search_query.replace(/\s/g, ""),
+  );
+});
+
+test("refinement builder and validation failures use their own stage and codes", () => {
+  const shoppingIntent = plan().shopping_intent;
+  const selection = {
+    selector_keep: 2,
+    top_candidate_quality: 70,
+    candidate_pool_homogeneity: "LOW",
+    selector_refinement_suggested: false,
+    refinement_needed: false,
+    refinement_query: "",
+    query: shoppingIntent.slots[0].search_query,
+    slot: shoppingIntent.slots[0],
+    diversity: {diversity_insufficient: false},
+  };
+  assert.throws(
+    () => refinementDecision(selection, {shoppingIntent, queryBuilder: () => ""}),
+    (error) => error.code === "REFINEMENT_QUERY_GENERATION_FAILED" &&
+      error.details.phase === "product_selector_refinement",
+  );
+  assert.throws(
+    () => refinementDecision({
+      ...selection,
+      selector_refinement_suggested: true,
+      refinement_needed: true,
+      refinement_query: "男士短袖衬衫",
+    }, {shoppingIntent}),
+    (error) => error.code === "REFINEMENT_QUERY_VALIDATION_FAILED" &&
+      error.details.phase === "product_selector_refinement" &&
+      error.details.validation_error_kind === "REFINEMENT_QUERY_GENDER_MISMATCH",
+  );
+  assert.throws(
+    () => refinementDecision({
+      ...selection,
+      refinement_query: "女款高腰牛仔裤",
+    }, {shoppingIntent}),
+    (error) => error.code === "REFINEMENT_QUERY_VALIDATION_FAILED" &&
+      error.details.validation_error_kind === "REFINEMENT_QUERY_CATEGORY_MISMATCH",
+  );
 });
 
 test("Composer scores require raw finite JSON numbers from 0 through 100", () => {
@@ -1245,7 +1349,7 @@ test("Phase 2 refines only an insufficient homogeneous slot once and preserves i
   assert.equal(result.invalid_candidate_reference.length, 0);
   assert.ok(result.final_look_count >= 2);
   const refinementValidation = logs.find(({event, details}) =>
-    event === "shopping_agent_v1_refinement_query_validation" &&
+    event === "shopping_agent_v1_refinement_decision" &&
     details.slot_key.endsWith(":top") &&
     details.validation_status === "PASS");
   assert.ok(refinementValidation);
@@ -1253,6 +1357,63 @@ test("Phase 2 refines only an insufficient homogeneous slot once and preserves i
   assert.match(refinementValidation.details.refinement_query, /女.*上衣/);
   assert.equal(refinementValidation.details.canonical_category, "top");
   assert.equal(refinementValidation.details.validation_error_kind, null);
+  assert.equal(refinementValidation.details.selector_refinement_suggested, true);
+  assert.equal(refinementValidation.details.server_refinement_required, true);
+  assert.equal(refinementValidation.details.refinement_query_source, "SELECTOR");
+});
+
+test("server diversity authority builds a missing query and runs only one refinement", async () => {
+  class DiversityGapProvider extends FakeProvider {
+    async searchShoppingAgentCandidates(input) {
+      this.calls.push(input);
+      if (input.category === "shoes" && this.calls.filter((call) =>
+        call.category === "shoes").length === 1) {
+        const products = [1, 2, 3].map((index) =>
+          product("shoes", index, `女款${index}号灰色德训鞋`));
+        return {products, raw_count: products.length, valid_count: products.length};
+      }
+      if (input.category === "shoes") {
+        const products = [
+          product("shoes", 11, "女款轻便乐福鞋"),
+          product("shoes", 12, "女款浅口芭蕾鞋"),
+          product("shoes", 13, "女款简洁低帮鞋"),
+        ];
+        return {products, raw_count: products.length, valid_count: products.length};
+      }
+      const products = candidates(input.category);
+      return {products, raw_count: products.length, valid_count: products.length};
+    }
+  }
+
+  const client = new FakeAiClient({emptyRefinementQueryCategories: ["shoes"]});
+  const provider = new DiversityGapProvider();
+  const logs = [];
+  const agent = new TaobaoShoppingAgentV1({
+    client,
+    model: "qwen3.7-plus",
+    productProvider: provider,
+    logger: {
+      info(event, details) { logs.push({event, details}); },
+      warn(event, details) { logs.push({event, details}); },
+    },
+  });
+  const result = await agent.run({user_input: "出去玩", authoritative_gender: "female"});
+  const shoesCalls = provider.calls.filter((call) => call.category === "shoes");
+  const shoesMetric = result.slot_metrics.find((slot) => slot.category === "shoes");
+  const decisionLog = logs.find(({event, details}) =>
+    event === "shopping_agent_v1_refinement_decision" &&
+    details.slot_key.endsWith(":shoes"));
+
+  assert.equal(result.state, "success");
+  assert.equal(shoesCalls.length, 2);
+  assert.equal(result.max_refinement_rounds, 1);
+  assert.equal(shoesMetric.selector_refinement_suggested, false);
+  assert.equal(shoesMetric.server_refinement_required, true);
+  assert.equal(shoesMetric.refinement_query_source, "SERVER_BUILDER");
+  assert.equal(shoesMetric.refinement_reason, "DIVERSITY_GAP");
+  assert.equal(shoesMetric.refinement.rounds.length, 2);
+  assert.equal(decisionLog.details.validation_status, "PASS");
+  assert.equal(decisionLog.details.canonical_category, "shoes");
 });
 
 test("refinement network failure falls back to three legal first-round candidates", async () => {
