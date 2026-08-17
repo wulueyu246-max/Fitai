@@ -33,6 +33,7 @@ const MAX_VALID_CANDIDATES_PER_SLOT = 10;
 const MAX_SELECTED_CANDIDATES_PER_SLOT = 3;
 const MAX_REFINEMENT_ROUNDS = 1;
 const SELECTOR_RECOMMENDABLE_SCORE = 75;
+const SHOE_AESTHETIC_RECOMMENDABLE_SCORE = 70;
 const PRICE_POSITION = Object.freeze({
   UNKNOWN: "UNKNOWN",
   BELOW_MEDIAN: "BELOW_MEDIAN",
@@ -187,7 +188,7 @@ const SHOPPING_PLAN_SCHEMA = Object.freeze({
   required: ["shopping_intent"],
 });
 
-const SCORE_PROPERTIES = Object.freeze({
+const BASE_SELECTOR_SCORE_PROPERTIES = Object.freeze({
   category_fit: {type: "number", minimum: 0, maximum: 100},
   aesthetic_fit: {type: "number", minimum: 0, maximum: 100},
   persona_fit: {type: "number", minimum: 0, maximum: 100},
@@ -197,6 +198,19 @@ const SCORE_PROPERTIES = Object.freeze({
   quality_perception: {type: "number", minimum: 0, maximum: 100},
   age_appropriateness: {type: "number", minimum: 0, maximum: 100},
   styling_value: {type: "number", minimum: 0, maximum: 100},
+});
+
+const SHOE_SELECTOR_SCORE_PROPERTIES = Object.freeze({
+  shoe_refinement_score: {type: "number", minimum: 0, maximum: 100},
+  visual_weight_score: {type: "number", minimum: 0, maximum: 100},
+  material_quality_score: {type: "number", minimum: 0, maximum: 100},
+  hardware_quality_score: {type: "number", minimum: 0, maximum: 100},
+  proportion_score: {type: "number", minimum: 0, maximum: 100},
+});
+
+const SCORE_PROPERTIES = Object.freeze({
+  ...BASE_SELECTOR_SCORE_PROPERTIES,
+  ...SHOE_SELECTOR_SCORE_PROPERTIES,
 });
 
 const PRODUCT_SELECTION_SCHEMA = Object.freeze({
@@ -255,6 +269,31 @@ const PRODUCT_SELECTION_SCHEMA = Object.freeze({
     "refinement_query",
   ],
 });
+
+function productSelectionSchema(category) {
+  if (category === "shoes") return PRODUCT_SELECTION_SCHEMA;
+  const assessmentSchema = PRODUCT_SELECTION_SCHEMA.properties.assessments.items;
+  return {
+    ...PRODUCT_SELECTION_SCHEMA,
+    properties: {
+      ...PRODUCT_SELECTION_SCHEMA.properties,
+      assessments: {
+        ...PRODUCT_SELECTION_SCHEMA.properties.assessments,
+        items: {
+          ...assessmentSchema,
+          properties: {
+            ...assessmentSchema.properties,
+            scores: {
+              ...assessmentSchema.properties.scores,
+              properties: BASE_SELECTOR_SCORE_PROPERTIES,
+              required: Object.keys(BASE_SELECTOR_SCORE_PROPERTIES),
+            },
+          },
+        },
+      },
+    },
+  };
+}
 
 const COMPOSER_SCORE_PROPERTIES = Object.freeze({
   aesthetic_coherence: {type: "number", minimum: 0, maximum: 100},
@@ -419,6 +458,8 @@ class TaobaoShoppingAgentV1 {
         search_query: slot.search_query,
         query_attribute_count: slot.query_attribute_count,
         query_complexity_status: slot.query_complexity_status,
+        search_plan_fallback_used: slot.search_plan_fallback_used,
+        search_plan_fallback_reason: slot.search_plan_fallback_reason,
       });
     }
 
@@ -678,12 +719,14 @@ class TaobaoShoppingAgentV1 {
           (round > 1 ? `_refinement_${round - 1}` : ""),
         schemaName: `fitai_product_selector_${group.slot.category}` +
           (round > 1 ? `_refinement_${round - 1}` : ""),
-        schema: PRODUCT_SELECTION_SCHEMA,
+        schema: productSelectionSchema(group.slot.category),
         timeoutMs: this.selectorTimeoutMs,
         metrics,
         messages: buildSelectorMessages(shoppingIntent, group, {round}),
       });
-      const normalized = validateProductSelection(payload, group.candidates);
+      const normalized = validateProductSelection(payload, group.candidates, {
+        category: group.slot.category,
+      });
       const pool = selectFinalCandidatePool(group.candidates, normalized.assessments);
       if (pool.length === 0) {
         throw new ShoppingAgentV1Error(
@@ -709,7 +752,13 @@ class TaobaoShoppingAgentV1 {
         refinement_reasons: normalized.refinement_reasons,
         refinement_query: normalized.refinement_query,
         candidate_pool_homogeneity: normalized.candidate_pool_homogeneity,
-        top_candidate_quality: topSelectorQuality(normalized.assessments),
+        top_candidate_quality: topSelectorQuality(
+          normalized.assessments,
+          group.slot.category,
+        ),
+        shoe_aesthetic_quality: group.slot.category === "shoes"
+          ? topShoeAestheticQuality(normalized.assessments)
+          : null,
         assessments: normalized.assessments,
         final_candidate_pool: pool,
         diversity: candidatePoolDiversity(pool, group.slot.category),
@@ -728,8 +777,18 @@ class TaobaoShoppingAgentV1 {
         refinement_query: selection.refinement_query,
         candidate_pool_homogeneity: selection.candidate_pool_homogeneity,
         top_candidate_quality: selection.top_candidate_quality,
+        shoe_aesthetic_quality: selection.shoe_aesthetic_quality,
         price_context: selection.price_context,
         diversity: selection.diversity,
+        shoe_quality_summary: group.slot.category === "shoes"
+          ? pool.map((candidate) => ({
+              candidate_id: candidate.candidate_id,
+              selection_tier: candidate.selection_tier,
+              shoe_aesthetic_quality: candidate.shoe_aesthetic_quality,
+              cheapness_risk: candidate.cheapness_risk,
+              reason_codes: candidate.shoe_quality_reason_codes,
+            }))
+          : [],
         final_candidate_pool: pool.map((candidate) => candidate.candidate_id),
       });
       return selection;
@@ -986,6 +1045,7 @@ class TaobaoShoppingAgentV1 {
       price_context: selection.price_context,
       diversity: selection.diversity,
       top_candidate_quality: selection.top_candidate_quality,
+      shoe_aesthetic_quality: selection.shoe_aesthetic_quality,
       selector_refinement_suggested:
         selection.refinement.selector_refinement_suggested,
       server_refinement_required: selection.refinement.server_refinement_required,
@@ -1204,6 +1264,8 @@ function buildShoppingIntent(value, input) {
       search_query: searchPlan.query,
       query_attribute_count: searchPlan.query_attribute_count,
       query_complexity_status: searchPlan.query_complexity_status,
+      search_plan_fallback_used: searchPlan.fallback_used === true,
+      search_plan_fallback_reason: searchPlan.fallback_reason || null,
     };
     if (!slot.role) throw schemaError(`${category}.role is required`);
     slotsByCategory.set(category, Object.freeze(slot));
@@ -1269,7 +1331,61 @@ function buildSearchPlan(rawSlot, {gender, category, userInput = ""} = {}) {
   const rawQuery = rawSlot && typeof rawSlot === "object" && !Array.isArray(rawSlot)
     ? rawSlot.search_query
     : rawSlot;
-  return normalizeSearchQueryBoundary(rawQuery, gender, category, {userInput});
+  try {
+    return normalizeSearchQueryBoundary(rawQuery, gender, category, {userInput});
+  } catch (error) {
+    if (explicitGenderConflict(rawQuery, gender)) throw error;
+    return buildInitialSearchPlanFallback(rawSlot, {
+      gender,
+      category,
+      userInput,
+      fallbackReason: error?.schema_error_kind || "INITIAL_QUERY_CONTRACT_INVALID",
+    });
+  }
+}
+
+function buildInitialSearchPlanFallback(rawSlot, {
+  gender,
+  category,
+  userInput = "",
+  fallbackReason = "INITIAL_QUERY_CONTRACT_INVALID",
+} = {}) {
+  if (!CORE_CATEGORIES.includes(category)) {
+    throw schemaError("initial search query has an invalid category");
+  }
+  const rawQuery = rawSlot && typeof rawSlot === "object" && !Array.isArray(rawSlot)
+    ? text(rawSlot.search_query, 80)
+    : text(rawSlot, 80);
+  const evidence = rawSlot && typeof rawSlot === "object" && !Array.isArray(rawSlot)
+    ? [
+        rawQuery,
+        rawSlot.role,
+        ...(Array.isArray(rawSlot.hard_constraints) ? rawSlot.hard_constraints : []),
+        ...(Array.isArray(rawSlot.soft_preferences) ? rawSlot.soft_preferences : []),
+      ].map((item) => text(item, 80)).filter(Boolean).join(" ")
+    : rawQuery;
+  let family = firstMatchingTerm(evidence, QUERY_FAMILY_TERMS[category]) ||
+    CATEGORY_LABELS[category];
+  if (WEATHER_PRODUCT_TERMS.includes(family) &&
+      !userExplicitlyRequestsTerm(userInput, family)) {
+    family = CATEGORY_LABELS[category];
+  }
+  const feature = matchingTerms(evidence, QUERY_FEATURE_TERMS[category])[0] || "";
+  const style = matchingTerms(evidence, QUERY_STYLE_TERMS)[0] || "";
+  const query = [recallGenderLabel(gender), style, feature, family]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  return Object.freeze({
+    original_query: rawQuery,
+    query,
+    canonical_category: category,
+    query_attribute_count: Number(Boolean(style)) + Number(Boolean(feature)),
+    raw_attribute_count: Number(Boolean(style)) + Number(Boolean(feature)),
+    query_complexity_status: QUERY_COMPLEXITY_STATUS.SIMPLIFIED,
+    fallback_used: true,
+    fallback_reason: fallbackReason,
+  });
 }
 
 function normalizeSearchQuery(value, gender, category, options = {}) {
@@ -1478,9 +1594,10 @@ function explicitHardConstraintConflict(constraint, evidence) {
   return false;
 }
 
-function validateProductSelection(payload, candidates) {
+function validateProductSelection(payload, candidates, {category} = {}) {
   const assessments = Array.isArray(payload?.assessments) ? payload.assessments : null;
   if (!assessments) throw schemaError("selector assessments must be an array");
+  const effectiveCategory = category || normalizeProductCategory(candidates[0]?.category);
   const allowedIds = new Set(candidates.map((candidate) => candidate.candidate_id));
   const seen = new Set();
   const normalized = assessments.map((assessment) => {
@@ -1507,7 +1624,12 @@ function validateProductSelection(payload, candidates) {
       candidate_id: candidateId,
       status,
       selection_tier: selectionTier,
-      scores: normalizeScoreObject(assessment.scores, Object.keys(SCORE_PROPERTIES)),
+      scores: normalizeScoreObject(
+        assessment.scores,
+        Object.keys(effectiveCategory === "shoes"
+          ? SCORE_PROPERTIES
+          : BASE_SELECTOR_SCORE_PROPERTIES),
+      ),
       reason_codes: Object.freeze(stringList(assessment.reason_codes, 12)),
     });
   });
@@ -1561,6 +1683,9 @@ function selectFinalCandidatePool(candidates, assessments) {
     value_reasonableness: evaluatedItem.value_reasonableness,
     value_reason_codes: evaluatedItem.value_reason_codes,
     value_adjustment: evaluatedItem.value_adjustment,
+    shoe_aesthetic_quality: evaluatedItem.shoe_aesthetic_quality,
+    cheapness_risk: evaluatedItem.cheapness_risk,
+    shoe_quality_reason_codes: evaluatedItem.shoe_quality_reason_codes,
     variation_axes: candidateVariationAxes(
       byId.get(evaluatedItem.assessment.candidate_id),
     ),
@@ -1622,11 +1747,15 @@ function enrichCandidatePriceContext(candidate, priceContext, budget = {}) {
 }
 
 function evaluateCandidateValue(candidate, assessment) {
-  const rawQualityScore = selectorQualityScore(assessment);
+  const category = normalizeProductCategory(candidate?.category || candidateEvidence(candidate));
+  const rawQualityScore = selectorQualityScore(assessment, {category});
   const reasonCodes = new Set(candidate?.value_reason_codes || []);
   let valueReasonableness = Number(candidate?.value_reasonableness ?? 60);
   let valueAdjustment = 0;
   let effectiveTier = assessment.selection_tier;
+  const shoeAesthetic = category === "shoes"
+    ? assessShoeAesthetic(assessment)
+    : null;
   if (candidate?.price_position === PRICE_POSITION.OUTLIER_HIGH &&
       !reasonCodes.has("WITHIN_EXPLICIT_ITEM_BUDGET")) {
     if (hasExceptionalAestheticValue(assessment)) {
@@ -1640,6 +1769,13 @@ function evaluateCandidateValue(candidate, assessment) {
       if (effectiveTier === SELECTION_TIER.HIGH) effectiveTier = SELECTION_TIER.NORMAL;
     }
   }
+  if (shoeAesthetic?.high_tier_eligible === false &&
+      effectiveTier === SELECTION_TIER.HIGH) {
+    effectiveTier = SELECTION_TIER.NORMAL;
+  }
+  if (shoeAesthetic) {
+    valueAdjustment += shoeAesthetic.score_adjustment;
+  }
   return Object.freeze({
     assessment,
     status: assessment.status,
@@ -1649,10 +1785,51 @@ function evaluateCandidateValue(candidate, assessment) {
     value_reasonableness: roundScore(valueReasonableness),
     value_reason_codes: Object.freeze([...reasonCodes]),
     value_adjustment: valueAdjustment,
+    shoe_aesthetic_quality: shoeAesthetic?.quality_score ?? null,
+    cheapness_risk: shoeAesthetic?.cheapness_risk ?? null,
+    shoe_quality_reason_codes: shoeAesthetic?.reason_codes || Object.freeze([]),
     effective_outfit_potential: roundScore(Math.max(
       0,
       Number(assessment.scores?.outfit_potential || 0) + valueAdjustment,
     )),
+  });
+}
+
+function assessShoeAesthetic(assessment) {
+  const scores = assessment?.scores || {};
+  const values = [
+    scores.shoe_refinement_score,
+    scores.visual_weight_score,
+    scores.material_quality_score,
+    scores.hardware_quality_score,
+    scores.proportion_score,
+  ].map(Number);
+  const qualityScore = roundScore(values.reduce((sum, value) => sum + value, 0) /
+    values.length);
+  const materialHardwareAverage = (
+    Number(scores.material_quality_score) + Number(scores.hardware_quality_score)
+  ) / 2;
+  const cheapnessRisk = roundScore(Math.max(0, 100 - materialHardwareAverage));
+  const reasonCodes = [];
+  if (Number(scores.shoe_refinement_score) < 60) {
+    reasonCodes.push("SHOE_REFINEMENT_LOW");
+  }
+  if (Number(scores.visual_weight_score) < 60) {
+    reasonCodes.push("SHOE_VISUAL_WEIGHT_CONFLICT");
+  }
+  if (cheapnessRisk > 45) reasonCodes.push("SHOE_CHEAPNESS_RISK_HIGH");
+  if (Number(scores.proportion_score) < 60) {
+    reasonCodes.push("SHOE_PROPORTION_LOW");
+  }
+  const highTierEligible = reasonCodes.length === 0 &&
+    qualityScore >= SHOE_AESTHETIC_RECOMMENDABLE_SCORE;
+  const scoreAdjustment = qualityScore < 55 ? -18 : qualityScore < 65 ? -10 : 0;
+  return Object.freeze({
+    quality_score: qualityScore,
+    cheapness_risk: cheapnessRisk,
+    high_tier_eligible: highTierEligible,
+    score_adjustment: scoreAdjustment,
+    reason_codes: Object.freeze(reasonCodes),
   });
 }
 
@@ -1700,9 +1877,9 @@ function roundPrice(value) {
   return Math.round(Number(value) * 100) / 100;
 }
 
-function selectorQualityScore(assessment) {
+function selectorQualityScore(assessment, {category} = {}) {
   const scores = assessment?.scores || {};
-  return roundScore(
+  const generalScore = roundScore(
     Number(scores.outfit_potential || 0) * 0.2 +
     Number(scores.aesthetic_fit || 0) * 0.15 +
     Number(scores.aesthetic_distinctiveness || 0) * 0.15 +
@@ -1713,13 +1890,38 @@ function selectorQualityScore(assessment) {
     Number(scores.age_appropriateness || 0) * 0.05 +
     Number(scores.category_fit || 0) * 0.02,
   );
+  if (category !== "shoes") return generalScore;
+  return roundScore(generalScore * 0.65 + shoeAestheticQuality(assessment) * 0.35);
 }
 
-function topSelectorQuality(assessments) {
+function shoeAestheticQuality(assessment) {
+  const scores = assessment?.scores || {};
+  const values = [
+    scores.shoe_refinement_score,
+    scores.visual_weight_score,
+    scores.material_quality_score,
+    scores.hardware_quality_score,
+    scores.proportion_score,
+  ].map(Number);
+  return roundScore(values.reduce((sum, score) => sum + score, 0) / values.length);
+}
+
+function topSelectorQuality(assessments, category) {
   const eligible = assessments.filter((item) =>
     item.status === SELECTOR_STATUS.KEEP || item.status === SELECTOR_STATUS.UNCERTAIN);
   return eligible.length > 0
-    ? Math.max(...eligible.map(selectorQualityScore))
+    ? Math.max(...eligible.map((assessment) => selectorQualityScore(
+      assessment,
+      {category},
+    )))
+    : 0;
+}
+
+function topShoeAestheticQuality(assessments) {
+  const eligible = assessments.filter((item) =>
+    item.status === SELECTOR_STATUS.KEEP || item.status === SELECTOR_STATUS.UNCERTAIN);
+  return eligible.length > 0
+    ? Math.max(...eligible.map(shoeAestheticQuality))
     : 0;
 }
 
@@ -1824,6 +2026,13 @@ function refinementDecision(selection, {
     reasons.add("CANDIDATE_POOL_HOMOGENEITY_HIGH");
   }
   if (selection.diversity?.diversity_insufficient) reasons.add("DIVERSITY_GAP");
+  const shoeAestheticQualityValue = Number(selection.shoe_aesthetic_quality);
+  if (selection.slot?.category === "shoes" &&
+      selection.shoe_aesthetic_quality != null &&
+      Number.isFinite(shoeAestheticQualityValue) &&
+      shoeAestheticQualityValue < SHOE_AESTHETIC_RECOMMENDABLE_SCORE) {
+    reasons.add("SHOE_AESTHETIC_QUALITY_LOW");
+  }
   const selectorSuggested = selection.selector_refinement_suggested === true ||
     selection.refinement_needed === true;
   const needed = maxRefinementRounds > 0 && reasons.size > 0;
@@ -1945,6 +2154,7 @@ function refinementReasonTerm(reason) {
     TOP_CANDIDATE_QUALITY_BELOW_75: "更高质感",
     CANDIDATE_POOL_HOMOGENEITY_HIGH: "不同版型",
     DIVERSITY_GAP: "不同结构",
+    SHOE_AESTHETIC_QUALITY_LOW: "轻盈 精致",
   };
   return terms[reason] || "";
 }
@@ -1993,7 +2203,10 @@ function mergeSelectionRounds(first, second, {decision} = {}) {
     refinement_reasons: decision?.reasons || [],
     refinement_query: second.query,
     candidate_pool_homogeneity: second.candidate_pool_homogeneity,
-    top_candidate_quality: topSelectorQuality(assessments),
+    top_candidate_quality: topSelectorQuality(assessments, first.slot.category),
+    shoe_aesthetic_quality: first.slot.category === "shoes"
+      ? topShoeAestheticQuality(assessments)
+      : null,
     final_candidate_pool: pool,
     price_context: priceContext,
     diversity: candidatePoolDiversity(pool, first.slot.category),
@@ -2036,6 +2249,7 @@ function selectorRoundMetric(selection) {
       item.selection_tier === SELECTION_TIER.NORMAL).length,
     candidate_pool_homogeneity: selection.candidate_pool_homogeneity,
     top_candidate_quality: selection.top_candidate_quality,
+    shoe_aesthetic_quality: selection.shoe_aesthetic_quality,
     candidate_ids: Object.freeze(selection.final_candidate_pool.map((item) =>
       item.candidate_id)),
   });
@@ -2196,7 +2410,7 @@ function buildSelectorMessages(shoppingIntent, group, {round = 1} = {}) {
   const content = [{
     type: "text",
     text: JSON.stringify({
-      instruction: `逐件查看随后主图；必须评估每个中性candidate_id一次。明确硬错误REJECT；证据不足UNCERTAIN。普通但没错的商品可以KEEP_NORMAL，但只有真正值得搭配师主动选用的商品才是KEEP_HIGH。评分必须严格校准：50以下明显不推荐；50-59勉强符合但审美差；60-69普通可穿；70-79好看可推荐；80-89明显有选品价值；90-94非常优秀；95以上极少使用。price_context描述当前真实slot价格分布；PRICE_OUTLIER_HIGH不是硬拒绝，但若商品没有明显更强的设计、材质或审美价值，不得因品牌名给高价合理性，且outfit_potential与styling_value应反映购买价值。判断本轮是否有至少3件足以组成最终Look且有合理结构差异的商品。若候选在商品family或silhouette上同质，refinement_query应在同一overall_aesthetic与hard_constraints内补足DIVERSITY_GAP，而不是只换品牌或颜色。refinement_needed只是供服务端参考的建议，不拥有流程决定权；refinement_query是可选建议，服务端会根据统一规则决定是否执行并在缺失时自行构建。`,
+      instruction: `逐件查看随后主图；必须评估每个中性candidate_id一次。明确硬错误REJECT；证据不足UNCERTAIN。普通但没错的商品可以KEEP_NORMAL，但只有真正值得搭配师主动选用的商品才是KEEP_HIGH。评分必须严格校准：50以下明显不推荐；50-59勉强符合但审美差；60-69普通可穿；70-79好看可推荐；80-89明显有选品价值；90-94非常优秀；95以上极少使用。price_context描述当前真实slot价格分布；PRICE_OUTLIER_HIGH不是硬拒绝，但若商品没有明显更强的设计、材质或审美价值，不得因品牌名给高价合理性，且outfit_potential与styling_value应反映购买价值。对于shoes，必须真正查看图片并分别评估shoe_refinement_score、visual_weight_score、material_quality_score、hardware_quality_score、proportion_score：检查鞋头精致度、鞋底厚重感、整体视觉重量、五金与装饰质感、材质廉价风险、鞋楦和脚部比例、女性化精致度、搭配通用性及与persona/body/overall_aesthetic的平衡。可爱不等于厚底加蝴蝶结或大扣件，显高也不等于厚底；笨重不是自动REJECT，但在light/romantic/sweet/elegant/clean方向中若鞋底过重、鞋头巨大、五金粗糙或PU塑料感明显，必须显著降低aesthetic_fit、quality_perception和outfit_potential，且不得给HIGH。五个shoe专属字段只在shoes slot输出，top/bottom不输出。判断本轮是否有至少3件足以组成最终Look且有合理结构差异的商品。若候选在商品family或silhouette上同质，refinement_query应在同一overall_aesthetic与hard_constraints内补足DIVERSITY_GAP，而不是只换品牌或颜色。若鞋履整体视觉审美质量偏低，可建议SHOE_AESTHETIC_QUALITY_LOW，但仍只能使用现有一次refinement。refinement_needed只是供服务端参考的建议，不拥有流程决定权；refinement_query是可选建议，服务端会根据统一规则决定是否执行并在缺失时自行构建。`,
       selector_round: round,
       shopping_intent: {
         gender: shoppingIntent.gender,
@@ -2230,7 +2444,7 @@ function buildSelectorMessages(shoppingIntent, group, {round = 1} = {}) {
   return [
     {
       role: "system",
-      content: "你是审美标准严格的商品视觉采购员。只依据当前Shopping Intent与真实主图证据输出严格JSON，不得根据candidate_id推断。不要因为商品没犯硬错误就给高分；必须区分普通可穿和有造型价值。识别候选池是否同质，refinement最多只提出一个新query，不得删除hard constraints。",
+      content: "你是审美标准严格的商品视觉采购员。只依据当前Shopping Intent与真实主图证据输出严格JSON，不得根据candidate_id推断。不要因为商品没犯硬错误就给高分；必须区分普通可穿和有造型价值。鞋履必须从鞋头、鞋底量感、视觉重量、材质、五金和比例精致度判断图片本身是否值得进入好Look，不得用鞋类名称代替审美判断。识别候选池是否同质，refinement最多只提出一个新query，不得删除hard constraints。",
     },
     {role: "user", content},
   ];
@@ -2804,6 +3018,7 @@ module.exports = {
   normalizeSearchQueryBoundary,
   normalizeShoppingIntent,
   parseAiJson,
+  productSelectionSchema,
   refinementDecision,
   selectFinalCandidatePool,
   selectorQualityScore,

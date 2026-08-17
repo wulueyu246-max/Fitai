@@ -27,6 +27,7 @@ const {
   normalizeSearchQueryBoundary,
   normalizeShoppingIntent,
   parseAiJson,
+  productSelectionSchema,
   refinementDecision,
   selectFinalCandidatePool,
   selectorQualityScore,
@@ -141,6 +142,11 @@ function selectorScores(value = 82) {
     quality_perception: value,
     age_appropriateness: value,
     styling_value: value,
+    shoe_refinement_score: value,
+    visual_weight_score: value,
+    material_quality_score: value,
+    hardware_quality_score: value,
+    proportion_score: value,
   };
 }
 
@@ -274,6 +280,23 @@ test("Shopping Agent V1 schemas are strict objects", () => {
     PRODUCT_SELECTION_SCHEMA.properties.assessments.items.properties.scores.properties,
     "aesthetic_distinctiveness",
   ));
+  for (const field of [
+    "shoe_refinement_score",
+    "visual_weight_score",
+    "material_quality_score",
+    "hardware_quality_score",
+    "proportion_score",
+  ]) {
+    assert.ok(Object.hasOwn(
+      PRODUCT_SELECTION_SCHEMA.properties.assessments.items.properties.scores.properties,
+      field,
+    ));
+  }
+  assert.equal(Object.hasOwn(
+    productSelectionSchema("top").properties.assessments.items.properties
+      .scores.properties,
+    "shoe_refinement_score",
+  ), false);
   assert.ok(Object.hasOwn(PRODUCT_SELECTION_SCHEMA.properties, "refinement_needed"));
   assert.ok(Object.hasOwn(
     OUTFIT_COMPOSITION_SCHEMA.properties.looks.items.properties.scores.properties,
@@ -339,6 +362,74 @@ test("Phase 2 score calibration and tiers prioritize exceptional KEEP candidates
     "candidate_001",
     "candidate_003",
   ]);
+});
+
+test("shoe image refinement can demote an otherwise inflated HIGH candidate", () => {
+  const products = [
+    {...product("shoes", 1, "女款厚底大扣件玛丽珍鞋"), candidate_id: "candidate_001"},
+    {...product("shoes", 2, "女款轻量精致乐福鞋"), candidate_id: "candidate_002"},
+  ];
+  const weakShoeScores = {
+    ...selectorScores(88),
+    shoe_refinement_score: 42,
+    visual_weight_score: 38,
+    material_quality_score: 45,
+    hardware_quality_score: 35,
+    proportion_score: 44,
+  };
+  const strongShoeScores = {
+    ...selectorScores(82),
+    shoe_refinement_score: 84,
+    visual_weight_score: 86,
+    material_quality_score: 80,
+    hardware_quality_score: 82,
+    proportion_score: 85,
+  };
+  const pool = selectFinalCandidatePool(products, [
+    {
+      candidate_id: "candidate_001",
+      status: "KEEP",
+      selection_tier: "HIGH",
+      scores: weakShoeScores,
+      reason_codes: [],
+    },
+    {
+      candidate_id: "candidate_002",
+      status: "KEEP",
+      selection_tier: "HIGH",
+      scores: strongShoeScores,
+      reason_codes: [],
+    },
+  ]);
+
+  assert.equal(pool[0].candidate_id, "candidate_002");
+  const demoted = pool.find((item) => item.candidate_id === "candidate_001");
+  assert.equal(demoted.selection_tier, "NORMAL");
+  assert.ok(demoted.cheapness_risk > 45);
+  assert.ok(demoted.shoe_quality_reason_codes.includes("SHOE_VISUAL_WEIGHT_CONFLICT"));
+  assert.ok(demoted.shoe_quality_reason_codes.includes("SHOE_CHEAPNESS_RISK_HIGH"));
+});
+
+test("low shoe aesthetic quality uses the existing single refinement budget", () => {
+  const shoppingIntent = plan().shopping_intent;
+  const decision = refinementDecision({
+    selector_keep: 3,
+    top_candidate_quality: 82,
+    shoe_aesthetic_quality: 58,
+    candidate_pool_homogeneity: "LOW",
+    quality_sufficient: true,
+    selector_refinement_suggested: false,
+    refinement_needed: false,
+    refinement_reasons: [],
+    refinement_query: "女款 轻盈 精致 乐福鞋",
+    query: shoppingIntent.slots[2].search_query,
+    slot: shoppingIntent.slots[2],
+    diversity: {diversity_insufficient: false},
+  }, {shoppingIntent});
+
+  assert.equal(decision.needed, true);
+  assert.ok(decision.reasons.includes("SHOE_AESTHETIC_QUALITY_LOW"));
+  assert.equal(decision.server_refinement_required, true);
 });
 
 test("Phase 2.5 price context marks a robust high outlier without hard rejection", () => {
@@ -719,6 +810,37 @@ test("Golden and Flutter contexts share the same Shopping Intent and Search Plan
     goldenIntent.slots.map((slot) => slot.search_query),
   );
   assert.ok(flutterIntent.slots.every((slot) => slot.query_attribute_count <= 2));
+});
+
+test("invalid AI query wording falls back to a deterministic high-recall plan", () => {
+  const input = normalizeAgentInput({
+    user_input: "帮我搭一套显高显腿长的穿搭。",
+    gender: "female",
+  });
+  const rawPlan = plan();
+  rawPlan.shopping_intent.slots[0].search_query = "女款显高显瘦日常单品";
+  rawPlan.shopping_intent.slots[1].search_query = "女款修饰腿型自然选择";
+  rawPlan.shopping_intent.slots[2].search_query = "女款轻盈显高搭配单品";
+
+  const intent = buildShoppingIntent(rawPlan.shopping_intent, input);
+  assert.deepEqual(intent.slots.map((slot) => slot.search_query), [
+    "女 方领 上衣",
+    "女 A字 下装",
+    "女 轻量 鞋",
+  ]);
+  assert.ok(intent.slots.every((slot) => slot.search_plan_fallback_used));
+  assert.ok(intent.slots.every((slot) => slot.search_plan_fallback_reason));
+});
+
+test("initial query fallback never hides an explicit gender conflict", () => {
+  const input = normalizeAgentInput({user_input: "帮我搭一套", gender: "female"});
+  const rawPlan = plan();
+  rawPlan.shopping_intent.slots[0].search_query = "男士显瘦单品";
+  assert.throws(
+    () => buildShoppingIntent(rawPlan.shopping_intent, input),
+    (error) => error.code === "SHOPPING_AGENT_SCHEMA_INVALID" &&
+      /gender/.test(error.message),
+  );
 });
 
 test("ZERO_RESULT_RECALL uses one deterministic broadening round before selectors", async () => {
