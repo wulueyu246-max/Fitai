@@ -236,10 +236,13 @@ function adaptShoppingAgentSuccess(result, {
   ).trim();
   const persona = plainObject(result.shopping_intent?.persona);
   const bodyStrategy = plainObject(result.shopping_intent?.body_strategy);
+  const overallAesthetic = plainObject(result.shopping_intent?.overall_aesthetic);
   const display = buildChineseDisplayFields({
     internalStyle,
+    aestheticTraits: overallAesthetic.traits,
     persona,
     bodyStrategy,
+    occasion: plainObject(result.shopping_intent?.occasion),
     slots: result.shopping_intent?.slots,
     gender,
   });
@@ -337,30 +340,53 @@ function adaptShoppingAgentSuccess(result, {
 
 function buildChineseDisplayFields({
   internalStyle,
+  aestheticTraits,
   persona,
   bodyStrategy,
+  occasion,
   slots,
   gender,
 } = {}) {
-  const displayStyleName = localizeStyleName(internalStyle);
+  const slotList = Array.isArray(slots) ? slots : [];
+  const displayStyleName = localizeStyleName(internalStyle, {
+    aestheticTraits,
+    persona,
+    occasion,
+    slots: slotList,
+  });
   const personaLabel = gender === "female"
     ? "女性或自然中性的人物表达"
     : gender === "male"
       ? "男性或自然中性的人物表达"
       : "自然中性的人物表达";
-  const bodyGoal = firstChinesePhrase(bodyStrategy?.goals).replace(/[。！？]$/u, "");
+  const bodyGoal = structuredChineseLabel(
+    [...asArray(bodyStrategy?.goals), ...asArray(bodyStrategy?.soft_tactics)],
+    BODY_DISPLAY_LABELS,
+  );
+  const occasionLabel = structuredChineseLabel(
+    [occasion?.type, occasion?.formality],
+    OCCASION_DISPLAY_LABELS,
+  );
+  const silhouetteLabel = structuredChineseLabel(
+    slotList.flatMap((slot) => [
+      slot?.silhouette,
+      ...asArray(slot?.soft_preferences),
+    ]),
+    SILHOUETTE_DISPLAY_LABELS,
+  );
   const summaryParts = [
     `以${displayStyleName}为整体方向`,
     `保持${personaLabel}`,
     bodyGoal ? `并兼顾${bodyGoal}` : "并兼顾整体比例与日常可穿性",
+    occasionLabel ? `适合${occasionLabel}` : "",
+    silhouetteLabel ? `通过${silhouetteLabel}保持轮廓协调` : "",
   ];
-  const slotList = Array.isArray(slots) ? slots : [];
   const role = (category) => firstChinesePhrase(
     slotList.find((slot) => slot?.category === category)?.role,
   );
   return Object.freeze({
     display_style_name: displayStyleName,
-    display_style_summary: `${summaryParts.join("，")}。`,
+    display_style_summary: `${summaryParts.filter(Boolean).join("，")}。`,
     display_top_advice: role("top") ||
       "选择轮廓利落、松量适中的上衣，保持上半身清爽协调。",
     display_bottom_advice: role("bottom") ||
@@ -370,7 +396,7 @@ function buildChineseDisplayFields({
   });
 }
 
-function localizeStyleName(value) {
+function localizeStyleName(value, context = {}) {
   const normalized = String(value || "")
     .trim()
     .toLowerCase()
@@ -389,7 +415,97 @@ function localizeStyleName(value) {
     if (pattern.test(normalized)) return label;
   }
   const chinese = firstChinesePhrase(value).replace(/[。！？]$/u, "");
-  return chinese || "清爽协调的日常风格";
+  if (chinese) return chinese;
+  const traits = asArray(context.aestheticTraits)
+    .map((trait) => structuredChineseLabel([trait], AESTHETIC_DISPLAY_LABELS))
+    .filter(Boolean);
+  const persona = structuredChineseLabel(
+    [context.persona?.expression],
+    PERSONA_DISPLAY_LABELS,
+  );
+  const occasion = structuredChineseLabel(
+    [context.occasion?.type, context.occasion?.formality],
+    OCCASION_DISPLAY_LABELS,
+  );
+  const silhouette = structuredChineseLabel(
+    asArray(context.slots).flatMap((slot) => [
+      slot?.silhouette,
+      ...asArray(slot?.soft_preferences),
+    ]),
+    SILHOUETTE_DISPLAY_LABELS,
+  );
+  const descriptors = [...new Set([
+    ...traits,
+    persona,
+    silhouette,
+    occasion,
+  ].filter(Boolean))].slice(0, 2);
+  return descriptors.length > 0 ? `${descriptors.join("")}风` : "清爽协调的日常风格";
+}
+
+const AESTHETIC_DISPLAY_LABELS = Object.freeze([
+  [/light|airy|轻盈|轻松/u, "轻盈"],
+  [/romantic|浪漫/u, "浪漫"],
+  [/refined|polished|精致|有质感/u, "精致"],
+  [/elegant|优雅/u, "优雅"],
+  [/clean|fresh|清爽|清新/u, "清爽"],
+  [/minimal|简约|极简/u, "简约"],
+  [/sweet|cute|甜美|可爱/u, "甜美"],
+  [/urban|都市/u, "都市"],
+  [/natural|自然/u, "自然"],
+  [/casual|休闲/u, "休闲"],
+]);
+
+const PERSONA_DISPLAY_LABELS = Object.freeze([
+  [/feminine|女性化|柔和/u, "柔和"],
+  [/masculine|男性化/u, "利落"],
+  [/neutral|中性/u, "自然"],
+  [/youth|年轻/u, "轻快"],
+  [/mature|成熟/u, "稳重"],
+]);
+
+const BODY_DISPLAY_LABELS = Object.freeze([
+  [/leg.?elongation|显高|显腿长|腿部比例/u, "优化腿部比例"],
+  [/proportion|比例/u, "优化整体比例"],
+  [/waist|腰线/u, "突出合适腰线"],
+  [/petite|小个子/u, "照顾小个子比例"],
+  [/balance|协调/u, "保持身形协调"],
+]);
+
+const OCCASION_DISPLAY_LABELS = Object.freeze([
+  [/date|约会/u, "约会场景"],
+  [/work|commute|office|通勤|职场/u, "日常通勤"],
+  [/formal|正式/u, "正式场合"],
+  [/party|聚会/u, "聚会场景"],
+  [/leisure|casual|play|outing|日常|休闲|出游|出去玩/u, "日常外出"],
+]);
+
+const SILHOUETTE_DISPLAY_LABELS = Object.freeze([
+  [/cropped|short|短款/u, "短款线条"],
+  [/fitted|slim|合身|修身/u, "合身轮廓"],
+  [/high.?waist|高腰/u, "高腰线条"],
+  [/straight|直筒/u, "纵向直线轮廓"],
+  [/a.?line|a字/u, "轻盈A字轮廓"],
+  [/relaxed|loose|宽松|松量/u, "自然松量"],
+]);
+
+function asArray(value) {
+  return Array.isArray(value) ? value : value == null ? [] : [value];
+}
+
+function structuredChineseLabel(values, mappings) {
+  for (const value of asArray(values)) {
+    const chinese = firstChinesePhrase(value).replace(/[。！？]$/u, "");
+    if (chinese) return chinese;
+    const normalized = String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[_-]+/g, " ");
+    for (const [pattern, label] of mappings) {
+      if (pattern.test(normalized)) return label;
+    }
+  }
+  return "";
 }
 
 function firstChinesePhrase(value) {

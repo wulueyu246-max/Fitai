@@ -241,6 +241,52 @@ test("response adapter separates English canonical semantics from Chinese displa
   assert.equal(response.styling_summary.overall_aesthetic, undefined);
 });
 
+test("unknown canonical style builds Chinese display copy from structured evidence", () => {
+  const result = successResult();
+  result.shopping_intent = {
+    gender: "female",
+    persona: {expression: "feminine_or_neutral_feminine"},
+    overall_aesthetic: {
+      core_direction: "quiet_weekend_signature",
+      traits: ["轻盈", "浪漫"],
+    },
+    body_strategy: {
+      goals: ["优化小个子比例"],
+      soft_tactics: ["leg_elongation"],
+    },
+    occasion: {type: "周末出游", formality: "casual"},
+    slots: [
+      {category: "top", role: "upper body foundation", soft_preferences: ["短款"]},
+      {category: "bottom", role: "leg elongation", soft_preferences: ["高腰"]},
+      {category: "shoes", role: "lightweight finish", soft_preferences: ["轻量"]},
+    ],
+  };
+  const response = adaptShoppingAgentSuccess(result, {
+    basePayload: basePayload(),
+    outfitRequest,
+    now: () => new Date("2026-08-17T00:00:00.000Z"),
+  });
+  const displayFields = [
+    response.display_style_name,
+    response.display_style_summary,
+    response.display_top_advice,
+    response.display_bottom_advice,
+    response.display_shoes_advice,
+    response.display_look_explanation,
+    response.outfit_plans[0].style,
+    response.outfit_plans[0].reason,
+  ];
+
+  assert.equal(response.display_style_name, "轻盈浪漫风");
+  assert.match(response.display_style_summary, /优化小个子比例/u);
+  assert.match(response.display_style_summary, /周末出游/u);
+  assert.match(response.display_style_summary, /短款/u);
+  assert.ok(displayFields.every((value) => /[\u3400-\u9fff]/u.test(value)));
+  assert.ok(displayFields.every((value) =>
+    !/quiet_weekend_signature|feminine_or_neutral_feminine|leg_elongation|casual/i
+      .test(value)));
+});
+
 test("response adapter preserves request gender and records downstream drift", () => {
   const result = successResult();
   result.authoritative_gender = "male";

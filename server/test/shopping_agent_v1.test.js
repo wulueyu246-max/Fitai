@@ -471,6 +471,42 @@ class FakeAiClient {
   }
 }
 
+class LimitedGateProvider extends FakeProvider {
+  constructor(counts = {}) {
+    super();
+    this.counts = counts;
+  }
+
+  async searchShoppingAgentCandidates(input) {
+    this.calls.push(input);
+    const products = candidates(input.category).slice(
+      0,
+      this.counts[input.category] ?? 3,
+    );
+    return {products, raw_count: products.length, valid_count: products.length};
+  }
+}
+
+class SlotSelectorTimeoutClient extends FakeAiClient {
+  constructor(category, options = {}) {
+    super(options);
+    this.timeoutCategory = category;
+  }
+
+  async create(input) {
+    const name = input.response_format.type === "json_object"
+      ? "fitai_real_product_outfit_composer"
+      : input.response_format.json_schema.name;
+    if (name === `fitai_product_selector_${this.timeoutCategory}`) {
+      this.calls.push(input);
+      const error = new Error(`${this.timeoutCategory} selector timed out`);
+      error.code = "ETIMEDOUT";
+      throw error;
+    }
+    return super.create(input);
+  }
+}
+
 test("Shopping Agent V1 schemas are strict objects", () => {
   for (const schema of [
     SHOPPING_PLAN_SCHEMA,
@@ -1933,6 +1969,47 @@ test("selector slots settle independently and a timed-out shoes call uses gated 
   assert.equal(result.per_slot_selector_summary.find((slot) =>
     slot.category === "top").selector_error_code, null);
   assert.equal(logs.filter(({event}) => event === "per_slot_selector_summary").length, 3);
+});
+
+test("two Gate PASS candidates survive a Selector timeout as a two-item fallback", async () => {
+  const result = await new TaobaoShoppingAgentV1({
+    client: new SlotSelectorTimeoutClient("top"),
+    model: "qwen3.7-plus",
+    productProvider: new LimitedGateProvider({top: 2}),
+    logger: {info() {}, warn() {}},
+  }).run({user_input: "出去玩", authoritative_gender: "female"});
+  const top = result.slot_metrics.find((slot) => slot.category === "top");
+
+  assert.equal(result.state, "success");
+  assert.equal(top.candidate_gate_pass, 2);
+  assert.equal(top.selector_status, "FALLBACK_USED");
+  assert.equal(top.selector_fallback_candidate_count, 2);
+  assert.equal(result.candidate_pools.top.length, 2);
+  assert.ok(result.final_look_count >= 2);
+});
+
+test("one Gate PASS candidate can combine with other slots after Selector timeout", async () => {
+  const result = await new TaobaoShoppingAgentV1({
+    client: new SlotSelectorTimeoutClient("top", {failComposer: true}),
+    model: "qwen3.7-plus",
+    productProvider: new LimitedGateProvider({top: 1, bottom: 3, shoes: 3}),
+    logger: {info() {}, warn() {}},
+  }).run({user_input: "出去玩", authoritative_gender: "female"});
+  const top = result.slot_metrics.find((slot) => slot.category === "top");
+  const combinations = new Set(result.looks.map((look) =>
+    [look.items.top.candidate_id, look.items.bottom.candidate_id,
+      look.items.shoes.candidate_id].join("|")));
+
+  assert.equal(result.state, "success");
+  assert.equal(top.candidate_gate_pass, 1);
+  assert.equal(top.selector_status, "FALLBACK_USED");
+  assert.equal(top.selector_fallback_candidate_count, 1);
+  assert.equal(result.candidate_pools.top.length, 1);
+  assert.equal(result.candidate_pools.bottom.length, 3);
+  assert.equal(result.candidate_pools.shoes.length, 3);
+  assert.ok(result.final_look_count >= 2);
+  assert.ok(combinations.size >= 2);
+  assert.equal(result.composer_fallback_used, true);
 });
 
 test("a selector timeout cannot revive an AI-rejected candidate from another slot", async () => {

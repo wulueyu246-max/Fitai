@@ -930,8 +930,8 @@ class TaobaoShoppingAgentV1 {
           timeoutMs: this.selectorTimeoutMs,
         });
         if (failure.fallback_eligible &&
-            group.candidate_gate_pass >= MAX_SELECTED_CANDIDATES_PER_SLOT &&
-            group.candidates.length >= MAX_SELECTED_CANDIDATES_PER_SLOT) {
+            group.candidate_gate_pass > 0 &&
+            group.candidates.length > 0) {
           selection = buildSelectorFallbackSelection(group, {
             elapsedMs: settled.reason?.selector_elapsed_ms,
             errorCode: failure.error_code,
