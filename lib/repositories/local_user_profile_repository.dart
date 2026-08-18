@@ -7,11 +7,23 @@ import 'user_profile_repository.dart';
 
 class LocalUserProfileRepository
     implements UserProfileRepository, DeletableUserProfileRepository {
-  LocalUserProfileRepository({SharedPreferencesAsync? storage})
-      : _storage = storage;
+  LocalUserProfileRepository({SharedPreferencesAsync? storage, String? userId})
+      : _storage = storage,
+        _key = keyForUser(userId);
 
-  static const _key = 'fitai.user_profile.v1';
+  static const legacyKey = 'fitai.user_profile.v1';
+  final String _key;
   SharedPreferencesAsync? _storage;
+
+  static String keyForUser(String? userId) {
+    final normalized = userId?.trim() ?? '';
+    if (normalized.isEmpty) {
+      return legacyKey;
+    }
+    final encoded =
+        base64Url.encode(utf8.encode(normalized)).replaceAll('=', '');
+    return '$legacyKey.user.$encoded';
+  }
 
   @override
   Future<UserProfile?> load() async {

@@ -245,8 +245,12 @@ class _VirtualModelWorkspaceState extends State<_VirtualModelWorkspace> {
         source: 'virtual-model-swap',
         userId: widget.request.userId,
       );
-      final profile = await _profileService.load();
-      await _profileService.recordTryOn(profile, product.id);
+      final profile = await _profileService.load(userId: widget.request.userId);
+      await _profileService.recordTryOn(
+        profile,
+        product.id,
+        userId: widget.request.userId,
+      );
     } catch (_) {
       if (!mounted) {
         return;

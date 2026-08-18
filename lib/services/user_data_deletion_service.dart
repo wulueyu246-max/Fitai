@@ -38,14 +38,18 @@ class UserDataDeletionService {
   final ConsentService _consentService;
 
   Future<PhotoDeletionReport> deleteAllLocalPhotos() async {
-    final profile = await _profileService.load();
+    final profileUserId = _sessionController.account?.id;
+    final profile = await _profileService.load(userId: profileUserId);
+    final legacyProfile =
+        profileUserId == null ? null : await _profileService.load();
     final profilePhotosRemoved = profile.photos.length +
         (profile.avatarBase64?.isNotEmpty == true ? 1 : 0);
     final avatarRemoved =
         _sessionController.account?.avatarBase64?.isNotEmpty == true;
 
     await Future.wait([
-      _profileService.deletePhotos(profile),
+      _profileService.deletePhotos(profile, userId: profileUserId),
+      if (legacyProfile != null) _profileService.deletePhotos(legacyProfile),
       _sessionController.deleteAvatar(),
       _consentService.revokePhotoProcessing(),
     ]);

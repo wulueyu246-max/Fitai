@@ -201,9 +201,10 @@ class _HomePageState extends State<HomePage> {
       });
     }
     try {
+      await _session.ensureLoaded();
       final results = await Future.wait<Object?>([
         _preferenceService.load(),
-        _profileService.load(),
+        _profileService.load(userId: _session.account?.id),
         widget.brandService.getBrands(),
         _feedbackService.load(),
         widget.dailyContextService.getTodayContext(),
@@ -363,6 +364,7 @@ class _HomePageState extends State<HomePage> {
     _profile = await _profileService.syncFavorites(
       _profile,
       _favoriteService.productIds,
+      userId: _session.account?.id,
     );
     if (favorite) {
       await _recordProductFeedback(
@@ -554,7 +556,11 @@ class _HomePageState extends State<HomePage> {
     );
     _feedback = _feedbackService.records;
     final results = await Future.wait<Object?>([
-      _profileService.recordPurchase(_profile, product.sku),
+      _profileService.recordPurchase(
+        _profile,
+        product.sku,
+        userId: _session.account?.id,
+      ),
       _preferenceService.recordPurchase(_preference, product.sku),
       _fashionProfileService.recordPurchase(_fashionProfile, product.sku),
     ]);

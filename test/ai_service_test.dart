@@ -208,6 +208,7 @@ void main() {
       accountGender: 'female',
       initialGender: 'male',
       accountIsCurrentUser: true,
+      initialIsCurrentFlow: true,
     );
 
     expect(result.gender, 'female');
@@ -220,6 +221,8 @@ void main() {
       accountGender: 'male',
       profileGender: '女性',
       accountIsCurrentUser: true,
+      profileScope: OutfitProfileScope.currentUser,
+      profileUserMatch: true,
     );
 
     expect(result.gender, 'male');
@@ -239,22 +242,23 @@ void main() {
     expect(result.hasConflict, isFalse);
   });
 
-  test('conflicting genders without an authoritative source fall back safely',
-      () {
+  test('legacy profile gender is not an authoritative source', () {
     final result = resolveOutfitGender(
       profileGender: 'female',
-      initialGender: 'male',
+      profileScope: OutfitProfileScope.legacyUnscoped,
     );
 
     expect(result.gender, 'unisex');
     expect(result.sourceUsed, 'none');
-    expect(result.hasConflict, isTrue);
+    expect(result.hasConflict, isFalse);
   });
 
-  test('current local profile and current flow selection remain supported', () {
+  test('current scoped profile and current flow selection remain supported',
+      () {
     final profileResult = resolveOutfitGender(
       profileGender: '女性',
-      profileIsCurrentUser: true,
+      profileScope: OutfitProfileScope.currentUser,
+      profileUserMatch: true,
     );
     final initialResult = resolveOutfitGender(
       initialGender: 'male',
@@ -265,6 +269,59 @@ void main() {
     expect(profileResult.sourceUsed, 'profile');
     expect(initialResult.gender, 'male');
     expect(initialResult.sourceUsed, 'initial');
+  });
+
+  test('current flow female overrides legacy male when account is unisex', () {
+    final result = resolveOutfitGender(
+      accountGender: 'unisex',
+      initialGender: 'female',
+      profileGender: 'male',
+      accountIsCurrentUser: true,
+      initialIsCurrentFlow: true,
+      profileScope: OutfitProfileScope.legacyUnscoped,
+    );
+
+    expect(result.gender, 'female');
+    expect(result.sourceUsed, 'initial');
+  });
+
+  test('unscoped legacy male cannot fill an otherwise unknown gender', () {
+    final result = resolveOutfitGender(
+      accountGender: 'unisex',
+      profileGender: 'male',
+      accountIsCurrentUser: true,
+      profileScope: OutfitProfileScope.legacyUnscoped,
+    );
+
+    expect(result.gender, 'unisex');
+    expect(result.sourceUsed, 'none');
+  });
+
+  test('another user profile cannot determine the current request gender', () {
+    final result = resolveOutfitGender(
+      profileGender: 'male',
+      profileScope: OutfitProfileScope.currentUser,
+      profileUserMatch: false,
+    );
+
+    expect(result.gender, 'unisex');
+    expect(result.sourceUsed, 'none');
+  });
+
+  test('current flow female wins over a conflicting scoped profile', () {
+    final result = resolveOutfitGender(
+      accountGender: 'unisex',
+      initialGender: 'female',
+      profileGender: 'male',
+      accountIsCurrentUser: true,
+      initialIsCurrentFlow: true,
+      profileScope: OutfitProfileScope.currentUser,
+      profileUserMatch: true,
+    );
+
+    expect(result.gender, 'female');
+    expect(result.sourceUsed, 'initial');
+    expect(result.hasConflict, isTrue);
   });
 
   for (final gender in const ['female', 'male', 'unisex']) {

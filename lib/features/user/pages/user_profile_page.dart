@@ -111,7 +111,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
     }
     setState(() => _saving = false);
     if (success) {
-      final profile = await _profileService.load();
+      final profile = await _profileService.load(userId: widget.account.id);
       await _profileService.save(
         profile.copyWith(
           avatarBase64: _avatarBase64,
@@ -123,6 +123,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
           stylePreference: _styles.toList(growable: false),
           favoriteBrands: _brands.toList(growable: false),
         ),
+        userId: widget.account.id,
       );
       if (!mounted) {
         return;

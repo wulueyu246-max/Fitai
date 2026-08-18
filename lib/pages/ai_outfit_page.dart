@@ -682,24 +682,28 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       final userRequest = _requestController.text.trim();
       await _session.ensureLoaded();
       final currentAccount = _session.account;
-      final userProfile = await _profileService.load();
+      final profileSnapshot = await _profileService.loadScoped(
+        userId: currentAccount?.id,
+      );
+      final userProfile = profileSnapshot.profile;
       final genderResolution = resolveOutfitGender(
         accountGender: currentAccount?.gender,
         profileGender: userProfile.gender,
         initialGender: widget.initialGender,
         accountIsCurrentUser: currentAccount != null,
-        profileIsCurrentUser:
-            currentAccount == null && widget.initialGender == null,
-        initialIsCurrentFlow:
-            currentAccount == null && widget.initialGender != null,
+        initialIsCurrentFlow: widget.initialGender != null,
+        profileScope: profileSnapshot.scope.logValue,
+        profileUserMatch: profileSnapshot.userMatch,
       );
       final resolvedGender = genderResolution.gender;
       final genderMetadata = <String, Object?>{
-        'accountGender': genderResolution.accountGender,
-        'profileGender': genderResolution.profileGender,
-        'initialGender': genderResolution.initialGender,
-        'resolvedGender': resolvedGender,
-        'source_used': genderResolution.sourceUsed,
+        'account_gender': genderResolution.accountGender,
+        'initial_gender': genderResolution.initialGender,
+        'profile_gender': genderResolution.profileGender,
+        'profile_scope': genderResolution.profileScope,
+        'profile_user_match': genderResolution.profileUserMatch,
+        'resolved_gender': resolvedGender,
+        'gender_source_used': genderResolution.sourceUsed,
       };
       AppLogger.instance.info(
         'outfit_gender_resolved',
@@ -1082,7 +1086,8 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       )) {
         return;
       }
-      final profile = await _profileService.load();
+      final profileUserId = _session.account?.id;
+      final profile = await _profileService.load(userId: profileUserId);
       if (!mounted || generationId != _generationSequence) {
         return;
       }
@@ -1094,12 +1099,17 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         style: analysis.style,
         photos: request.images,
         favoriteProductIds: _favoriteService.productIds,
+        userId: profileUserId,
       );
       if (!mounted || generationId != _generationSequence) {
         return;
       }
       for (final plan in outfitPlans) {
-        await _profileService.recordOutfit(mergedProfile, plan.id);
+        await _profileService.recordOutfit(
+          mergedProfile,
+          plan.id,
+          userId: profileUserId,
+        );
       }
       final createdTime = DateTime.now();
       try {
@@ -1254,9 +1264,13 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         return;
       }
       await Future.wait([
-        _profileService
-            .load()
-            .then((profile) => _profileService.recordOutfit(profile, plan.id)),
+        _profileService.load(userId: _session.account?.id).then(
+              (profile) => _profileService.recordOutfit(
+                profile,
+                plan.id,
+                userId: _session.account?.id,
+              ),
+            ),
         _wardrobeRepository.saveAIRecommendation(
           AIRecommendationRecord(
             id: 'ai-${DateTime.now().microsecondsSinceEpoch}',
@@ -1435,9 +1449,13 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
         source: 'ai-outfit-result',
         userId: _session.account?.id ?? 'local-demo-user',
       );
-      final profile = await _profileService.load();
-      final updatedProfile =
-          await _profileService.recordTryOn(profile, product.id);
+      final profileUserId = _session.account?.id;
+      final profile = await _profileService.load(userId: profileUserId);
+      final updatedProfile = await _profileService.recordTryOn(
+        profile,
+        product.id,
+        userId: profileUserId,
+      );
 
       if (!mounted) {
         return;
@@ -1518,16 +1536,23 @@ class _AiOutfitPageState extends State<AiOutfitPage> {
       outfitPlanId: _viewModel.analysis?.outfitPlan?.id,
       source: 'ai-outfit-product-detail',
     );
-    final profile = await _profileService.load();
-    await _profileService.recordPurchase(profile, product.sku);
+    final profileUserId = _session.account?.id;
+    final profile = await _profileService.load(userId: profileUserId);
+    await _profileService.recordPurchase(
+      profile,
+      product.sku,
+      userId: profileUserId,
+    );
   }
 
   Future<void> _toggleFavoriteProduct(Product product) async {
     final isFavorite = await _wardrobeRepository.toggleProduct(product);
-    final profile = await _profileService.load();
+    final profileUserId = _session.account?.id;
+    final profile = await _profileService.load(userId: profileUserId);
     await _profileService.syncFavorites(
       profile,
       _favoriteService.productIds,
+      userId: profileUserId,
     );
     if (isFavorite) {
       await Future.wait([

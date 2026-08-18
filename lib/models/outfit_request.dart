@@ -19,6 +19,8 @@ class OutfitGenderResolution {
     required this.accountGender,
     required this.profileGender,
     required this.initialGender,
+    required this.profileScope,
+    required this.profileUserMatch,
   });
 
   final String gender;
@@ -27,6 +29,14 @@ class OutfitGenderResolution {
   final String accountGender;
   final String profileGender;
   final String initialGender;
+  final String profileScope;
+  final bool profileUserMatch;
+}
+
+abstract final class OutfitProfileScope {
+  static const currentUser = 'CURRENT_USER';
+  static const legacyUnscoped = 'LEGACY_UNSCOPED';
+  static const none = 'NONE';
 }
 
 OutfitGenderResolution resolveOutfitGender({
@@ -34,17 +44,25 @@ OutfitGenderResolution resolveOutfitGender({
   String? profileGender,
   String? initialGender,
   bool accountIsCurrentUser = false,
-  bool profileIsCurrentUser = false,
   bool initialIsCurrentFlow = false,
+  String profileScope = OutfitProfileScope.none,
+  bool profileUserMatch = false,
 }) {
   final normalizedAccount = normalizeOutfitGender(accountGender);
   final normalizedProfile = normalizeOutfitGender(profileGender);
   final normalizedInitial = normalizeOutfitGender(initialGender);
-  final explicitValues = {
-    normalizedAccount,
-    normalizedProfile,
-    normalizedInitial,
-  }..remove('unisex');
+  final explicitValues = <String>{};
+  if (accountIsCurrentUser && normalizedAccount != 'unisex') {
+    explicitValues.add(normalizedAccount);
+  }
+  if (initialIsCurrentFlow && normalizedInitial != 'unisex') {
+    explicitValues.add(normalizedInitial);
+  }
+  if (profileScope == OutfitProfileScope.currentUser &&
+      profileUserMatch &&
+      normalizedProfile != 'unisex') {
+    explicitValues.add(normalizedProfile);
+  }
   final hasConflict = explicitValues.length > 1;
 
   String resolved = 'unisex';
@@ -52,12 +70,14 @@ OutfitGenderResolution resolveOutfitGender({
   if (accountIsCurrentUser && normalizedAccount != 'unisex') {
     resolved = normalizedAccount;
     sourceUsed = 'account';
-  } else if (profileIsCurrentUser && normalizedProfile != 'unisex') {
-    resolved = normalizedProfile;
-    sourceUsed = 'profile';
   } else if (initialIsCurrentFlow && normalizedInitial != 'unisex') {
     resolved = normalizedInitial;
     sourceUsed = 'initial';
+  } else if (profileScope == OutfitProfileScope.currentUser &&
+      profileUserMatch &&
+      normalizedProfile != 'unisex') {
+    resolved = normalizedProfile;
+    sourceUsed = 'profile';
   }
 
   return OutfitGenderResolution(
@@ -67,6 +87,8 @@ OutfitGenderResolution resolveOutfitGender({
     accountGender: normalizedAccount,
     profileGender: normalizedProfile,
     initialGender: normalizedInitial,
+    profileScope: profileScope,
+    profileUserMatch: profileUserMatch,
   );
 }
 

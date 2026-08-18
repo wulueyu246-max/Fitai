@@ -62,7 +62,6 @@ class UserSessionController extends ChangeNotifier {
           height: localProfile.height,
           weight: localProfile.weight,
           age: localProfile.age,
-          gender: localProfile.gender,
           bodyType: localProfile.bodyType,
           likedStyles: localProfile.stylePreference,
           budgetMin: localProfile.budgetMin,
@@ -149,12 +148,13 @@ class UserSessionController extends ChangeNotifier {
 
   Future<bool> deleteAccount() {
     return _runResult(() async {
+      final currentUserId = _account?.id;
       final repository = _repository;
       if (repository is! AccountDeletionRepository) {
         throw const AuthException('当前账号服务不支持注销');
       }
       await (repository as AccountDeletionRepository).deleteAccount();
-      await _profileService.clear();
+      await _profileService.clear(userId: currentUserId);
       _account = null;
       _session = null;
     });
@@ -182,7 +182,7 @@ class UserSessionController extends ChangeNotifier {
   }
 
   Future<void> _mirrorAccountToProfile(UserAccount account) async {
-    final current = await _profileService.load();
+    final current = await _profileService.load(userId: account.id);
     await _profileService.save(
       current.copyWith(
         avatarBase64: account.avatarBase64,
@@ -196,6 +196,7 @@ class UserSessionController extends ChangeNotifier {
         budgetMax: account.budgetMax,
         favoriteBrands: account.favoriteBrands,
       ),
+      userId: account.id,
     );
   }
 }
