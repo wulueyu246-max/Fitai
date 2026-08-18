@@ -46,6 +46,7 @@ test("main-chain input preserves User Truth without depending on legacy analysis
   assert.equal(input.user_input, outfitRequest.user_input);
   assert.equal(input.authoritative_gender, "female");
   assert.equal(input.persona.gender, "female");
+  assert.equal(input.persona.expression, "feminine_or_neutral_feminine");
   assert.equal(input.persona.source, "authoritative_user_truth");
   assert.equal(input.persona.style, undefined);
   assert.equal(Object.hasOwn(input, "weather"), false);
@@ -189,7 +190,79 @@ test("successful Agent output maps two candidate-backed Looks for Flutter", () =
   assert.equal(response.outfit_plans[0].top.purchase_url, "https://item.example/top-1");
   assert.equal(response.outfit_plans[0].top.image_url, "https://img.example/top-1.jpg");
   assert.equal(response.outfit_plans[0].top.price, 129);
-  assert.match(response.outfit_plans[0].reason, /真实淘宝候选/);
+  assert.match(response.outfit_plans[0].reason, /真实淘宝商品/);
+  for (const field of [
+    "display_style_name",
+    "display_style_summary",
+    "display_top_advice",
+    "display_bottom_advice",
+    "display_shoes_advice",
+    "display_look_explanation",
+  ]) {
+    assert.match(response[field], /[\u3400-\u9fff]/u);
+  }
+});
+
+test("response adapter separates English canonical semantics from Chinese display copy", () => {
+  const result = successResult();
+  result.shopping_intent = {
+    gender: "female",
+    persona: {expression: "feminine_or_neutral_feminine"},
+    overall_aesthetic: {core_direction: "clean_fit"},
+    body_strategy: {
+      goals: ["leg_elongation"],
+      soft_tactics: ["upper_body_foundation", "lightweight_finish"],
+    },
+    slots: [
+      {category: "top", role: "upper body foundation"},
+      {category: "bottom", role: "leg elongation"},
+      {category: "shoes", role: "lightweight finish"},
+    ],
+  };
+  const response = adaptShoppingAgentSuccess(result, {
+    basePayload: basePayload(),
+    outfitRequest,
+    now: () => new Date("2026-08-17T00:00:00.000Z"),
+  });
+  const displayFields = [
+    response.display_style_name,
+    response.display_style_summary,
+    response.display_top_advice,
+    response.display_bottom_advice,
+    response.display_shoes_advice,
+    response.display_look_explanation,
+    response.outfit_plans[0].style,
+    response.outfit_plans[0].reason,
+  ];
+  assert.ok(displayFields.every((value) => /[\u3400-\u9fff]/u.test(value)));
+  assert.ok(displayFields.every((value) =>
+    !/clean_fit|leg_elongation|upper_body_foundation|lightweight_finish/i.test(value)));
+  assert.equal(response.style, "清爽利落风");
+  assert.equal(response.styling_summary.overall_aesthetic, undefined);
+});
+
+test("response adapter preserves request gender and records downstream drift", () => {
+  const result = successResult();
+  result.authoritative_gender = "male";
+  const logs = [];
+  const response = adaptShoppingAgentSuccess(result, {
+    basePayload: basePayload(),
+    outfitRequest,
+    logger: {warn: (event, details) => logs.push({event, details})},
+  });
+  assert.equal(response.gender, "female");
+  assert.equal(response.gender_context_drift, true);
+  assert.equal(response.outfit_plans.every((plan) => plan.gender === "female"), true);
+  assert.equal(logs[0].event, "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT");
+});
+
+test("response adapter rejects an explicitly male product in a female result", () => {
+  const result = successResult();
+  result.looks[0].items.top.title = "男士修身短袖T恤";
+  assert.throws(
+    () => adaptShoppingAgentSuccess(result, {basePayload: basePayload(), outfitRequest}),
+    (error) => error.code === "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT",
+  );
 });
 
 test("Agent failure is explicit and never exposes legacy products", async () => {

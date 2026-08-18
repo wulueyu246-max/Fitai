@@ -227,16 +227,62 @@ test("real-time weather is absent from every Shopping Agent AI boundary", () => 
   assert.equal(Object.hasOwn(COMPOSER_SCORE_PROPERTIES, "weather_fit"), false);
 });
 
-test("Shopping Intent cannot override authoritative gender", async () => {
+test("authoritative gender overrides AI drift and remains fixed across every AI boundary", async () => {
   const input = normalizeAgentInput({
     user_input: "我要出去玩，帮我搭配一套",
     authoritative_gender: "female",
   });
   const rawPlan = plan("male");
-  assert.throws(
-    () => buildShoppingIntent(rawPlan.shopping_intent, input),
-    /authoritative gender/,
+  const drift = [];
+  const intent = buildShoppingIntent(rawPlan.shopping_intent, input, {
+    onGenderDrift: (value) => drift.push(value),
+  });
+  assert.equal(intent.gender, "female");
+  assert.equal(intent.persona.gender, "female");
+  assert.equal(intent.persona.expression, "feminine_or_neutral_feminine");
+  assert.ok(intent.slots.every((slot) => slot.gender === "female"));
+  assert.ok(intent.slots.every((slot) => slot.search_query.includes("女")));
+  assert.ok(intent.slots.every((slot) => !slot.hard_constraints.includes("male")));
+  assert.deepEqual(drift, [{
+    phase: "shopping_intent_search_plan",
+    received_gender: "male",
+    applied_gender: "female",
+    resolution: "AUTHORITATIVE_OVERRIDE",
+  }]);
+
+  const topGroup = {
+    slot: intent.slots[0],
+    candidates: candidates("top").slice(0, 3).map((item, index) => ({
+      ...item,
+      candidate_id: `candidate_${index + 1}`,
+    })),
+  };
+  const selectorPayload = JSON.parse(
+    buildSelectorMessages(intent, topGroup, {authoritativeGender: "female"})[1]
+      .content[0].text,
   );
+  assert.equal(selectorPayload.authoritative_gender, "female");
+  assert.equal(selectorPayload.selector_gender, "female");
+  assert.equal(selectorPayload.persona_expression, "feminine_or_neutral_feminine");
+
+  const selections = ["top", "bottom", "shoes"].map((category) => ({
+    slot: intent.slots.find((slot) => slot.category === category),
+    final_candidate_pool: candidates(category).slice(0, 2).map((item, index) => ({
+      ...item,
+      candidate_id: `${category}_${index + 1}`,
+      selection_tier: "HIGH",
+      selector_quality_score: 80,
+      selector_scores: selectorScores(80),
+    })),
+  }));
+  const composerPayload = JSON.parse(
+    buildComposerMessages(intent, selections, {authoritativeGender: "female"})[1]
+      .content[0].text,
+  );
+  assert.equal(composerPayload.authoritative_gender, "female");
+  assert.equal(composerPayload.composer_gender, "female");
+  assert.equal(composerPayload.shopping_intent.gender, "female");
+
   const agent = new TaobaoShoppingAgentV1({
     client: new FakeAiClient({planGender: "male"}),
     model: "qwen3.7-plus",
@@ -249,8 +295,59 @@ test("Shopping Intent cannot override authoritative gender", async () => {
   });
   assert.equal(result.state, "success");
   assert.equal(result.authoritative_gender, "female");
-  assert.equal(result.planner_fallback_used, true);
+  assert.equal(result.planner_fallback_used, false);
+  assert.equal(result.gender_context_drift[0].error_code,
+    "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT");
   assert.ok(Object.values(result.search_queries).every((query) => query.includes("女")));
+});
+
+test("female persona permits neutral-feminine styling without forcing skirts or pink", () => {
+  const input = normalizeAgentInput({
+    user_input: "想穿得中性利落一点，不要裙装",
+    authoritative_gender: "female",
+  });
+  const raw = plan("female").shopping_intent;
+  raw.slots[1] = {
+    ...raw.slots[1],
+    soft_preferences: ["高腰", "直筒"],
+    search_query: "女 高腰 牛仔裤",
+  };
+  const intent = buildShoppingIntent(raw, input);
+  assert.equal(intent.persona.expression, "neutral_feminine");
+  assert.equal(intent.slots.some((slot) => /粉色/.test(slot.search_query)), false);
+  assert.equal(intent.slots.some((slot) => slot.category === "bottom" &&
+    /裙/.test(slot.search_query)), false);
+  assert.ok(intent.slots.every((slot) => slot.search_query.includes("女")));
+});
+
+test("male authoritative gender remains fixed and produces male queries", () => {
+  const input = normalizeAgentInput({
+    user_input: "我要出去玩，帮我搭配一套",
+    authoritative_gender: "male",
+  });
+  const intent = buildShoppingIntent(plan("male").shopping_intent, input);
+  assert.equal(intent.gender, "male");
+  assert.equal(intent.persona.expression, "masculine_or_neutral_masculine");
+  assert.ok(intent.slots.every((slot) => slot.gender === "male"));
+  assert.ok(intent.slots.every((slot) => slot.search_query.includes("男")));
+});
+
+test("AI unisex output cannot downgrade an authoritative female request", () => {
+  const input = normalizeAgentInput({
+    user_input: "帮我穿得自然利落",
+    authoritative_gender: "female",
+  });
+  const raw = plan("female").shopping_intent;
+  raw.gender = "unisex";
+  const drift = [];
+  const intent = buildShoppingIntent(raw, input, {
+    onGenderDrift: (value) => drift.push(value),
+  });
+  assert.equal(intent.gender, "female");
+  assert.equal(intent.persona.gender, "female");
+  assert.ok(intent.slots.every((slot) => slot.gender === "female"));
+  assert.ok(intent.slots.every((slot) => /^女/u.test(slot.search_query)));
+  assert.equal(drift[0].received_gender, "unisex");
 });
 
 class FakeProvider {
@@ -940,15 +1037,20 @@ test("invalid AI query wording falls back to a deterministic high-recall plan", 
   assert.ok(intent.slots.every((slot) => slot.search_plan_fallback_reason));
 });
 
-test("initial query fallback never hides an explicit gender conflict", () => {
+test("initial query gender conflict is logged and deterministically overridden", () => {
   const input = normalizeAgentInput({user_input: "帮我搭一套", gender: "female"});
   const rawPlan = plan();
   rawPlan.shopping_intent.slots[0].search_query = "男士显瘦单品";
-  assert.throws(
-    () => buildShoppingIntent(rawPlan.shopping_intent, input),
-    (error) => error.code === "SHOPPING_AGENT_SCHEMA_INVALID" &&
-      /gender/.test(error.message),
-  );
+  const drift = [];
+  const intent = buildShoppingIntent(rawPlan.shopping_intent, input, {
+    onGenderDrift: (value) => drift.push(value),
+  });
+  assert.match(intent.slots[0].search_query, /^女/u);
+  assert.doesNotMatch(intent.slots[0].search_query, /男/u);
+  assert.equal(intent.slots[0].search_plan_fallback_reason,
+    "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT");
+  assert.equal(drift[0].phase, "search_plan");
+  assert.equal(drift[0].received_gender, "male");
 });
 
 test("ZERO_RESULT_RECALL uses one deterministic broadening round before selectors", async () => {
@@ -1223,6 +1325,36 @@ test("composer validates candidate references against each slot whitelist", () =
   assert.equal(mixed.looks.length, 2);
   assert.equal(mixed.invalid_candidate_reference.length, 1);
   assert.deepEqual(mixed.invalid_candidate_reference[0].categories, ["top"]);
+});
+
+test("composer rejects an explicitly cross-gender candidate even when its ID is allowed", () => {
+  const pools = ["top", "bottom", "shoes"].map((category) => ({
+    slot: {category, gender: "female"},
+    final_candidate_pool: [{
+      ...product(
+        category,
+        1,
+        category === "top" ? "男士修身短袖T恤" : `女款${category}商品`,
+      ),
+      candidate_id: `${category}_1`,
+    }],
+  }));
+  const result = validateComposedLooks({looks: [{
+    look_id: "look-gender-conflict",
+    top_candidate_id: "top_1",
+    bottom_candidate_id: "bottom_1",
+    shoes_candidate_id: "shoes_1",
+    scores: composerScores(82),
+  }]}, pools, {authoritativeGender: "female"});
+  assert.equal(result.looks.length, 0);
+  assert.equal(
+    result.invalid_candidate_reference[0].error_code,
+    "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT",
+  );
+  assert.equal(
+    result.candidate_reference_audit[0].error_code,
+    "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT",
+  );
 });
 
 test("Availability First keeps candidate-different Looks with limited structural diversity", () => {

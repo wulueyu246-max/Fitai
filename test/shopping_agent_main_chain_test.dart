@@ -6,7 +6,13 @@ void main() {
       () {
     final analysis = OutfitAnalysis.fromJson({
       'bodyProfile': '纤细',
-      'style': '清新休闲',
+      'style': 'clean_fit',
+      'display_style_name': '清爽利落风',
+      'display_style_summary': '以清爽利落风为整体方向，兼顾女性人物表达。',
+      'display_top_advice': '选择利落、不过度宽松的合身上衣。',
+      'display_bottom_advice': '通过高腰与纵向线条优化腿部比例。',
+      'display_shoes_advice': '选择量感适中的简洁鞋型。',
+      'display_look_explanation': '真实商品组成的清爽利落方案。',
       'gender': 'female',
       'request_id': 'request-agent-1',
       'recommendations': {
@@ -42,6 +48,24 @@ void main() {
     expect(analysis.hasShoppingAgentResult, isTrue);
     expect(analysis.recommendedProducts, hasLength(6));
     expect(analysis.outfitPlans, hasLength(2));
+    expect(analysis.style, '清爽利落风');
+    expect(analysis.top, analysis.displayTopAdvice);
+    expect(analysis.bottom, analysis.displayBottomAdvice);
+    expect(analysis.shoes, analysis.displayShoesAdvice);
+    expect(analysis.suggestion, analysis.displayStyleSummary);
+    expect(
+      [
+        analysis.style,
+        analysis.top,
+        analysis.bottom,
+        analysis.shoes,
+        analysis.suggestion,
+        analysis.displayLookExplanation,
+      ].join(' '),
+      isNot(contains(RegExp(
+        r'clean_fit|leg_elongation|upper_body_foundation|lightweight_finish',
+      ))),
+    );
     expect(analysis.outfitPlans.first.top.id, 'candidate-top-1');
     expect(
       analysis.outfitPlans.first.top.purchaseUrl,

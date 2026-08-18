@@ -38,11 +38,12 @@ function buildShoppingAgentMainInput(outfitRequest, _analysis, requestId) {
   const authoritativeGender = normalizeGender(
     outfitRequest?.authoritative_gender || outfitRequest?.gender,
   );
+  const userInput = String(
+    outfitRequest?.user_input || outfitRequest?.request || "",
+  ).trim();
   return {
     request_id: String(requestId || outfitRequest?.requestId || "").trim(),
-    user_input: String(
-      outfitRequest?.user_input || outfitRequest?.request || "",
-    ).trim(),
+    user_input: userInput,
     authoritative_gender: authoritativeGender,
     gender: authoritativeGender,
     height: outfitRequest?.height,
@@ -53,6 +54,7 @@ function buildShoppingAgentMainInput(outfitRequest, _analysis, requestId) {
     },
     persona: {
       gender: authoritativeGender,
+      expression: resolvePersonaExpression(authoritativeGender, userInput),
       source: "authoritative_user_truth",
     },
     styling_policy: SHOPPING_PRODUCTION_POLICY,
@@ -147,6 +149,7 @@ async function dispatchOutfitProductionPath({
     requestId,
     deadlineMs,
     now,
+    logger,
   });
   return {mode: "shopping_agent_v1", payload};
 }
@@ -160,6 +163,7 @@ async function integrateShoppingAgentMainChain({
   requestId,
   deadlineMs,
   now = () => new Date(),
+  logger = console,
 }) {
   if (!enabled) {
     return {
@@ -186,6 +190,7 @@ async function integrateShoppingAgentMainChain({
       basePayload,
       outfitRequest,
       now,
+      logger,
     });
   } catch (error) {
     return attachShoppingAgentFailure(basePayload, {
@@ -201,6 +206,7 @@ function adaptShoppingAgentSuccess(result, {
   basePayload = {},
   outfitRequest = {},
   now = () => new Date(),
+  logger = console,
 } = {}) {
   if (result?.state !== "success" || !Array.isArray(result.looks)) {
     throw integrationError("Shopping Agent success payload is invalid");
@@ -211,14 +217,32 @@ function adaptShoppingAgentSuccess(result, {
 
   const requestId = String(result.request_id || outfitRequest.requestId || "").trim();
   const gender = normalizeGender(
-    result.authoritative_gender || outfitRequest.authoritative_gender || outfitRequest.gender,
+    outfitRequest.authoritative_gender || outfitRequest.gender || result.authoritative_gender,
   );
-  const style = String(
+  const resultGender = normalizeGender(result.authoritative_gender);
+  const genderDrifted = resultGender !== gender;
+  if (genderDrifted) {
+    logger.warn?.("SHOPPING_AGENT_GENDER_CONTEXT_DRIFT", {
+      request_id: requestId,
+      phase: "response_adapter",
+      authoritative_gender: gender,
+      received_gender: resultGender,
+      applied_gender: gender,
+      resolution: "AUTHORITATIVE_OVERRIDE",
+    });
+  }
+  const internalStyle = String(
     result.shopping_intent?.overall_aesthetic?.core_direction || basePayload.style || "",
   ).trim();
   const persona = plainObject(result.shopping_intent?.persona);
   const bodyStrategy = plainObject(result.shopping_intent?.body_strategy);
-  const occasion = plainObject(result.shopping_intent?.occasion);
+  const display = buildChineseDisplayFields({
+    internalStyle,
+    persona,
+    bodyStrategy,
+    slots: result.shopping_intent?.slots,
+    gender,
+  });
   const scene = String(outfitRequest.scene || "日常").trim() || "日常";
   const createdTime = now().toISOString();
   const productsById = new Map();
@@ -240,13 +264,12 @@ function adaptShoppingAgentSuccess(result, {
       return [slot, mapped];
     }));
     const finalScore = score(scores.final_score);
-    const explanation = style
-      ? `基于真实淘宝候选组成的${style}方案，整套评分 ${finalScore}。`
-      : `基于真实淘宝候选组成的完整方案，整套评分 ${finalScore}。`;
+    const explanation = `第${index + 1}套采用真实淘宝商品，保持${display.display_style_name}方向，整套评分 ${finalScore} 分。`;
     return {
       look_id: lookId,
       ...mappedItems,
       explanation,
+      display_look_explanation: explanation,
       final_score: finalScore,
       scores,
     };
@@ -262,8 +285,10 @@ function adaptShoppingAgentSuccess(result, {
     reason: look.explanation,
     createdTime,
     scene,
-    style,
-    style_direction: style,
+    style: display.display_style_name,
+    style_direction: display.display_style_name,
+    display_style_name: display.display_style_name,
+    display_look_explanation: look.display_look_explanation,
     gender,
     request_id: requestId,
     look_id: look.look_id,
@@ -274,12 +299,22 @@ function adaptShoppingAgentSuccess(result, {
     ...basePayload,
     request_id: requestId || basePayload.request_id,
     gender,
-    style: style || "智能选品",
+    gender_context_drift: genderDrifted,
+    style: display.display_style_name,
+    bodyProfile: display.display_style_summary,
+    body_profile: display.display_style_summary,
+    display_style_name: display.display_style_name,
+    display_style_summary: display.display_style_summary,
+    display_top_advice: display.display_top_advice,
+    display_bottom_advice: display.display_bottom_advice,
+    display_shoes_advice: display.display_shoes_advice,
+    display_look_explanation: shoppingAgentLooks[0].display_look_explanation,
     styling_summary: {
-      overall_aesthetic: plainObject(result.shopping_intent?.overall_aesthetic),
-      persona,
-      body_strategy: bodyStrategy,
-      occasion,
+      display_style_name: display.display_style_name,
+      display_style_summary: display.display_style_summary,
+      display_top_advice: display.display_top_advice,
+      display_bottom_advice: display.display_bottom_advice,
+      display_shoes_advice: display.display_shoes_advice,
     },
     shopping_agent_status: "success",
     shopping_agent_request_id: requestId,
@@ -291,23 +326,87 @@ function adaptShoppingAgentSuccess(result, {
     outfit_plan: outfitPlans[0],
     recommendations: {
       ...plainObject(basePayload.recommendations),
-      top: slotSummary(result, "top", "真实上衣"),
-      bottom: slotSummary(result, "bottom", "真实下装"),
-      shoes: slotSummary(result, "shoes", "真实鞋履"),
-      summary: style
-        ? `Shopping Agent 已按${style}组合真实商品`
-        : "Shopping Agent 已组合真实商品",
+      top: display.display_top_advice,
+      bottom: display.display_bottom_advice,
+      shoes: display.display_shoes_advice,
+      summary: display.display_style_summary,
       products,
     },
   };
 }
 
-function slotSummary(result, category, fallback) {
-  const slots = Array.isArray(result?.shopping_intent?.slots)
-    ? result.shopping_intent.slots
-    : [];
-  const slot = slots.find((item) => item?.category === category);
-  return String(slot?.role || fallback).trim() || fallback;
+function buildChineseDisplayFields({
+  internalStyle,
+  persona,
+  bodyStrategy,
+  slots,
+  gender,
+} = {}) {
+  const displayStyleName = localizeStyleName(internalStyle);
+  const personaLabel = gender === "female"
+    ? "女性或自然中性的人物表达"
+    : gender === "male"
+      ? "男性或自然中性的人物表达"
+      : "自然中性的人物表达";
+  const bodyGoal = firstChinesePhrase(bodyStrategy?.goals).replace(/[。！？]$/u, "");
+  const summaryParts = [
+    `以${displayStyleName}为整体方向`,
+    `保持${personaLabel}`,
+    bodyGoal ? `并兼顾${bodyGoal}` : "并兼顾整体比例与日常可穿性",
+  ];
+  const slotList = Array.isArray(slots) ? slots : [];
+  const role = (category) => firstChinesePhrase(
+    slotList.find((slot) => slot?.category === category)?.role,
+  );
+  return Object.freeze({
+    display_style_name: displayStyleName,
+    display_style_summary: `${summaryParts.join("，")}。`,
+    display_top_advice: role("top") ||
+      "选择轮廓利落、松量适中的上衣，保持上半身清爽协调。",
+    display_bottom_advice: role("bottom") ||
+      "通过合适腰线与纵向线条优化下装比例，避免压低视觉重心。",
+    display_shoes_advice: role("shoes") ||
+      "选择量感适中、线条简洁的鞋型，衔接整套风格与比例。",
+  });
+}
+
+function localizeStyleName(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+  const known = [
+    [/clean\s*fit|洁净合身/u, "清爽利落风"],
+    [/urban\s+light\s+romantic|都市轻浪漫/u, "都市轻浪漫风"],
+    [/fresh\s+urban\s+casual|清新都市休闲/u, "清新都市休闲风"],
+    [/smart\s+casual|都市轻熟/u, "都市轻熟风"],
+    [/french|法式/u, "法式轻盈休闲风"],
+    [/cute|sweet|可爱|甜美/u, "甜美清新风"],
+    [/minimal|极简/u, "简约利落风"],
+  ];
+  for (const [pattern, label] of known) {
+    if (pattern.test(normalized)) return label;
+  }
+  const chinese = firstChinesePhrase(value).replace(/[。！？]$/u, "");
+  return chinese || "清爽协调的日常风格";
+}
+
+function firstChinesePhrase(value) {
+  const values = Array.isArray(value) ? value : [value];
+  for (const item of values) {
+    const source = String(item || "").trim();
+    if (!/[\u3400-\u9fff]/u.test(source)) continue;
+    const chinese = source
+      .replace(/[（(][^\u3400-\u9fff]*[）)]/gu, "")
+      .replace(/[A-Za-z][A-Za-z0-9_\-\s/]*/g, "")
+      .replace(/[_|]+/g, "")
+      .replace(/\s+/g, "")
+      .replace(/^[，。；：、\s]+|[，；：、\s]+$/g, "")
+      .trim();
+    if (chinese.length >= 2) return /[。！？]$/u.test(chinese) ? chinese : `${chinese}。`;
+  }
+  return "";
 }
 
 function mapCandidateProduct(candidate, {slot, lookId, requestId, gender}) {
@@ -321,6 +420,11 @@ function mapCandidateProduct(candidate, {slot, lookId, requestId, gender}) {
   const price = Number(candidate.price);
   if (!candidateId || !title || !image || !purchaseUrl || !Number.isFinite(price)) {
     throw integrationError(`${slot} candidate mapping is incomplete`);
+  }
+  if (explicitGenderConflict(title, gender)) {
+    const error = integrationError(`${slot} candidate conflicts with authoritative gender`);
+    error.code = "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT";
+    throw error;
   }
   const selectorScores = plainObject(candidate.selector_scores);
   return {
@@ -422,6 +526,29 @@ function normalizeGender(value) {
   if (["female", "女", "女性", "女士"].includes(normalized)) return "female";
   if (["male", "男", "男性", "男士"].includes(normalized)) return "male";
   return "unisex";
+}
+
+function resolvePersonaExpression(gender, userInput = "") {
+  const explicitNeutral = /中性|无性别|男友风|boyfriend|androgynous/i.test(
+    String(userInput || ""),
+  );
+  if (gender === "female") {
+    return explicitNeutral ? "neutral_feminine" : "feminine_or_neutral_feminine";
+  }
+  if (gender === "male") {
+    return explicitNeutral ? "neutral_masculine" : "masculine_or_neutral_masculine";
+  }
+  return "neutral";
+}
+
+function explicitGenderConflict(value, gender) {
+  const textValue = String(value || "");
+  if (gender === "unisex" || /男女同款|男女通用|中性|情侣/u.test(textValue)) {
+    return false;
+  }
+  const female = /女士|女装|女款|女鞋|女性|女生/u.test(textValue);
+  const male = /男士|男装|男款|男鞋|男性|男生/u.test(textValue);
+  return gender === "female" ? male && !female : female && !male;
 }
 
 function numericBudget(value) {

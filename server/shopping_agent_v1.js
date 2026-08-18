@@ -467,10 +467,24 @@ class TaobaoShoppingAgentV1 {
       });
     }
     let shoppingIntent;
+    const genderContextDrift = [];
+    const recordGenderDrift = (details) => {
+      const diagnostic = Object.freeze({
+        error_code: "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT",
+        authoritative_gender: normalizedInput.gender,
+        ...details,
+      });
+      genderContextDrift.push(diagnostic);
+      this.logger.warn?.("SHOPPING_AGENT_GENDER_CONTEXT_DRIFT", {
+        request_id: requestId,
+        ...diagnostic,
+      });
+    };
     try {
       shoppingIntent = buildShoppingIntent(
         planning.shopping_intent,
         normalizedInput,
+        {onGenderDrift: recordGenderDrift},
       );
     } catch (error) {
       plannerFallbackUsed = true;
@@ -478,6 +492,7 @@ class TaobaoShoppingAgentV1 {
       shoppingIntent = buildShoppingIntent(
         planning.shopping_intent,
         normalizedInput,
+        {onGenderDrift: recordGenderDrift},
       );
       this.logger.warn?.("shopping_agent_v1_planner_contract_fallback", {
         request_id: requestId,
@@ -493,6 +508,10 @@ class TaobaoShoppingAgentV1 {
         slot.category,
         slot.search_query,
       ])),
+      gender_contract: genderContractSnapshot(
+        normalizedInput.gender,
+        shoppingIntent,
+      ),
     });
     for (const slot of shoppingIntent.slots) {
       this.logger.info?.("shopping_agent_v1_search_query", {
@@ -777,6 +796,11 @@ class TaobaoShoppingAgentV1 {
         group.slot.category,
       ).slice(0, MAX_SELECTOR_AI_CANDIDATES_PER_SLOT);
       const aiGroup = {...group, candidates: aiCandidates};
+      assertGenderContext(normalizedInput.gender, shoppingIntent, {
+        phase: `product_selector_${group.slot.category}`,
+        slot: group.slot,
+        onGenderDrift: recordGenderDrift,
+      });
       const payload = await this.#aiCall({
         phase: `product_selector_${group.slot.category}` +
           (round > 1 ? `_refinement_${round - 1}` : ""),
@@ -790,7 +814,10 @@ class TaobaoShoppingAgentV1 {
             : `product_selector_${group.slot.category}`,
         }),
         metrics,
-        messages: buildSelectorMessages(shoppingIntent, aiGroup, {round}),
+        messages: buildSelectorMessages(shoppingIntent, aiGroup, {
+          round,
+          authoritativeGender: normalizedInput.gender,
+        }),
       });
       const normalized = validateProductSelection(payload, aiCandidates, {
         category: group.slot.category,
@@ -1186,6 +1213,11 @@ class TaobaoShoppingAgentV1 {
     let composerFallbackUsed = false;
     let availabilityFallbackUsed = false;
     try {
+      assertGenderContext(normalizedInput.gender, shoppingIntent, {
+        phase: "real_product_outfit_composer",
+        selections,
+        onGenderDrift: recordGenderDrift,
+      });
       const composition = await this.#aiCall({
         phase: "real_product_outfit_composer",
         schemaName: "fitai_real_product_outfit_composer",
@@ -1196,9 +1228,12 @@ class TaobaoShoppingAgentV1 {
           phase: "real_product_outfit_composer",
         }),
         metrics,
-        messages: buildComposerMessages(shoppingIntent, selections),
+        messages: buildComposerMessages(shoppingIntent, selections, {
+          authoritativeGender: normalizedInput.gender,
+        }),
       });
       validatedLooks = validateComposedLooks(composition, selections, {
+        authoritativeGender: normalizedInput.gender,
         onScoreError: (diagnostic) => {
           this.logger.warn?.("COMPOSER_SCORE_INVALID", {
             request_id: requestId,
@@ -1209,7 +1244,9 @@ class TaobaoShoppingAgentV1 {
     } catch (error) {
       composerFallbackUsed = true;
       const fallbackComposition = buildDeterministicComposerFallback(selections);
-      validatedLooks = validateComposedLooks(fallbackComposition, selections);
+      validatedLooks = validateComposedLooks(fallbackComposition, selections, {
+        authoritativeGender: normalizedInput.gender,
+      });
       this.logger.warn?.("shopping_agent_v1_composer_fallback", {
         request_id: requestId,
         error_code: error?.code || safeErrorCode(error),
@@ -1217,7 +1254,9 @@ class TaobaoShoppingAgentV1 {
         fallback_look_count: validatedLooks.looks.length,
       });
     }
-    const availability = ensureComposerAvailability(validatedLooks, selections);
+    const availability = ensureComposerAvailability(validatedLooks, selections, {
+      authoritativeGender: normalizedInput.gender,
+    });
     validatedLooks = availability.validated;
     availabilityFallbackUsed = availability.fallbackUsed;
     for (const audit of validatedLooks.candidate_reference_audit) {
@@ -1302,6 +1341,12 @@ class TaobaoShoppingAgentV1 {
       composer_fallback_used: composerFallbackUsed,
       availability_fallback_used: availabilityFallbackUsed,
       authoritative_gender: shoppingIntent.gender,
+      gender_contract: genderContractSnapshot(
+        normalizedInput.gender,
+        shoppingIntent,
+        selections,
+      ),
+      gender_context_drift: Object.freeze(genderContextDrift),
       shopping_intent: shoppingIntent,
       search_queries: Object.fromEntries(shoppingIntent.slots.map((slot) => [
         slot.category,
@@ -1473,6 +1518,10 @@ function normalizeAgentInput(input = {}) {
   );
   const height = optionalPositiveNumber(input.height, 100, 230);
   const weight = optionalPositiveNumber(input.weight, 20, 300);
+  const personaExpression = resolvePersonaExpression({
+    gender,
+    userInput,
+  });
   return Object.freeze({
     request_id: text(input.request_id ?? input.requestId, 120) || crypto.randomUUID(),
     user_input: userInput,
@@ -1482,11 +1531,40 @@ function normalizeAgentInput(input = {}) {
     body_profile: normalizePlainObject(withoutWeatherFields(
       input.body_profile ?? input.bodyProfile,
     )),
-    persona: normalizePlainObject(withoutWeatherFields(input.persona)),
+    persona: Object.freeze({
+      ...normalizePlainObject(withoutWeatherFields(input.persona)),
+      gender,
+      expression: personaExpression,
+      source: "authoritative_user_truth",
+    }),
     styling_policy: normalizePlainObject(withoutWeatherFields(input.styling_policy)),
     occasion: text(input.occasion ?? input.scene, 120) || "日常外出",
     budget: normalizeBudgetContext(input.budget, userInput),
   });
+}
+
+function resolvePersonaExpression({gender, userInput = ""} = {}) {
+  const explicitNeutral = /中性|无性别|男友风|boyfriend|androgynous/i.test(
+    String(userInput || ""),
+  );
+  if (gender === "female") {
+    return explicitNeutral ? "neutral_feminine" : "feminine_or_neutral_feminine";
+  }
+  if (gender === "male") {
+    return explicitNeutral ? "neutral_masculine" : "masculine_or_neutral_masculine";
+  }
+  return "neutral";
+}
+
+function authoritativeHardConstraints(values, gender, category) {
+  const filtered = stringList(values, 12).filter((value) =>
+    !/^(?:female|male|unisex|女|女性|女士|男|男性|男士|中性)$/i.test(value));
+  return Object.freeze([...new Set([
+    gender,
+    category,
+    "not_underwear",
+    ...filtered,
+  ])].slice(0, 12));
 }
 
 function buildDeterministicShoppingPlan(input) {
@@ -1500,7 +1578,7 @@ function buildDeterministicShoppingPlan(input) {
     shopping_intent: {
       gender: input.gender,
       persona: {
-        expression: `${input.gender}人物表达`,
+        expression: input.persona.expression,
         maturity: "与用户原始需求一致",
       },
       overall_aesthetic: {
@@ -1593,13 +1671,16 @@ function buildDeterministicComposerFallback(selections) {
   return {looks};
 }
 
-function ensureComposerAvailability(validated, selections) {
+function ensureComposerAvailability(validated, selections, {
+  authoritativeGender,
+} = {}) {
   if (validated.looks.length >= 2) {
     return {validated: {...validated, availability_fallback_used: false}, fallbackUsed: false};
   }
   const fallback = validateComposedLooks(
     buildDeterministicComposerFallback(selections),
     selections,
+    {authoritativeGender},
   );
   const looks = [...validated.looks];
   const signatures = new Set(looks.map((look) => exactLookSignature(look.candidate_ids)));
@@ -1662,15 +1743,22 @@ function uniqueDiagnostics(values) {
   });
 }
 
-function buildShoppingIntent(value, input) {
+function buildShoppingIntent(value, input, {onGenderDrift} = {}) {
   if (value == null) {
     throw schemaError("shopping_intent is required", "MISSING_SHOPPING_INTENT");
   }
   if (typeof value !== "object" || Array.isArray(value)) {
     throw schemaError("shopping_intent must be an object", "INVALID_SHOPPING_INTENT");
   }
-  if (normalizeGender(value.gender) !== input.gender) {
-    throw schemaError("shopping_intent.gender conflicts with authoritative gender");
+  const proposedGender = normalizeGender(value.gender);
+  const genderDrifted = proposedGender !== input.gender;
+  if (genderDrifted) {
+    onGenderDrift?.({
+      phase: "shopping_intent_search_plan",
+      received_gender: proposedGender,
+      applied_gender: input.gender,
+      resolution: "AUTHORITATIVE_OVERRIDE",
+    });
   }
   if (!Array.isArray(value.slots) || value.slots.length !== CORE_CATEGORIES.length) {
     throw schemaError("shopping_intent.slots must contain exactly three items", "INVALID_SLOTS");
@@ -1685,15 +1773,47 @@ function buildShoppingIntent(value, input) {
         "INVALID_SLOTS",
       );
     }
-    const searchPlan = buildSearchPlan(rawSlot, {
-      gender: input.gender,
-      category,
-      userInput: input.user_input,
-    });
+    let searchPlan;
+    try {
+      searchPlan = genderDrifted
+        ? buildInitialSearchPlanFallback(rawSlot, {
+            gender: input.gender,
+            category,
+            userInput: input.user_input,
+            fallbackReason: "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT",
+          })
+        : buildSearchPlan(rawSlot, {
+            gender: input.gender,
+            category,
+            userInput: input.user_input,
+          });
+    } catch (error) {
+      const rawQuery = text(rawSlot?.search_query, 80);
+      if (!explicitGenderConflict(rawQuery, input.gender)) throw error;
+      onGenderDrift?.({
+        phase: "search_plan",
+        source: category,
+        received_gender: inferExplicitGender(rawQuery),
+        applied_gender: input.gender,
+        resolution: "AUTHORITATIVE_OVERRIDE",
+      });
+      searchPlan = buildInitialSearchPlanFallback(rawSlot, {
+        gender: input.gender,
+        category,
+        userInput: input.user_input,
+        fallbackReason: "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT",
+      });
+    }
     const slot = {
       category,
+      gender: input.gender,
+      persona_expression: input.persona.expression,
       role: text(rawSlot.role, 160),
-      hard_constraints: stringList(rawSlot.hard_constraints, 12),
+      hard_constraints: authoritativeHardConstraints(
+        rawSlot.hard_constraints,
+        input.gender,
+        category,
+      ),
       soft_preferences: stringList(rawSlot.soft_preferences, 12),
       avoid: stringList(rawSlot.avoid, 12),
       original_search_query: searchPlan.original_query,
@@ -1712,8 +1832,10 @@ function buildShoppingIntent(value, input) {
   return Object.freeze({
     gender: input.gender,
     persona: Object.freeze({
-      expression: text(value.persona?.expression, 120),
+      gender: input.gender,
+      expression: input.persona.expression,
       maturity: text(value.persona?.maturity, 120),
+      source: "authoritative_user_truth",
     }),
     overall_aesthetic: Object.freeze({
       core_direction: text(value.overall_aesthetic?.core_direction, 160),
@@ -2001,6 +2123,15 @@ function explicitGenderConflict(evidence, gender) {
   const hasMale = /男士|男装|男款|男鞋|男性|男生/.test(evidence);
   if (gender === "female") return hasMale && !hasFemale;
   return hasFemale && !hasMale;
+}
+
+function inferExplicitGender(evidence) {
+  const source = String(evidence || "");
+  const hasFemale = /女士|女装|女款|女鞋|女性|女生/.test(source);
+  const hasMale = /男士|男装|男款|男鞋|男性|男生/.test(source);
+  if (hasFemale && !hasMale) return "female";
+  if (hasMale && !hasFemale) return "male";
+  return "unisex";
 }
 
 function underwearOrHomewearConflict(evidence, category) {
@@ -2847,8 +2978,24 @@ function selectorRoundMetric(selection) {
   });
 }
 
-function validateComposedLooks(payload, selections, {onScoreError} = {}) {
+function validateComposedLooks(payload, selections, {
+  authoritativeGender,
+  onScoreError,
+} = {}) {
   const looks = Array.isArray(payload?.looks) ? payload.looks : [];
+  const contractGender = normalizeGender(
+    authoritativeGender ?? selections?.[0]?.slot?.gender,
+  );
+  for (const selection of selections) {
+    const slotGender = normalizeGender(selection?.slot?.gender ?? contractGender);
+    if (slotGender !== contractGender) {
+      throw genderContextDriftError({
+        phase: "real_product_outfit_composer",
+        authoritativeGender: contractGender,
+        receivedGender: slotGender,
+      });
+    }
+  }
   const pools = new Map(selections.map((selection) => [
     selection.slot.category,
     new Map(selection.final_candidate_pool.map((candidate) => [
@@ -2910,6 +3057,22 @@ function validateComposedLooks(payload, selections, {onScoreError} = {}) {
       category,
       pools.get(category).get(ids[category]),
     ]));
+    const genderConflicts = CORE_CATEGORIES.filter((category) =>
+      explicitGenderConflict(
+        candidateEvidence(selectedCandidates[category]),
+        contractGender,
+      ));
+    if (genderConflicts.length > 0) {
+      referenceAudit[referenceAudit.length - 1].error_code =
+        "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT";
+      invalidReferences.push({
+        look_id: lookId,
+        categories: genderConflicts,
+        candidate_ids: genderConflicts.map((category) => ids[category]),
+        error_code: "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT",
+      });
+      continue;
+    }
     const structuralSignature = lookStructuralSignature(selectedCandidates);
     const structuralDuplicate = structuralSignature.comparable &&
       structuralSignatures.has(structuralSignature.value);
@@ -3019,15 +3182,97 @@ Generate exactly one high-recall Chinese Taobao query per slot. A query may cont
   ];
 }
 
-function buildSelectorMessages(shoppingIntent, group, {round = 1} = {}) {
+function genderContractSnapshot(authoritativeGender, shoppingIntent, selections = []) {
+  const gender = normalizeGender(authoritativeGender);
+  return Object.freeze({
+    authoritative_gender: gender,
+    shopping_intent_gender: normalizeGender(shoppingIntent?.gender),
+    search_plan_gender: Object.freeze(Object.fromEntries(
+      (shoppingIntent?.slots || []).map((slot) => [
+        slot.category,
+        normalizeGender(slot.gender),
+      ]),
+    )),
+    selector_gender: Object.freeze(Object.fromEntries(
+      selections.map((selection) => [
+        selection.slot.category,
+        normalizeGender(selection.slot.gender),
+      ]),
+    )),
+    composer_gender: gender,
+  });
+}
+
+function assertGenderContext(authoritativeGender, shoppingIntent, {
+  phase,
+  slot,
+  selections = [],
+  onGenderDrift,
+} = {}) {
+  const authoritative = normalizeGender(authoritativeGender);
+  const observed = [
+    {source: "shopping_intent", gender: shoppingIntent?.gender},
+    ...(slot ? [{source: `search_plan.${slot.category}`, gender: slot.gender}] : []),
+    ...selections.map((selection) => ({
+      source: `selector.${selection.slot.category}`,
+      gender: selection.slot.gender,
+    })),
+  ];
+  const drift = observed.find((item) => normalizeGender(item.gender) !== authoritative);
+  if (!drift) return authoritative;
+  onGenderDrift?.({
+    phase,
+    source: drift.source,
+    received_gender: normalizeGender(drift.gender),
+    applied_gender: authoritative,
+    resolution: "REJECT_CONTEXT_DRIFT",
+  });
+  throw genderContextDriftError({
+    phase,
+    authoritativeGender: authoritative,
+    receivedGender: drift.gender,
+    source: drift.source,
+  });
+}
+
+function genderContextDriftError({
+  phase,
+  authoritativeGender,
+  receivedGender,
+  source,
+} = {}) {
+  return new ShoppingAgentV1Error("Shopping Agent gender context drift", {
+    code: "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT",
+    status: 500,
+    details: {
+      phase,
+      source,
+      authoritative_gender: normalizeGender(authoritativeGender),
+      received_gender: normalizeGender(receivedGender),
+    },
+  });
+}
+
+function buildSelectorMessages(shoppingIntent, group, {
+  round = 1,
+  authoritativeGender = shoppingIntent?.gender,
+} = {}) {
+  const gender = normalizeGender(authoritativeGender);
+  const personaExpression = text(
+    shoppingIntent?.persona?.expression,
+    120,
+  ) || resolvePersonaExpression({gender});
   const content = [{
     type: "text",
     text: JSON.stringify({
-      instruction: `逐件查看随后主图；必须评估每个中性candidate_id一次。明确硬错误REJECT；证据不足UNCERTAIN。普通但没错的商品可以KEEP_NORMAL，但只有真正值得搭配师主动选用的商品才是KEEP_HIGH。评分必须严格校准：50以下明显不推荐；50-59勉强符合但审美差；60-69普通可穿；70-79好看可推荐；80-89明显有选品价值；90-94非常优秀；95以上极少使用。price_context描述当前真实slot价格分布；PRICE_OUTLIER_HIGH不是硬拒绝，但若商品没有明显更强的设计、材质或审美价值，不得因品牌名给高价合理性，且outfit_potential与styling_value应反映购买价值。对于shoes，必须真正查看图片并分别评估shoe_refinement_score、visual_weight_score、material_quality_score、hardware_quality_score、proportion_score：检查鞋头精致度、鞋底厚重感、整体视觉重量、五金与装饰质感、材质廉价风险、鞋楦和脚部比例、女性化精致度、搭配通用性及与persona/body/overall_aesthetic的平衡。可爱不等于厚底加蝴蝶结或大扣件，显高也不等于厚底；笨重不是自动REJECT，但在light/romantic/sweet/elegant/clean方向中若鞋底过重、鞋头巨大、五金粗糙或PU塑料感明显，必须显著降低aesthetic_fit、quality_perception和outfit_potential，且不得给HIGH。五个shoe专属字段只在shoes slot输出，top/bottom不输出。判断本轮是否有至少3件足以组成最终Look且有合理结构差异的商品。若候选在商品family或silhouette上同质，refinement_query应在同一overall_aesthetic与hard_constraints内补足DIVERSITY_GAP，而不是只换品牌或颜色。若鞋履整体视觉审美质量偏低，可建议SHOE_AESTHETIC_QUALITY_LOW，但仍只能使用现有一次refinement。refinement_needed只是供服务端参考的建议，不拥有流程决定权；refinement_query是可选建议，服务端会根据统一规则决定是否执行并在缺失时自行构建。`,
+      instruction: `逐件查看随后主图；必须评估每个中性candidate_id一次。authoritative_gender是不可覆盖的用户事实，不得重新推断、改写为unisex或被商品模特覆盖。明确硬错误REJECT；证据不足UNCERTAIN。对female且persona_expression=feminine_or_neutral_feminine时，不强制裙装、粉色或刻板女性单品，中性女性表达仍可接受；但明显男款剪裁、男装模特导向、粗重男性化版型或与当前persona明显冲突的商品必须降低persona_fit、aesthetic_fit和outfit_potential，明确性别冲突则REJECT。普通但没错的商品可以KEEP_NORMAL，但只有真正值得搭配师主动选用的商品才是KEEP_HIGH。评分必须严格校准：50以下明显不推荐；50-59勉强符合但审美差；60-69普通可穿；70-79好看可推荐；80-89明显有选品价值；90-94非常优秀；95以上极少使用。price_context描述当前真实slot价格分布；PRICE_OUTLIER_HIGH不是硬拒绝，但若商品没有明显更强的设计、材质或审美价值，不得因品牌名给高价合理性，且outfit_potential与styling_value应反映购买价值。对于shoes，必须真正查看图片并分别评估shoe_refinement_score、visual_weight_score、material_quality_score、hardware_quality_score、proportion_score：检查鞋头精致度、鞋底厚重感、整体视觉重量、五金与装饰质感、材质廉价风险、鞋楦和脚部比例、女性化精致度、搭配通用性及与persona/body/overall_aesthetic的平衡。可爱不等于厚底加蝴蝶结或大扣件，显高也不等于厚底；笨重不是自动REJECT，但在light/romantic/sweet/elegant/clean方向中若鞋底过重、鞋头巨大、五金粗糙或PU塑料感明显，必须显著降低aesthetic_fit、quality_perception和outfit_potential，且不得给HIGH。五个shoe专属字段只在shoes slot输出，top/bottom不输出。判断本轮是否有至少3件足以组成最终Look且有合理结构差异的商品。若候选在商品family或silhouette上同质，refinement_query应在同一overall_aesthetic与hard_constraints内补足DIVERSITY_GAP，而不是只换品牌或颜色。若鞋履整体视觉审美质量偏低，可建议SHOE_AESTHETIC_QUALITY_LOW，但仍只能使用现有一次refinement。refinement_needed只是供服务端参考的建议，不拥有流程决定权；refinement_query是可选建议，服务端会根据统一规则决定是否执行并在缺失时自行构建。`,
       selector_round: round,
+      authoritative_gender: gender,
+      selector_gender: gender,
+      persona_expression: personaExpression,
       shopping_intent: {
-        gender: shoppingIntent.gender,
-        persona: shoppingIntent.persona,
+        gender,
+        persona: {...shoppingIntent.persona, gender, expression: personaExpression},
         overall_aesthetic: shoppingIntent.overall_aesthetic,
         body_strategy: shoppingIntent.body_strategy,
         occasion: shoppingIntent.occasion,
@@ -3062,7 +3307,14 @@ function buildSelectorMessages(shoppingIntent, group, {round = 1} = {}) {
   ];
 }
 
-function buildComposerMessages(shoppingIntent, selections) {
+function buildComposerMessages(shoppingIntent, selections, {
+  authoritativeGender = shoppingIntent?.gender,
+} = {}) {
+  const gender = normalizeGender(authoritativeGender);
+  const personaExpression = text(
+    shoppingIntent?.persona?.expression,
+    120,
+  ) || resolvePersonaExpression({gender});
   const allowedIds = Object.fromEntries(CORE_CATEGORIES.map((category) => {
     const selection = selections.find((item) => item.slot.category === category);
     return [
@@ -3073,8 +3325,15 @@ function buildComposerMessages(shoppingIntent, selections) {
   const content = [{
     type: "text",
     text: JSON.stringify({
-      instruction: `只使用候选池中真实candidate_id组合2到3套完整Look。top_candidate_id只能从TOP_ALLOWED_IDS选择，bottom_candidate_id只能从BOTTOM_ALLOWED_IDS选择，shoes_candidate_id只能从SHOES_ALLOWED_IDS选择，禁止跨slot引用。生成前逐套自检三个candidate_id均属于对应allowed list。每套只输出look_id、top_candidate_id、bottom_candidate_id、shoes_candidate_id和scores，不得输出candidate对象。多套Look必须共享overall_aesthetic，并优先在top family/silhouette、bottom family或shoe family中的主要结构轴产生真实变化；如果现有候选池无法支持结构变化，必须仍返回至少2套candidate_id组合不同的完整Look，不得为了结构多样性少于2套。完全相同的top、bottom、shoes ID组合禁止重复。不得创造新商品或新ID。优先使用selection_tier=HIGH，NORMAL仅作为补足。必须独立判断三件之间的体积与腰线、裤长和鞋量感、配色、材质关系、视觉主次、共同风格故事与辨识度；不能把单品分数直接平均成整套高分。value_coherence必须判断单件价格与整套定位、价格离群商品是否真正提升造型、是否有审美相近但价值更合理的候选；品牌名本身不能证明高价合理。cross_look_distinctiveness必须判断与前面Look在主要结构轴上的真实差异。评分严格校准：60为能穿但普通，70为好看，80为明显值得推荐，90为造型师级优秀，95以上极罕见。scores中的aesthetic_coherence、proportion_balance、color_harmony、material_harmony、visual_hierarchy、style_story、distinctiveness、persona_fit、body_proportion、occasion_fit、value_coherence、cross_look_distinctiveness、final_score必须全部是有限的JSON number，每个值必须大于等于0且小于等于100。正确示例为"final_score":78。禁止百分号字符串、"95/100"、null、文字评分、0到1或0到10归一化表达。特别检查身高与body_strategy下的比例风险。返回一个顶层JSON对象，业务结构为 {"looks":[...]}；不得返回JSON Schema、Markdown、解释文字或顶层数组。`,
-      shopping_intent: shoppingIntent,
+      instruction: `只使用候选池中真实candidate_id组合2到3套完整Look。authoritative_gender是不可覆盖的用户事实，不得重新推断或跨gender组合；生成前除ID白名单外，还要确认每个商品不与该gender和persona_expression明确冲突。top_candidate_id只能从TOP_ALLOWED_IDS选择，bottom_candidate_id只能从BOTTOM_ALLOWED_IDS选择，shoes_candidate_id只能从SHOES_ALLOWED_IDS选择，禁止跨slot引用。生成前逐套自检三个candidate_id均属于对应allowed list。每套只输出look_id、top_candidate_id、bottom_candidate_id、shoes_candidate_id和scores，不得输出candidate对象。多套Look必须共享overall_aesthetic，并优先在top family/silhouette、bottom family或shoe family中的主要结构轴产生真实变化；如果现有候选池无法支持结构变化，必须仍返回至少2套candidate_id组合不同的完整Look，不得为了结构多样性少于2套。完全相同的top、bottom、shoes ID组合禁止重复。不得创造新商品或新ID。优先使用selection_tier=HIGH，NORMAL仅作为补足。必须独立判断三件之间的体积与腰线、裤长和鞋量感、配色、材质关系、视觉主次、共同风格故事与辨识度；不能把单品分数直接平均成整套高分。value_coherence必须判断单件价格与整套定位、价格离群商品是否真正提升造型、是否有审美相近但价值更合理的候选；品牌名本身不能证明高价合理。cross_look_distinctiveness必须判断与前面Look在主要结构轴上的真实差异。评分严格校准：60为能穿但普通，70为好看，80为明显值得推荐，90为造型师级优秀，95以上极罕见。scores中的aesthetic_coherence、proportion_balance、color_harmony、material_harmony、visual_hierarchy、style_story、distinctiveness、persona_fit、body_proportion、occasion_fit、value_coherence、cross_look_distinctiveness、final_score必须全部是有限的JSON number，每个值必须大于等于0且小于等于100。正确示例为"final_score":78。禁止百分号字符串、"95/100"、null、文字评分、0到1或0到10归一化表达。特别检查身高与body_strategy下的比例风险。返回一个顶层JSON对象，业务结构为 {"looks":[...]}；不得返回JSON Schema、Markdown、解释文字或顶层数组。`,
+      authoritative_gender: gender,
+      composer_gender: gender,
+      persona_expression: personaExpression,
+      shopping_intent: {
+        ...shoppingIntent,
+        gender,
+        persona: {...shoppingIntent.persona, gender, expression: personaExpression},
+      },
       ...allowedIds,
       candidate_pools: Object.fromEntries(selections.map((selection) => [
         selection.slot.category,

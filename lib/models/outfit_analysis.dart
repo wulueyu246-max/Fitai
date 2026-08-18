@@ -34,6 +34,12 @@ class OutfitAnalysis {
     this.shoppingAgentStatus = 'disabled',
     this.shoppingAgentFirstFailureStage,
     this.shoppingAgentRetryable = false,
+    this.displayStyleName = '',
+    this.displayStyleSummary = '',
+    this.displayTopAdvice = '',
+    this.displayBottomAdvice = '',
+    this.displayShoesAdvice = '',
+    this.displayLookExplanation = '',
   });
 
   factory OutfitAnalysis.fromJson(Map<String, dynamic> json) {
@@ -128,6 +134,36 @@ class OutfitAnalysis {
       ),
       shoppingAgentRetryable:
           json['shopping_agent_retryable'] as bool? ?? false,
+      displayStyleName: _readOptionalAliasedString(
+        json,
+        const ['display_style_name', 'displayStyleName'],
+        fallback: '',
+      ),
+      displayStyleSummary: _readOptionalAliasedString(
+        json,
+        const ['display_style_summary', 'displayStyleSummary'],
+        fallback: '',
+      ),
+      displayTopAdvice: _readOptionalAliasedString(
+        json,
+        const ['display_top_advice', 'displayTopAdvice'],
+        fallback: '',
+      ),
+      displayBottomAdvice: _readOptionalAliasedString(
+        json,
+        const ['display_bottom_advice', 'displayBottomAdvice'],
+        fallback: '',
+      ),
+      displayShoesAdvice: _readOptionalAliasedString(
+        json,
+        const ['display_shoes_advice', 'displayShoesAdvice'],
+        fallback: '',
+      ),
+      displayLookExplanation: _readOptionalAliasedString(
+        json,
+        const ['display_look_explanation', 'displayLookExplanation'],
+        fallback: '',
+      ),
     );
   }
 
@@ -177,18 +213,34 @@ class OutfitAnalysis {
         json,
         const ['bodyProfile', 'body_profile', 'bodyAnalysis', 'body_analysis'],
       ),
-      style: _readString(json, 'style'),
-      top: _readAliasedString(
-        recommendations,
-        const ['top', 'topRecommendation', 'top_recommendation'],
+      style: _readOptionalAliasedString(
+        json,
+        const ['display_style_name', 'displayStyleName', 'style'],
+        fallback: '智能选品',
       ),
-      bottom: _readAliasedString(
-        recommendations,
-        const ['bottom', 'bottomRecommendation', 'bottom_recommendation'],
+      top: _readOptionalAliasedString(
+        json,
+        const ['display_top_advice', 'displayTopAdvice'],
+        fallback: _readAliasedString(
+          recommendations,
+          const ['top', 'topRecommendation', 'top_recommendation'],
+        ),
       ),
-      shoes: _readAliasedString(
-        recommendations,
-        const ['shoes', 'shoeRecommendation', 'shoe_recommendation'],
+      bottom: _readOptionalAliasedString(
+        json,
+        const ['display_bottom_advice', 'displayBottomAdvice'],
+        fallback: _readAliasedString(
+          recommendations,
+          const ['bottom', 'bottomRecommendation', 'bottom_recommendation'],
+        ),
+      ),
+      shoes: _readOptionalAliasedString(
+        json,
+        const ['display_shoes_advice', 'displayShoesAdvice'],
+        fallback: _readAliasedString(
+          recommendations,
+          const ['shoes', 'shoeRecommendation', 'shoe_recommendation'],
+        ),
       ),
       accessories: _readAliasedString(
         recommendations,
@@ -198,9 +250,13 @@ class OutfitAnalysis {
           'accessory_recommendation',
         ],
       ),
-      suggestion: _readAliasedString(
-        recommendations,
-        const ['summary', 'suggestion'],
+      suggestion: _readOptionalAliasedString(
+        json,
+        const ['display_style_summary', 'displayStyleSummary'],
+        fallback: _readAliasedString(
+          recommendations,
+          const ['summary', 'suggestion'],
+        ),
       ),
       gender: gender,
       styleExpression: _readOptionalAliasedString(
@@ -255,6 +311,36 @@ class OutfitAnalysis {
       ),
       shoppingAgentRetryable:
           json['shopping_agent_retryable'] as bool? ?? false,
+      displayStyleName: _readOptionalAliasedString(
+        json,
+        const ['display_style_name', 'displayStyleName'],
+        fallback: '',
+      ),
+      displayStyleSummary: _readOptionalAliasedString(
+        json,
+        const ['display_style_summary', 'displayStyleSummary'],
+        fallback: '',
+      ),
+      displayTopAdvice: _readOptionalAliasedString(
+        json,
+        const ['display_top_advice', 'displayTopAdvice'],
+        fallback: '',
+      ),
+      displayBottomAdvice: _readOptionalAliasedString(
+        json,
+        const ['display_bottom_advice', 'displayBottomAdvice'],
+        fallback: '',
+      ),
+      displayShoesAdvice: _readOptionalAliasedString(
+        json,
+        const ['display_shoes_advice', 'displayShoesAdvice'],
+        fallback: '',
+      ),
+      displayLookExplanation: _readOptionalAliasedString(
+        json,
+        const ['display_look_explanation', 'displayLookExplanation'],
+        fallback: '',
+      ),
     );
   }
 
@@ -282,6 +368,12 @@ class OutfitAnalysis {
   final String shoppingAgentStatus;
   final String? shoppingAgentFirstFailureStage;
   final bool shoppingAgentRetryable;
+  final String displayStyleName;
+  final String displayStyleSummary;
+  final String displayTopAdvice;
+  final String displayBottomAdvice;
+  final String displayShoesAdvice;
+  final String displayLookExplanation;
 
   bool get isMock => analysisMode == 'mock';
   bool get hasShoppingAgentResult => shoppingAgentStatus == 'success';
@@ -312,6 +404,12 @@ class OutfitAnalysis {
     String? shoppingAgentStatus,
     String? shoppingAgentFirstFailureStage,
     bool? shoppingAgentRetryable,
+    String? displayStyleName,
+    String? displayStyleSummary,
+    String? displayTopAdvice,
+    String? displayBottomAdvice,
+    String? displayShoesAdvice,
+    String? displayLookExplanation,
   }) {
     return OutfitAnalysis(
       bodyAnalysis: bodyAnalysis ?? this.bodyAnalysis,
@@ -341,6 +439,13 @@ class OutfitAnalysis {
           shoppingAgentFirstFailureStage ?? this.shoppingAgentFirstFailureStage,
       shoppingAgentRetryable:
           shoppingAgentRetryable ?? this.shoppingAgentRetryable,
+      displayStyleName: displayStyleName ?? this.displayStyleName,
+      displayStyleSummary: displayStyleSummary ?? this.displayStyleSummary,
+      displayTopAdvice: displayTopAdvice ?? this.displayTopAdvice,
+      displayBottomAdvice: displayBottomAdvice ?? this.displayBottomAdvice,
+      displayShoesAdvice: displayShoesAdvice ?? this.displayShoesAdvice,
+      displayLookExplanation:
+          displayLookExplanation ?? this.displayLookExplanation,
     );
   }
 
@@ -376,6 +481,12 @@ class OutfitAnalysis {
       'shopping_agent_status': shoppingAgentStatus,
       'shopping_agent_first_failure_stage': shoppingAgentFirstFailureStage,
       'shopping_agent_retryable': shoppingAgentRetryable,
+      'display_style_name': displayStyleName,
+      'display_style_summary': displayStyleSummary,
+      'display_top_advice': displayTopAdvice,
+      'display_bottom_advice': displayBottomAdvice,
+      'display_shoes_advice': displayShoesAdvice,
+      'display_look_explanation': displayLookExplanation,
     };
   }
 
