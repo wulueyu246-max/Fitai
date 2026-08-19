@@ -194,3 +194,28 @@ create index if not exists product_click_events_click_time_idx
 alter table public.product_click_events enable row level security;
 revoke all on table public.product_click_events from anon, authenticated;
 grant select, insert on table public.product_click_events to service_role;
+
+-- Append-only observability for the Shopping Agent candidate funnel. These
+-- diagnostics are deliberately separate from all product-selection state.
+create table if not exists public.shopping_candidate_funnel_diagnostics (
+  id uuid primary key default gen_random_uuid(),
+  request_id text not null,
+  state text not null,
+  first_failure_stage text,
+  slots jsonb not null default '[]'::jsonb,
+  final_look_count integer not null default 0,
+  ai_call_count integer not null default 0,
+  taobao_call_count integer not null default 0,
+  duration_ms integer not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists shopping_candidate_funnel_request_idx
+  on public.shopping_candidate_funnel_diagnostics (request_id);
+create index if not exists shopping_candidate_funnel_created_idx
+  on public.shopping_candidate_funnel_diagnostics (created_at desc);
+alter table public.shopping_candidate_funnel_diagnostics enable row level security;
+revoke all on table public.shopping_candidate_funnel_diagnostics
+  from anon, authenticated;
+grant insert, select on table public.shopping_candidate_funnel_diagnostics
+  to service_role;

@@ -112,6 +112,7 @@ async function dispatchOutfitProductionPath({
   requestId,
   legacyPath,
   logger = console,
+  candidateFunnelStore,
   deadlineMs,
   now = () => new Date(),
 }) {
@@ -150,6 +151,7 @@ async function dispatchOutfitProductionPath({
     deadlineMs,
     now,
     logger,
+    candidateFunnelStore,
   });
   return {mode: "shopping_agent_v1", payload};
 }
@@ -164,6 +166,7 @@ async function integrateShoppingAgentMainChain({
   deadlineMs,
   now = () => new Date(),
   logger = console,
+  candidateFunnelStore,
 }) {
   if (!enabled) {
     return {
@@ -178,6 +181,7 @@ async function integrateShoppingAgentMainChain({
       buildShoppingAgentMainInput(outfitRequest, analysis, agentRequestId),
       {deadlineMs},
     );
+    await persistCandidateFunnel(candidateFunnelStore, result, logger);
     if (result?.state !== "success") {
       return attachShoppingAgentFailure(basePayload, {
         requestId: result?.request_id || agentRequestId,
@@ -193,11 +197,28 @@ async function integrateShoppingAgentMainChain({
       logger,
     });
   } catch (error) {
+    await persistCandidateFunnel(candidateFunnelStore, {
+      request_id: agentRequestId,
+      state: "failed",
+      first_failure_stage: firstFailureStage(error),
+    }, logger);
     return attachShoppingAgentFailure(basePayload, {
       requestId: agentRequestId,
       firstFailureStage: firstFailureStage(error),
       retryable: isRetryableShoppingAgentError(error),
       code: error?.code || "SHOPPING_AGENT_FAILED",
+    });
+  }
+}
+
+async function persistCandidateFunnel(store, diagnostic, logger) {
+  if (typeof store?.persist !== "function") return;
+  try {
+    await store.persist(diagnostic);
+  } catch (error) {
+    logger.warn?.("shopping_candidate_funnel_persistence_failed", {
+      request_id: diagnostic?.request_id || "",
+      error_code: error?.code || "PERSISTENCE_FAILED",
     });
   }
 }

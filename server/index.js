@@ -21,6 +21,7 @@ const {
 } = require("./analytics_store");
 const {SupabasePersistence} = require("./supabase_persistence");
 const {SupabaseUserPersistence} = require("./supabase_user_persistence");
+const {ShoppingCandidateFunnelStore} = require("./shopping_candidate_funnel_store");
 const {
   createDirectSupabaseFetch,
   diagnoseSupabaseConnection,
@@ -721,6 +722,11 @@ const shoppingAgentV1 = new TaobaoShoppingAgentV1({
   model: config.model,
   productProvider,
   fashionBrain,
+});
+const shoppingCandidateFunnelStore = new ShoppingCandidateFunnelStore({
+  url: config.supabaseUrl,
+  serviceRoleKey: config.supabaseServiceRoleKey,
+  fetchImpl: supabaseFetch || fetch,
 });
 
 function shouldUseMockAi(currentConfig, aiClient) {
@@ -6935,6 +6941,7 @@ app.post(
         outfitRequest,
         requestId: res.locals.requestId,
         deadlineMs: config.shoppingAgentDeadlineMs,
+        candidateFunnelStore: shoppingCandidateFunnelStore,
       });
       const shoppingAgentDurationMs = Date.now() - shoppingAgentStartedAt;
       const totalDurationMs = Date.now() - requestStartedAt;
