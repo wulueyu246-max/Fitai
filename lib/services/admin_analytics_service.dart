@@ -50,14 +50,12 @@ class AdminAnalyticsService {
   final String _adminKey;
 
   static Uri? _environmentEndpoint() {
-    const configuredBaseUrl =
-        String.fromEnvironment('ANALYTICS_API_BASE_URL');
+    const configuredBaseUrl = String.fromEnvironment('ANALYTICS_API_BASE_URL');
     const apiBaseUrl = String.fromEnvironment(
       'API_BASE_URL',
       defaultValue: AppConfig.defaultApiBaseUrl,
     );
-    final baseUrl =
-        configuredBaseUrl.isEmpty ? apiBaseUrl : configuredBaseUrl;
+    final baseUrl = configuredBaseUrl.isEmpty ? apiBaseUrl : configuredBaseUrl;
     final normalized = baseUrl.replaceFirst(RegExp(r'/$'), '');
     final uri = Uri.tryParse('$normalized/admin/analytics');
     return baseUrl.isNotEmpty &&

@@ -43,9 +43,7 @@ class AppConfig {
     final effectivePlatform = platform ?? defaultTargetPlatform;
     final effectiveIsWeb = isWeb ?? kIsWeb;
     final configured = configuredValue.trim();
-    final candidate = configured.isEmpty
-        ? defaultApiBaseUrl
-        : configured;
+    final candidate = configured.isEmpty ? defaultApiBaseUrl : configured;
 
     if (effectiveIsWeb || effectivePlatform != TargetPlatform.android) {
       return candidate;

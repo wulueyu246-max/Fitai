@@ -24,9 +24,8 @@ class StyleProfile {
       sourceText: _text(json['source_text'] ?? json['sourceText']),
       intentPriorityScore: _score(
         json['intent_priority_score'] ?? json['intentPriorityScore'],
-        fallback: _text(json['source_text'] ?? json['sourceText']).isEmpty
-            ? 60
-            : 90,
+        fallback:
+            _text(json['source_text'] ?? json['sourceText']).isEmpty ? 60 : 90,
       ),
       interpretation: _text(json['interpretation']),
       primaryStyle: _text(json['primary_style'] ?? json['primaryStyle']),
@@ -48,12 +47,16 @@ class StyleProfile {
         json['preferred_materials'] ?? json['preferredMaterials'],
       ),
       mustHave: _strings(
-        json['must_have'] ?? json['mustHave'] ??
-            json['positive_keywords'] ?? json['positiveKeywords'],
+        json['must_have'] ??
+            json['mustHave'] ??
+            json['positive_keywords'] ??
+            json['positiveKeywords'],
       ),
       mustAvoid: _strings(
-        json['must_avoid'] ?? json['mustAvoid'] ??
-            json['negative_keywords'] ?? json['negativeKeywords'],
+        json['must_avoid'] ??
+            json['mustAvoid'] ??
+            json['negative_keywords'] ??
+            json['negativeKeywords'],
       ),
       positiveKeywords: _strings(
         json['positive_keywords'] ?? json['positiveKeywords'],
