@@ -276,6 +276,12 @@ void main() {
     );
 
     expect(find.byType(OutfitPlanCard), findsNWidgets(3));
+    expect(find.textContaining('上衣 ·'), findsNWidgets(3));
+    expect(find.textContaining('下装 ·'), findsNWidgets(3));
+    expect(find.textContaining('鞋履 ·'), findsNWidgets(3));
+    expect(find.textContaining('top ·'), findsNothing);
+    expect(find.textContaining('bottom ·'), findsNothing);
+    expect(find.textContaining('shoes ·'), findsNothing);
     expect(find.text('日系极简'), findsOneWidget);
     expect(find.text('造型建议'), findsNWidgets(3));
     expect(

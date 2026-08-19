@@ -314,7 +314,7 @@ class _PlanProductRow extends StatelessWidget {
                     Row(
                       children: [
                         Text(
-                          '${product.wardrobeSlot} · ${product.brand}',
+                          '${_slotLabel(product.wardrobeSlot)} · ${product.brand}',
                           style: const TextStyle(
                             color: Color(0xFFBFB5C5),
                             fontSize: 10.5,
@@ -408,6 +408,15 @@ class _PlanProductRow extends StatelessWidget {
       ProductCategory.bottom => '裤子',
       ProductCategory.shoes => '鞋',
       _ => '商品',
+    };
+  }
+
+  String _slotLabel(String slot) {
+    return switch (slot) {
+      ProductCategory.top => '上衣',
+      ProductCategory.bottom => '下装',
+      ProductCategory.shoes => '鞋履',
+      _ => slot,
     };
   }
 }
