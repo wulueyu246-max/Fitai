@@ -1446,6 +1446,116 @@ test("composer rejects an explicitly cross-gender candidate even when its ID is 
   );
 });
 
+test("default female ranking demotes an all-neutral Look without feminine evidence", () => {
+  const structuredCandidate = (category, id, axes) => ({
+    ...product(category, id, `${category} plain product`),
+    candidate_id: `${category}_${id}`,
+    brand: `arbitrary-brand-${id}`,
+    variation_axes: axes,
+  });
+  const pools = [
+    {slot: {category: "top", gender: "female"}, final_candidate_pool: [
+      structuredCandidate("top", "neutral", {
+        top_family: "tshirt", top_silhouette: "relaxed", expression: "clean",
+      }),
+      structuredCandidate("top", "shaped", {
+        top_family: "knit_top", top_silhouette: "fitted", expression: "clean",
+      }),
+    ]},
+    {slot: {category: "bottom", gender: "female"}, final_candidate_pool: [
+      structuredCandidate("bottom", "neutral", {
+        bottom_family: "straight_pants", expression: "minimal",
+      }),
+      structuredCandidate("bottom", "mixed", {
+        bottom_family: "straight_pants", expression: "clean",
+      }),
+    ]},
+    {slot: {category: "shoes", gender: "female"}, final_candidate_pool: [
+      structuredCandidate("shoes", "neutral", {
+        shoe_family: "sneaker", expression: "sporty",
+      }),
+      structuredCandidate("shoes", "mixed", {
+        shoe_family: "loafer", expression: "clean",
+      }),
+    ]},
+  ];
+  const look = (lookId, suffix) => ({
+    look_id: lookId,
+    top_candidate_id: `top_${suffix === "neutral" ? "neutral" : "shaped"}`,
+    bottom_candidate_id: `bottom_${suffix}`,
+    shoes_candidate_id: `shoes_${suffix}`,
+    scores: composerScores(80),
+  });
+  const result = validateComposedLooks({looks: [
+    look("all-neutral-first", "neutral"),
+    look("feminine-evidence-second", "mixed"),
+  ]}, pools, {
+    authoritativeGender: "female",
+    personaExpression: "feminine_or_neutral_feminine",
+  });
+  assert.deepEqual(result.looks.map((item) => item.look_id), [
+    "feminine-evidence-second", "all-neutral-first",
+  ]);
+  assert.equal(result.looks[1].female_expression_status, "DEPRIORITIZED_ALL_NEUTRAL");
+});
+
+test("female expression ranking permits one or two neutral items when the Look has evidence", () => {
+  const pools = [
+    {slot: {category: "top", gender: "female"}, final_candidate_pool: [{
+      ...product("top", 71, "plain top"), candidate_id: "random_top",
+      variation_axes: {top_family: "knit_top", top_silhouette: "fitted", expression: "clean"},
+    }]},
+    {slot: {category: "bottom", gender: "female"}, final_candidate_pool: [{
+      ...product("bottom", 72, "plain bottom"), candidate_id: "random_bottom",
+      variation_axes: {bottom_family: "straight_pants", expression: "minimal"},
+    }]},
+    {slot: {category: "shoes", gender: "female"}, final_candidate_pool: [{
+      ...product("shoes", 73, "plain shoes"), candidate_id: "random_shoes",
+      variation_axes: {shoe_family: "sneaker", expression: "sporty"},
+    }]},
+  ];
+  const result = validateComposedLooks({looks: [{
+    look_id: "mixed-expression", top_candidate_id: "random_top",
+    bottom_candidate_id: "random_bottom", shoes_candidate_id: "random_shoes",
+    scores: composerScores(79),
+  }]}, pools, {
+    authoritativeGender: "female",
+    personaExpression: "feminine_or_neutral_feminine",
+  });
+  assert.equal(result.looks[0].female_expression_status, "PASS");
+});
+
+test("explicit neutral female intent and male or unisex paths preserve composer order", () => {
+  const poolsFor = (gender) => ["top", "bottom", "shoes"].map((category) => ({
+    slot: {category, gender},
+    final_candidate_pool: ["a", "b"].map((id) => ({
+      ...product(category, id, `${category} product ${id}`),
+      candidate_id: `${category}_${id}`,
+      variation_axes: category === "top"
+        ? {top_family: "tshirt", top_silhouette: "relaxed", expression: "clean"}
+        : category === "bottom"
+          ? {bottom_family: "straight_pants", expression: "minimal"}
+          : {shoe_family: "sneaker", expression: "sporty"},
+    })),
+  }));
+  const looks = ["a", "b"].map((id) => ({
+    look_id: `look-${id}`, top_candidate_id: `top_${id}`,
+    bottom_candidate_id: `bottom_${id}`, shoes_candidate_id: `shoes_${id}`,
+    scores: composerScores(77),
+  }));
+  for (const [gender, personaExpression] of [
+    ["female", "neutral_feminine"],
+    ["male", "masculine_or_neutral_masculine"],
+    ["unisex", "neutral"],
+  ]) {
+    const result = validateComposedLooks({looks}, poolsFor(gender), {
+      authoritativeGender: gender, personaExpression,
+    });
+    assert.deepEqual(result.looks.map((item) => item.look_id), ["look-a", "look-b"]);
+    assert.ok(result.looks.every((item) => item.female_expression_status === "NOT_APPLICABLE"));
+  }
+});
+
 test("Availability First keeps candidate-different Looks with limited structural diversity", () => {
   const pools = [
     {

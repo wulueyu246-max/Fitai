@@ -1241,6 +1241,7 @@ class TaobaoShoppingAgentV1 {
       });
       validatedLooks = validateComposedLooks(composition, selections, {
         authoritativeGender: normalizedInput.gender,
+        personaExpression: shoppingIntent.persona?.expression,
         onScoreError: (diagnostic) => {
           this.logger.warn?.("COMPOSER_SCORE_INVALID", {
             request_id: requestId,
@@ -1250,9 +1251,13 @@ class TaobaoShoppingAgentV1 {
       });
     } catch (error) {
       composerFallbackUsed = true;
-      const fallbackComposition = buildDeterministicComposerFallback(selections);
+      const fallbackComposition = buildDeterministicComposerFallback(selections, {
+        authoritativeGender: normalizedInput.gender,
+        personaExpression: shoppingIntent.persona?.expression,
+      });
       validatedLooks = validateComposedLooks(fallbackComposition, selections, {
         authoritativeGender: normalizedInput.gender,
+        personaExpression: shoppingIntent.persona?.expression,
       });
       this.logger.warn?.("shopping_agent_v1_composer_fallback", {
         request_id: requestId,
@@ -1263,6 +1268,7 @@ class TaobaoShoppingAgentV1 {
     }
     const availability = ensureComposerAvailability(validatedLooks, selections, {
       authoritativeGender: normalizedInput.gender,
+      personaExpression: shoppingIntent.persona?.expression,
     });
     validatedLooks = availability.validated;
     availabilityFallbackUsed = availability.fallbackUsed;
@@ -1619,7 +1625,10 @@ function buildDeterministicShoppingPlan(input) {
   };
 }
 
-function buildDeterministicComposerFallback(selections) {
+function buildDeterministicComposerFallback(selections, {
+  authoritativeGender,
+  personaExpression,
+} = {}) {
   const pools = Object.fromEntries(selections.map((selection) => [
     selection.slot.category,
     selection.final_candidate_pool,
@@ -1654,10 +1663,18 @@ function buildDeterministicComposerFallback(selections) {
           scores: Object.fromEntries(Object.keys(COMPOSER_SCORE_PROPERTIES).map(
             (field) => [field, conservativeScore],
           )),
+          female_expression_rank: femaleExpressionRank({
+            female_expression_status: assessFemaleLookExpression(items, {
+              authoritativeGender,
+              personaExpression,
+            }).status,
+          }),
         });
       }
     }
   }
+  combinations.sort((left, right) =>
+    right.female_expression_rank - left.female_expression_rank);
   const looks = [];
   const usedCandidates = new Set();
   const usedStructures = new Set();
@@ -1685,14 +1702,18 @@ function buildDeterministicComposerFallback(selections) {
 
 function ensureComposerAvailability(validated, selections, {
   authoritativeGender,
+  personaExpression,
 } = {}) {
   if (validated.looks.length >= 2) {
     return {validated: {...validated, availability_fallback_used: false}, fallbackUsed: false};
   }
   const fallback = validateComposedLooks(
-    buildDeterministicComposerFallback(selections),
+    buildDeterministicComposerFallback(selections, {
+      authoritativeGender,
+      personaExpression,
+    }),
     selections,
-    {authoritativeGender},
+    {authoritativeGender, personaExpression},
   );
   const looks = [...validated.looks];
   const signatures = new Set(looks.map((look) => exactLookSignature(look.candidate_ids)));
@@ -1722,7 +1743,13 @@ function ensureComposerAvailability(validated, selections, {
     fallbackUsed,
     validated: {
       ...validated,
-      looks: looks.slice(0, 3),
+      looks: looks
+        .map((look, index) => ({look, index}))
+        .sort((left, right) =>
+          femaleExpressionRank(right.look) - femaleExpressionRank(left.look) ||
+          left.index - right.index)
+        .map(({look}) => look)
+        .slice(0, 3),
       composer_candidate_ids: [...new Set(looks.flatMap((look) =>
         Object.values(look.candidate_ids)))],
       candidate_reference_audit: [
@@ -3005,6 +3032,7 @@ function selectorRoundMetric(selection) {
 
 function validateComposedLooks(payload, selections, {
   authoritativeGender,
+  personaExpression,
   onScoreError,
   budget,
 } = {}) {
@@ -3131,6 +3159,10 @@ function validateComposedLooks(payload, selections, {
     }
     if (structuralSignature.comparable) structuralSignatures.add(structuralSignature.value);
     composerIds.push(...Object.values(ids));
+    const expressionAssessment = assessFemaleLookExpression(
+      selectedCandidates,
+      {authoritativeGender: contractGender, personaExpression},
+    );
     validLooks.push({
       look_id: lookId,
       candidate_ids: ids,
@@ -3148,15 +3180,23 @@ function validateComposedLooks(payload, selections, {
         category,
         publicCandidate(selectedCandidates[category]),
       ])),
+      female_expression_status: expressionAssessment.status,
+      female_expression_evidence: expressionAssessment.evidence,
     });
   }
+  const rankedLooks = validLooks
+    .map((look, index) => ({look, index}))
+    .sort((left, right) =>
+      femaleExpressionRank(right.look) - femaleExpressionRank(left.look) ||
+      left.index - right.index)
+    .map(({look}) => look);
   const structuralDuplicateDetected = structuralDuplicates.length > 0;
   const lookDiversityStatus = validLooks.length < 2 || structuralDuplicateDetected ||
     candidatePoolsCannotDiversify(selections)
     ? "LIMITED"
     : "PASS";
   return {
-    looks: validLooks.slice(0, 3),
+    looks: rankedLooks.slice(0, 3),
     composer_candidate_ids: [...new Set(composerIds)],
     invalid_candidate_reference: invalidReferences,
     candidate_reference_audit: referenceAudit,
@@ -3169,6 +3209,42 @@ function validateComposedLooks(payload, selections, {
     diversity_insufficient: lookDiversityStatus === "LIMITED",
     budget_rejections: budgetRejections,
   };
+}
+
+function assessFemaleLookExpression(items, {authoritativeGender, personaExpression} = {}) {
+  if (normalizeGender(authoritativeGender) !== "female" ||
+      personaExpression === "neutral_feminine") {
+    return Object.freeze({status: "NOT_APPLICABLE", evidence: Object.freeze([])});
+  }
+  const evidence = CORE_CATEGORIES.map((category) => {
+    const candidate = items[category] || {};
+    const axes = candidate.variation_axes || candidateVariationAxes(candidate);
+    const structured = JSON.stringify({
+      aesthetic: candidate.aesthetic || candidate.aesthetic_evidence,
+      silhouette: candidate.silhouette || axes.top_silhouette,
+      proportion: candidate.proportion || candidate.proportion_evidence,
+      detail: candidate.detail || candidate.detail_evidence,
+      shoe_shape: candidate.shoe_shape || axes.shoe_family,
+      expression: candidate.expression || axes.expression,
+      styling_mood: axes.styling_mood,
+      gender: candidate.gender,
+    }).toLowerCase();
+    const feminine = /feminine|romantic|elegant|graceful|waist|drap|delicate|refined|cropped|fitted|ballet_flat|mary_jane|heel|女性化|浪漫|优雅|收腰|腰线|垂坠|精致/.test(structured);
+    const neutral = /neutral|unisex|androgynous|minimal|clean|relaxed|sporty|straight|oversi[sz]e|trainer|sneaker|中性|无性别|极简|简约|宽松|直筒|运动/.test(structured);
+    return Object.freeze({category, feminine, neutral});
+  });
+  const hasFeminineEvidence = evidence.some((item) => item.feminine);
+  const allClearlyNeutral = evidence.every((item) => item.neutral && !item.feminine);
+  return Object.freeze({
+    status: allClearlyNeutral && !hasFeminineEvidence
+      ? "DEPRIORITIZED_ALL_NEUTRAL"
+      : "PASS",
+    evidence: Object.freeze(evidence),
+  });
+}
+
+function femaleExpressionRank(look) {
+  return look?.female_expression_status === "DEPRIORITIZED_ALL_NEUTRAL" ? 0 : 1;
 }
 
 function candidatePoolsCannotDiversify(selections) {
