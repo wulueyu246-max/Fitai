@@ -57,6 +57,22 @@ test("main-chain input preserves User Truth without depending on legacy analysis
   );
 });
 
+test("request budget ranges reach Shopping Intent as enforceable ceilings", () => {
+  const input = buildShoppingAgentMainInput({
+    ...outfitRequest,
+    itemBudget: "200-500",
+    outfitBudget: "800-1500",
+  }, null, "request-budget-range");
+  assert.deepEqual(input.budget, {item_budget: 500, outfit_budget: 1500});
+
+  const openEnded = buildShoppingAgentMainInput({
+    ...outfitRequest,
+    itemBudget: "1000+",
+    outfitBudget: "3000+",
+  }, null, "request-budget-open");
+  assert.deepEqual(openEnded.budget, {item_budget: null, outfit_budget: null});
+});
+
 test("weather context and a failing weather source never enter Agent input", () => {
   const context = {
     ...outfitRequest.context,
@@ -308,6 +324,17 @@ test("response adapter rejects an explicitly male product in a female result", (
   assert.throws(
     () => adaptShoppingAgentSuccess(result, {basePayload: basePayload(), outfitRequest}),
     (error) => error.code === "SHOPPING_AGENT_GENDER_CONTEXT_DRIFT",
+  );
+});
+
+test("response adapter cannot expose an over-budget Look", () => {
+  assert.throws(
+    () => adaptShoppingAgentSuccess(successResult(), {
+      basePayload: basePayload(),
+      outfitRequest: {...outfitRequest, outfitBudget: "300以内"},
+    }),
+    (error) => error.code === "SHOPPING_AGENT_RESPONSE_ADAPTER_INVALID" &&
+      /USER_BUDGET_CONSTRAINT/.test(error.message),
   );
 });
 

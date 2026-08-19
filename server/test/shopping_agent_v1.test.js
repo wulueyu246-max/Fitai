@@ -762,6 +762,59 @@ test("Phase 2.5 explicit high item budget avoids an automatic outlier penalty", 
   assert.ok(selectedPremium.value_reason_codes.includes("WITHIN_EXPLICIT_ITEM_BUDGET"));
 });
 
+test("explicit item budget is a hard candidate boundary independent of aesthetics", () => {
+  const products = [499, 501].map((price, index) => enrichCandidatePriceContext({
+    ...product("bottom", index + 1, `budget-boundary-${index + 1}`),
+    candidate_id: `budget_${index + 1}`,
+    price,
+  }, buildPriceContext([{price: 499}, {price: 501}]), {item_budget: 500}));
+  assert.ok(products[1].value_reason_codes.includes("USER_BUDGET_CONSTRAINT"));
+  const pool = selectFinalCandidatePool(products, products.map((item, index) => ({
+    candidate_id: item.candidate_id,
+    status: "KEEP",
+    selection_tier: "HIGH",
+    scores: selectorScores(index === 1 ? 100 : 60),
+    reason_codes: [],
+  })));
+  assert.deepEqual(pool.map((item) => item.candidate_id), ["budget_1"]);
+});
+
+test("explicit outfit budget rejects over-boundary Looks at final validation", () => {
+  const intent = buildShoppingIntent(plan().shopping_intent, normalizeAgentInput({
+    user_input: "budget boundary",
+    authoritative_gender: "female",
+    budget: {outfit_budget: 1000},
+  }));
+  const selections = ["top", "bottom", "shoes"].map((category, categoryIndex) => ({
+    slot: intent.slots.find((slot) => slot.category === category),
+    final_candidate_pool: [400, categoryIndex === 0 ? 399 : 300].map((price, index) => ({
+      ...product(category, index + 1, `${category}-budget-${index + 1}`),
+      candidate_id: `${category}_${index + 1}`,
+      price,
+      explicit_budget: {outfit_budget: 1000},
+    })),
+  }));
+  const result = validateComposedLooks({looks: [
+    {
+      look_id: "over",
+      top_candidate_id: "top_1",
+      bottom_candidate_id: "bottom_1",
+      shoes_candidate_id: "shoes_1",
+      scores: composerScores(100),
+    },
+    {
+      look_id: "within",
+      top_candidate_id: "top_2",
+      bottom_candidate_id: "bottom_2",
+      shoes_candidate_id: "shoes_2",
+      scores: composerScores(60),
+    },
+  ]}, selections, {authoritativeGender: "female"});
+  assert.deepEqual(result.looks.map((look) => look.look_id), ["within"]);
+  assert.equal(result.budget_rejections[0].error_code, "USER_BUDGET_CONSTRAINT");
+  assert.equal(result.budget_rejections[0].total_price, 1200);
+});
+
 function aiResponse(content, finishReason = "stop") {
   return {choices: [{finish_reason: finishReason, message: {content}}]};
 }

@@ -824,11 +824,18 @@ class TaobaoShoppingAgentV1 {
       });
       const pool = selectFinalCandidatePool(aiCandidates, normalized.assessments);
       if (pool.length === 0) {
+        const budgetConstrained = aiCandidates.some((candidate) =>
+          candidate.value_reason_codes?.includes("USER_BUDGET_CONSTRAINT"));
         throw new ShoppingAgentV1Error(
           `${group.slot.category} 经 AI 真实图片选择后没有可用候选`,
           {
-            code: "SHOPPING_AGENT_SELECTOR_EMPTY",
-            details: {category: group.slot.category},
+            code: budgetConstrained
+              ? "SHOPPING_AGENT_BUDGET_CANDIDATES_INSUFFICIENT"
+              : "SHOPPING_AGENT_SELECTOR_EMPTY",
+            details: {
+              category: group.slot.category,
+              reason: budgetConstrained ? "USER_BUDGET_CONSTRAINT" : null,
+            },
           },
         );
       }
@@ -1282,9 +1289,14 @@ class TaobaoShoppingAgentV1 {
       final_look_count: validatedLooks.looks.length,
     });
     if (validatedLooks.looks.length < 2) {
+      const budgetConstrained = validatedLooks.budget_rejections?.length > 0;
       throw new ShoppingAgentV1Error("真实候选不足以组成两套有效 Look", {
-        code: "SHOPPING_AGENT_INSUFFICIENT_LOOKS",
+        code: budgetConstrained
+          ? "SHOPPING_AGENT_BUDGET_CANDIDATES_INSUFFICIENT"
+          : "SHOPPING_AGENT_INSUFFICIENT_LOOKS",
         details: {
+          reason: budgetConstrained ? "USER_BUDGET_CONSTRAINT" : null,
+          budget_rejections: validatedLooks.budget_rejections || [],
           invalid_candidate_reference: validatedLooks.invalid_candidate_reference,
           structural_duplicate: validatedLooks.structural_duplicate,
           exact_duplicate: validatedLooks.exact_duplicate,
@@ -2218,10 +2230,18 @@ function validateProductSelection(payload, candidates, {category} = {}) {
 
 function selectFinalCandidatePool(candidates, assessments) {
   const byId = new Map(candidates.map((candidate) => [candidate.candidate_id, candidate]));
-  const evaluated = assessments.map((assessment) => evaluateCandidateValue(
-    byId.get(assessment.candidate_id),
-    assessment,
-  ));
+  const evaluated = assessments
+    .filter((assessment) => {
+      const candidate = byId.get(assessment.candidate_id);
+      const ceiling = Number(candidate?.explicit_budget?.item_budget);
+      const price = Number(candidate?.price);
+      return !Number.isFinite(ceiling) || ceiling <= 0 ||
+        !Number.isFinite(price) || price <= ceiling;
+    })
+    .map((assessment) => evaluateCandidateValue(
+      byId.get(assessment.candidate_id),
+      assessment,
+    ));
   const order = (status, tier) => evaluated
     .filter((item) => item.status === status && (!tier || item.effective_tier === tier))
     .sort((left, right) => right.value_adjusted_score - left.value_adjusted_score);
@@ -2440,13 +2460,18 @@ function buildPriceContext(candidates) {
 function enrichCandidatePriceContext(candidate, priceContext, budget = {}) {
   const price = Number(candidate?.price);
   const position = pricePosition(price, priceContext);
-  const withinExplicitItemBudget = Number.isFinite(budget?.item_budget) &&
+  const hasExplicitItemBudget = Number.isFinite(budget?.item_budget);
+  const withinExplicitItemBudget = hasExplicitItemBudget &&
     price <= budget.item_budget;
   let valueReasonableness = 72;
   const reasonCodes = [];
   if (!Number.isFinite(price) || price <= 0) {
     valueReasonableness = 55;
     reasonCodes.push("PRICE_EVIDENCE_MISSING");
+  } else if (hasExplicitItemBudget && !withinExplicitItemBudget) {
+    valueReasonableness = 0;
+    reasonCodes.push("USER_BUDGET_CONSTRAINT");
+    if (position === PRICE_POSITION.OUTLIER_HIGH) reasonCodes.push("PRICE_OUTLIER_HIGH");
   } else if (position === PRICE_POSITION.OUTLIER_HIGH) {
     reasonCodes.push("PRICE_OUTLIER_HIGH");
     if (withinExplicitItemBudget) {
@@ -2981,6 +3006,7 @@ function selectorRoundMetric(selection) {
 function validateComposedLooks(payload, selections, {
   authoritativeGender,
   onScoreError,
+  budget,
 } = {}) {
   const looks = Array.isArray(payload?.looks) ? payload.looks : [];
   const contractGender = normalizeGender(
@@ -3011,6 +3037,12 @@ function validateComposedLooks(payload, selections, {
   const validLooks = [];
   const composerIds = [];
   const referenceAudit = [];
+  const effectiveBudget = budget || selections
+    .flatMap((selection) => selection.final_candidate_pool)
+    .find((candidate) => Number.isFinite(candidate?.explicit_budget?.outfit_budget))
+    ?.explicit_budget || {};
+  const outfitBudget = Number(effectiveBudget.outfit_budget);
+  const budgetRejections = [];
   for (const [index, look] of looks.entries()) {
     const lookId = text(look?.look_id, 80) || `look-${index + 1}`;
     const ids = {
@@ -3057,6 +3089,19 @@ function validateComposedLooks(payload, selections, {
       category,
       pools.get(category).get(ids[category]),
     ]));
+    const totalPrice = CORE_CATEGORIES.reduce((sum, category) =>
+      sum + Number(selectedCandidates[category]?.price || 0), 0);
+    if (Number.isFinite(outfitBudget) && outfitBudget > 0 && totalPrice > outfitBudget) {
+      referenceAudit[referenceAudit.length - 1].error_code =
+        "USER_BUDGET_CONSTRAINT";
+      budgetRejections.push(Object.freeze({
+        look_id: lookId,
+        error_code: "USER_BUDGET_CONSTRAINT",
+        total_price: roundPrice(totalPrice),
+        outfit_budget: outfitBudget,
+      }));
+      continue;
+    }
     const genderConflicts = CORE_CATEGORIES.filter((category) =>
       explicitGenderConflict(
         candidateEvidence(selectedCandidates[category]),
@@ -3122,6 +3167,7 @@ function validateComposedLooks(payload, selections, {
     exact_duplicate_detected: exactDuplicates.length > 0,
     availability_fallback_used: false,
     diversity_insufficient: lookDiversityStatus === "LIMITED",
+    budget_rejections: budgetRejections,
   };
 }
 

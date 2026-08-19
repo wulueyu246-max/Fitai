@@ -267,6 +267,12 @@ function adaptShoppingAgentSuccess(result, {
       return [slot, mapped];
     }));
     const finalScore = score(scores.final_score);
+    const outfitBudget = numericBudget(outfitRequest.outfitBudget);
+    const totalPrice = CORE_SLOTS.reduce((sum, slot) =>
+      sum + Number(mappedItems[slot].price || 0), 0);
+    if (outfitBudget != null && totalPrice > outfitBudget) {
+      throw integrationError("Shopping Agent Look violates USER_BUDGET_CONSTRAINT");
+    }
     const explanation = `第${index + 1}套采用真实淘宝商品，保持${display.display_style_name}方向，整套评分 ${finalScore} 分。`;
     return {
       look_id: lookId,
@@ -323,6 +329,10 @@ function adaptShoppingAgentSuccess(result, {
     shopping_agent_request_id: requestId,
     shopping_agent_first_failure_stage: null,
     shopping_agent_retryable: false,
+    shopping_agent_budget: {
+      item_budget: numericBudget(outfitRequest.itemBudget),
+      outfit_budget: numericBudget(outfitRequest.outfitBudget),
+    },
     shopping_agent_looks: shoppingAgentLooks,
     shopping_agent_products: products,
     outfit_plans: outfitPlans,
@@ -669,7 +679,12 @@ function explicitGenderConflict(value, gender) {
 
 function numericBudget(value) {
   const number = Number(value);
-  return Number.isFinite(number) && number > 0 ? number : null;
+  if (Number.isFinite(number) && number > 0) return number;
+  const normalized = String(value ?? "").trim();
+  if (!normalized || /\+$/.test(normalized)) return null;
+  const amounts = normalized.match(/\d+(?:\.\d+)?/g)?.map(Number) || [];
+  const ceiling = amounts.at(-1);
+  return Number.isFinite(ceiling) && ceiling > 0 ? ceiling : null;
 }
 
 function score(value) {
