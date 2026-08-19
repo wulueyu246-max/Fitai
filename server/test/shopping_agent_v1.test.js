@@ -21,6 +21,7 @@ const {
   buildSearchPlan,
   buildSelectorMessages,
   buildShoppingIntent,
+  buildShoeTaxonomyPolicy,
   candidatePoolDiversity,
   enrichCandidatePriceContext,
   classifyTaobaoRetrievalError,
@@ -35,9 +36,57 @@ const {
   refinementDecision,
   selectFinalCandidatePool,
   selectorQualityScore,
+  shoeTaxonomyRank,
   validateComposedLooks,
   validateProductSelection,
 } = require("../shopping_agent_v1");
+
+test("shoe taxonomy demotes ballet families for default female casual intent without identifiers", () => {
+  const policy = buildShoeTaxonomyPolicy({
+    user_input: "普通周末穿搭",
+    occasion: "casual",
+    gender: "female",
+  });
+  assert.equal(policy.applies, true);
+  assert.ok(shoeTaxonomyRank({title: "任意品牌 芭蕾T头鞋"}, policy) < 0);
+  assert.ok(shoeTaxonomyRank({title: "任意品牌 白色德训鞋"}, policy) > 0);
+  assert.ok(shoeTaxonomyRank({
+    candidate_id: "ballet-looking-id",
+    title: "普通休闲鞋",
+  }, policy) > 0);
+});
+
+test("shoe taxonomy remains contextual for explicit aesthetics, gender, and occasions", () => {
+  for (const input of [
+    {user_input: "ballet aesthetic", occasion: "date", gender: "female"},
+    {user_input: "法式甜美约会", occasion: "date", gender: "female"},
+    {user_input: "普通休闲", occasion: "casual", gender: "male"},
+    {user_input: "普通休闲", occasion: "casual", gender: "unisex"},
+    {user_input: "正式商务", occasion: "business formal", gender: "female"},
+  ]) {
+    const policy = buildShoeTaxonomyPolicy(input);
+    assert.equal(policy.applies, false);
+    assert.equal(shoeTaxonomyRank({title: "ballet flats"}, policy), 0);
+  }
+});
+
+test("selector final pool prioritizes a general shoe over a higher-scored ballet shoe", () => {
+  const ballet = {...product("shoes", 91, "芭蕾T头鞋"), candidate_id: "shoe-a"};
+  const sneaker = {...product("shoes", 92, "简洁小白鞋"), candidate_id: "shoe-b"};
+  const assessments = [
+    {candidate_id: "shoe-a", status: "KEEP", selection_tier: "HIGH",
+      scores: selectorScores(95), reason_codes: []},
+    {candidate_id: "shoe-b", status: "KEEP", selection_tier: "NORMAL",
+      scores: selectorScores(75), reason_codes: []},
+  ];
+  const pool = selectFinalCandidatePool([ballet, sneaker], assessments, {
+    category: "shoes",
+    shoePolicy: buildShoeTaxonomyPolicy({
+      user_input: "普通约会穿搭", occasion: "date", gender: "female",
+    }),
+  });
+  assert.equal(pool[0].candidate_id, "shoe-b");
+});
 
 function plan(gender = "female", aesthetic = "清新法式休闲") {
   const genderLabel = gender === "male" ? "男款" : gender === "female" ? "女款" : "中性";

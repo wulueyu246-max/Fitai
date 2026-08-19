@@ -791,9 +791,11 @@ class TaobaoShoppingAgentV1 {
 
     const selectGroup = async (group, {round = 1} = {}) => {
       const selectorStartedAt = Date.now();
+      const shoePolicy = buildShoeTaxonomyPolicy(normalizedInput);
       const aiCandidates = rankCandidatesForSelectorInput(
         group.candidates,
         group.slot.category,
+        shoePolicy,
       ).slice(0, MAX_SELECTOR_AI_CANDIDATES_PER_SLOT);
       const aiGroup = {...group, candidates: aiCandidates};
       assertGenderContext(normalizedInput.gender, shoppingIntent, {
@@ -822,7 +824,10 @@ class TaobaoShoppingAgentV1 {
       const normalized = validateProductSelection(payload, aiCandidates, {
         category: group.slot.category,
       });
-      const pool = selectFinalCandidatePool(aiCandidates, normalized.assessments);
+      const pool = selectFinalCandidatePool(aiCandidates, normalized.assessments, {
+        shoePolicy,
+        category: group.slot.category,
+      });
       if (pool.length === 0) {
         const budgetConstrained = aiCandidates.some((candidate) =>
           candidate.value_reason_codes?.includes("USER_BUDGET_CONSTRAINT"));
@@ -944,6 +949,7 @@ class TaobaoShoppingAgentV1 {
             errorCode: failure.error_code,
             aiStatus: failure.ai_status,
             aiInputCount: settled.reason?.selector_ai_input_count,
+            shoePolicy: buildShoeTaxonomyPolicy(normalizedInput),
           });
         } else if (!fatalSelectorError) {
           fatalSelectorError = settled.reason;
@@ -1242,6 +1248,7 @@ class TaobaoShoppingAgentV1 {
       validatedLooks = validateComposedLooks(composition, selections, {
         authoritativeGender: normalizedInput.gender,
         personaExpression: shoppingIntent.persona?.expression,
+        shoePolicy: buildShoeTaxonomyPolicy(normalizedInput),
         onScoreError: (diagnostic) => {
           this.logger.warn?.("COMPOSER_SCORE_INVALID", {
             request_id: requestId,
@@ -1258,6 +1265,7 @@ class TaobaoShoppingAgentV1 {
       validatedLooks = validateComposedLooks(fallbackComposition, selections, {
         authoritativeGender: normalizedInput.gender,
         personaExpression: shoppingIntent.persona?.expression,
+        shoePolicy: buildShoeTaxonomyPolicy(normalizedInput),
       });
       this.logger.warn?.("shopping_agent_v1_composer_fallback", {
         request_id: requestId,
@@ -1269,6 +1277,7 @@ class TaobaoShoppingAgentV1 {
     const availability = ensureComposerAvailability(validatedLooks, selections, {
       authoritativeGender: normalizedInput.gender,
       personaExpression: shoppingIntent.persona?.expression,
+      shoePolicy: buildShoeTaxonomyPolicy(normalizedInput),
     });
     validatedLooks = availability.validated;
     availabilityFallbackUsed = availability.fallbackUsed;
@@ -1703,6 +1712,7 @@ function buildDeterministicComposerFallback(selections, {
 function ensureComposerAvailability(validated, selections, {
   authoritativeGender,
   personaExpression,
+  shoePolicy,
 } = {}) {
   if (validated.looks.length >= 2) {
     return {validated: {...validated, availability_fallback_used: false}, fallbackUsed: false};
@@ -1713,7 +1723,7 @@ function ensureComposerAvailability(validated, selections, {
       personaExpression,
     }),
     selections,
-    {authoritativeGender, personaExpression},
+    {authoritativeGender, personaExpression, shoePolicy},
   );
   const looks = [...validated.looks];
   const signatures = new Set(looks.map((look) => exactLookSignature(look.candidate_ids)));
@@ -2255,7 +2265,7 @@ function validateProductSelection(payload, candidates, {category} = {}) {
   };
 }
 
-function selectFinalCandidatePool(candidates, assessments) {
+function selectFinalCandidatePool(candidates, assessments, {shoePolicy, category} = {}) {
   const byId = new Map(candidates.map((candidate) => [candidate.candidate_id, candidate]));
   const evaluated = assessments
     .filter((assessment) => {
@@ -2272,11 +2282,18 @@ function selectFinalCandidatePool(candidates, assessments) {
   const order = (status, tier) => evaluated
     .filter((item) => item.status === status && (!tier || item.effective_tier === tier))
     .sort((left, right) => right.value_adjusted_score - left.value_adjusted_score);
-  return [
+  const ordered = [
     ...order(SELECTOR_STATUS.KEEP, SELECTION_TIER.HIGH),
     ...order(SELECTOR_STATUS.KEEP, SELECTION_TIER.NORMAL),
     ...order(SELECTOR_STATUS.UNCERTAIN),
-  ].slice(0, MAX_SELECTED_CANDIDATES_PER_SLOT).map((evaluatedItem) => ({
+  ];
+  if (category === "shoes") {
+    ordered.sort((left, right) =>
+      shoeTaxonomyRank(byId.get(right.assessment.candidate_id), shoePolicy) -
+        shoeTaxonomyRank(byId.get(left.assessment.candidate_id), shoePolicy) ||
+      right.value_adjusted_score - left.value_adjusted_score);
+  }
+  return ordered.slice(0, MAX_SELECTED_CANDIDATES_PER_SLOT).map((evaluatedItem) => ({
     ...byId.get(evaluatedItem.assessment.candidate_id),
     selector_status: evaluatedItem.status,
     selection_tier: evaluatedItem.effective_tier,
@@ -2300,13 +2317,48 @@ function selectFinalCandidatePool(candidates, assessments) {
   }));
 }
 
-function rankCandidatesForSelectorInput(candidates, category) {
+function rankCandidatesForSelectorInput(candidates, category, shoePolicy) {
   return candidates.map((candidate, index) => ({
     candidate,
     index,
-    score: localCandidateRankingScore(candidate, category),
+    score: localCandidateRankingScore(candidate, category) +
+      (category === "shoes" ? shoeTaxonomyRank(candidate, shoePolicy) : 0),
   })).sort((left, right) => right.score - left.score || left.index - right.index)
     .map(({candidate}) => candidate);
+}
+
+const SHOE_TAXONOMY = Object.freeze({
+  ballet: /ballet(?:[-\s]?inspired|\s+flats?)?|balletcore|芭蕾(?:t头|鞋|风|美学)/iu,
+  general: /sneakers?|trainers?|german\s+army\s+trainers?|loafers?|mary\s+jane|low\s+heels?|运动鞋|休闲鞋|德训鞋|小白鞋|乐福鞋|简洁玛丽珍|低跟鞋/iu,
+  explicitAesthetic: /ballet(?:core|\s+aesthetic|[-\s]?inspired)?|芭蕾(?:风|美学|感)|法式(?:甜美|少女|浪漫)|甜美(?:法式|芭蕾)/iu,
+  defaultOccasion: /daily|casual|date|travel|日常|休闲|约会|旅行|出游|出去玩/iu,
+});
+
+function buildShoeTaxonomyPolicy(input = {}) {
+  const intent = `${input.user_input || ""} ${input.occasion || ""}`;
+  const applies = normalizeGender(input.gender) === "female" &&
+    SHOE_TAXONOMY.defaultOccasion.test(String(input.occasion || input.user_input || "")) &&
+    !SHOE_TAXONOMY.explicitAesthetic.test(intent);
+  return Object.freeze({
+    policy_id: "cn_default_occasion_shoe_taxonomy_v1",
+    applies,
+    explicit_ballet_aesthetic: SHOE_TAXONOMY.explicitAesthetic.test(intent),
+  });
+}
+
+function shoeTaxonomyEvidence(candidate) {
+  return [candidate?.title, candidate?.name, candidate?.product_type,
+    candidate?.item_name, candidate?.shoe_family, candidate?.variation_axes?.shoe_family,
+    candidate?.variation_axes?.expression, candidate?.aesthetic_evidence]
+    .flat().filter(Boolean).join(" ");
+}
+
+function shoeTaxonomyRank(candidate, policy) {
+  if (!policy?.applies) return 0;
+  const evidence = shoeTaxonomyEvidence(candidate);
+  if (SHOE_TAXONOMY.ballet.test(evidence)) return -100;
+  if (SHOE_TAXONOMY.general.test(evidence)) return 20;
+  return 0;
 }
 
 function localCandidateRankingScore(candidate, category) {
@@ -2345,9 +2397,10 @@ function buildSelectorFallbackSelection(group, {
   errorCode,
   aiStatus,
   aiInputCount,
+  shoePolicy,
 } = {}) {
   const category = group.slot.category;
-  const pool = rankCandidatesForSelectorInput(group.candidates, category)
+  const pool = rankCandidatesForSelectorInput(group.candidates, category, shoePolicy)
     .slice(0, MAX_SELECTED_CANDIDATES_PER_SLOT)
     .map((candidate) => ({
       ...candidate,
@@ -3033,6 +3086,7 @@ function selectorRoundMetric(selection) {
 function validateComposedLooks(payload, selections, {
   authoritativeGender,
   personaExpression,
+  shoePolicy,
   onScoreError,
   budget,
 } = {}) {
@@ -3182,14 +3236,20 @@ function validateComposedLooks(payload, selections, {
       ])),
       female_expression_status: expressionAssessment.status,
       female_expression_evidence: expressionAssessment.evidence,
+      shoe_taxonomy_rank: shoeTaxonomyRank(selectedCandidates.shoes, shoePolicy),
     });
   }
   const rankedLooks = validLooks
     .map((look, index) => ({look, index}))
     .sort((left, right) =>
+      Number(right.look.shoe_taxonomy_rank || 0) -
+        Number(left.look.shoe_taxonomy_rank || 0) ||
       femaleExpressionRank(right.look) - femaleExpressionRank(left.look) ||
       left.index - right.index)
-    .map(({look}) => look);
+    .map(({look}) => {
+      const {shoe_taxonomy_rank: ignored, ...publicLook} = look;
+      return publicLook;
+    });
   const structuralDuplicateDetected = structuralDuplicates.length > 0;
   const lookDiversityStatus = validLooks.length < 2 || structuralDuplicateDetected ||
     candidatePoolsCannotDiversify(selections)
@@ -4024,6 +4084,8 @@ module.exports = {
   normalizeSearchQuery,
   normalizeSearchQueryBoundary,
   normalizeShoppingIntent,
+  buildShoeTaxonomyPolicy,
+  shoeTaxonomyRank,
   parseAiJson,
   productSelectionSchema,
   refinementDecision,
