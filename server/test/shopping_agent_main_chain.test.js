@@ -365,6 +365,25 @@ test("Agent failure is explicit and never exposes legacy products", async () => 
   assert.deepEqual(response.outfit_plans, []);
 });
 
+test("diagnostics persistence failure never changes a successful outfit response", async () => {
+  const warnings = [];
+  const response = await integrateShoppingAgentMainChain({
+    enabled: true,
+    agent: {run: async () => successResult()},
+    basePayload: basePayload(),
+    outfitRequest,
+    analysis: {},
+    requestId: "request-main-1",
+    candidateFunnelStore: {persist: async () => {
+      throw Object.assign(new Error("diagnostics unavailable"), {code: "WRITE_FAILED"});
+    }},
+    logger: {warn: (event, details) => warnings.push({event, details})},
+  });
+  assert.equal(response.shopping_agent_status, "success");
+  assert.equal(response.outfit_plans.length, 2);
+  assert.equal(warnings[0].event, "shopping_candidate_funnel_persistence_failed");
+});
+
 test("refinement contract failures keep the product selector refinement stage", async () => {
   const error = new Error("refinement query validation failed");
   error.code = "REFINEMENT_QUERY_VALIDATION_FAILED";

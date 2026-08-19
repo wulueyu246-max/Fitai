@@ -616,6 +616,10 @@ class TaobaoShoppingAgentV1 {
         priceContext,
         shoppingIntent.budget,
       ));
+      const candidateIdsByIdentity = new Map(passed.map((candidate) => [
+        productIdentity(candidate),
+        candidate.candidate_id,
+      ]));
       const retrieval = {
         slot,
         slot_key: slotKey,
@@ -637,6 +641,11 @@ class TaobaoShoppingAgentV1 {
         candidate_gate_fail: assessments.filter(({gate}) => gate.status === "FAIL").length,
         price_context: priceContext,
         candidates: passed,
+        diagnostic_gate_assessments: assessments.map(({product, gate}) => ({
+          product,
+          candidate_id: candidateIdsByIdentity.get(productIdentity(product)) || null,
+          gate,
+        })),
       };
       this.logger.info?.("shopping_agent_v1_candidate_gate", {
         request_id: requestId,
@@ -852,6 +861,8 @@ class TaobaoShoppingAgentV1 {
         selector_error_code: null,
         selector_ai_status: SELECTOR_EXECUTION_STATUS.SUCCESS,
         selector_ai_input_count: aiCandidates.length,
+        selector_ai_candidate_ids: aiCandidates.map((candidate) =>
+          candidate.candidate_id),
         selector_ai_keep: normalized.assessments.filter((item) =>
           item.status === SELECTOR_STATUS.KEEP).length,
         selector_ai_reject: normalized.assessments.filter((item) =>
@@ -925,6 +936,12 @@ class TaobaoShoppingAgentV1 {
           group.candidates.length,
           MAX_SELECTOR_AI_CANDIDATES_PER_SLOT,
         );
+        error.selector_ai_candidate_ids = rankCandidatesForSelectorInput(
+          group.candidates,
+          group.slot.category,
+          buildShoeTaxonomyPolicy(normalizedInput),
+        ).slice(0, MAX_SELECTOR_AI_CANDIDATES_PER_SLOT)
+          .map((candidate) => candidate.candidate_id);
         throw error;
       }
     }));
@@ -949,6 +966,7 @@ class TaobaoShoppingAgentV1 {
             errorCode: failure.error_code,
             aiStatus: failure.ai_status,
             aiInputCount: settled.reason?.selector_ai_input_count,
+            aiCandidateIds: settled.reason?.selector_ai_candidate_ids,
             shoePolicy: buildShoeTaxonomyPolicy(normalizedInput),
           });
         } else if (!fatalSelectorError) {
@@ -1425,6 +1443,16 @@ class TaobaoShoppingAgentV1 {
         total_ms: Date.now() - startedAt,
       },
     };
+    Object.defineProperty(response, "diagnostic_source", {
+      value: Object.freeze({
+        shopping_intent: shoppingIntent,
+        selections,
+        validated_looks: validatedLooks,
+      }),
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
     this.logger.info?.("shopping_agent_v1_summary", {
       request_id: requestId,
       search_queries: response.search_queries,
@@ -2397,6 +2425,7 @@ function buildSelectorFallbackSelection(group, {
   errorCode,
   aiStatus,
   aiInputCount,
+  aiCandidateIds,
   shoePolicy,
 } = {}) {
   const category = group.slot.category;
@@ -2432,6 +2461,9 @@ function buildSelectorFallbackSelection(group, {
     selector_error_code: errorCode || "SELECTOR_AI_ERROR",
     selector_ai_status: aiStatus || SELECTOR_EXECUTION_STATUS.AI_ERROR,
     selector_ai_input_count: Number(aiInputCount || 0),
+    selector_ai_candidate_ids: Object.freeze(
+      Array.isArray(aiCandidateIds) ? [...aiCandidateIds] : [],
+    ),
     selector_ai_keep: 0,
     selector_ai_reject: 0,
     selector_fallback_used: true,
@@ -3020,6 +3052,10 @@ function mergeSelectionRounds(first, second, {decision} = {}) {
   const pool = selectFinalCandidatePool(candidates, assessments);
   return {
     ...first,
+    diagnostic_rounds: Object.freeze([
+      ...diagnosticSelectionRounds(first),
+      ...diagnosticSelectionRounds(second),
+    ]),
     candidates,
     assessments,
     selector_keep: assessments.filter((item) => item.status === SELECTOR_STATUS.KEEP).length,
@@ -3060,6 +3096,16 @@ function mergeSelectionRounds(first, second, {decision} = {}) {
       rounds: [selectorRoundMetric(first), selectorRoundMetric(second)],
     },
   };
+}
+
+function diagnosticSelectionRounds(selection) {
+  if (Array.isArray(selection?.diagnostic_rounds)) {
+    return selection.diagnostic_rounds;
+  }
+  const rounds = [];
+  if (selection?.first_round_retrieval) rounds.push(selection.first_round_retrieval);
+  if (selection) rounds.push(selection);
+  return rounds;
 }
 
 function selectorRoundMetric(selection) {

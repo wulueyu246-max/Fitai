@@ -23,6 +23,9 @@ const {SupabasePersistence} = require("./supabase_persistence");
 const {SupabaseUserPersistence} = require("./supabase_user_persistence");
 const {ShoppingCandidateFunnelStore} = require("./shopping_candidate_funnel_store");
 const {
+  registerShoppingAgentDiagnosticsRoutes,
+} = require("./shopping_agent_diagnostics_routes");
+const {
   createDirectSupabaseFetch,
   diagnoseSupabaseConnection,
   resolveSupabaseConfig,
@@ -384,6 +387,13 @@ const config = Object.freeze({
     20_000,
   ),
   shoppingAgentV1Enabled: shoppingAgentFeatureEnabled(process.env),
+  shoppingAgentDiagnosticsEnabled: readBoolean(
+    process.env.SHOPPING_AGENT_DIAGNOSTICS,
+    false,
+  ),
+  shoppingAgentDiagnosticsToken: readOptionalString(
+    process.env.SHOPPING_AGENT_DIAGNOSTICS_TOKEN,
+  ),
   shoppingAgentDeadlineMs: resolveShoppingAgentDeadlineMs(
     process.env.SHOPPING_AGENT_DEADLINE_MS,
   ),
@@ -726,6 +736,7 @@ const shoppingAgentV1 = new TaobaoShoppingAgentV1({
 const shoppingCandidateFunnelStore = new ShoppingCandidateFunnelStore({
   url: config.supabaseUrl,
   serviceRoleKey: config.supabaseServiceRoleKey,
+  enabled: config.shoppingAgentDiagnosticsEnabled,
   fetchImpl: supabaseFetch || fetch,
 });
 
@@ -4423,6 +4434,13 @@ app.use(
   }),
 );
 
+registerShoppingAgentDiagnosticsRoutes({
+  app,
+  store: shoppingCandidateFunnelStore,
+  token: config.shoppingAgentDiagnosticsToken,
+  enabled: config.shoppingAgentDiagnosticsEnabled,
+});
+
 function sendAuthError(res, error) {
   if (error instanceof AuthStoreError) {
     return sendError(res, error.status, error.code, error.message);
@@ -4784,6 +4802,13 @@ app.get("/health", (req, res) => {
       supabaseRuntime.diagnostics?.restStatus ?? null,
     admin_analytics_configured: Boolean(config.adminAnalyticsKey),
     affiliate_postback_configured: Boolean(config.affiliatePostbackSecret),
+    shopping_agent_diagnostics: {
+      enabled: shoppingCandidateFunnelStore.writable,
+      readable: shoppingCandidateFunnelStore.writable &&
+        Boolean(config.shoppingAgentDiagnosticsToken),
+      retention_limit: shoppingCandidateFunnelStore.retentionLimit,
+      trace_version: 2,
+    },
     product_provider: productProvider.name,
     product_provider_status: productProvider.status || productProvider.name,
     product_provider_configured: Boolean(productProvider.configured),

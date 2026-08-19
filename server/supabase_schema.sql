@@ -207,8 +207,15 @@ create table if not exists public.shopping_candidate_funnel_diagnostics (
   ai_call_count integer not null default 0,
   taobao_call_count integer not null default 0,
   duration_ms integer not null default 0,
+  trace_version integer not null default 1,
+  trace jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
+
+alter table public.shopping_candidate_funnel_diagnostics
+  add column if not exists trace_version integer not null default 1;
+alter table public.shopping_candidate_funnel_diagnostics
+  add column if not exists trace jsonb not null default '{}'::jsonb;
 
 create index if not exists shopping_candidate_funnel_request_idx
   on public.shopping_candidate_funnel_diagnostics (request_id);
@@ -217,5 +224,5 @@ create index if not exists shopping_candidate_funnel_created_idx
 alter table public.shopping_candidate_funnel_diagnostics enable row level security;
 revoke all on table public.shopping_candidate_funnel_diagnostics
   from anon, authenticated;
-grant insert, select on table public.shopping_candidate_funnel_diagnostics
+grant insert, select, delete on table public.shopping_candidate_funnel_diagnostics
   to service_role;

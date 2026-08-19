@@ -2,6 +2,8 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const {buildShoppingAgentDiagnosticTrace} =
+  require("../shopping_candidate_funnel_store");
 
 const {
   COMPOSER_SCORE_PROPERTIES,
@@ -2064,6 +2066,15 @@ test("minimal proof uses exactly five AI calls, three Taobao calls and real IDs"
   assert.ok(result.looks.every((look) =>
     Object.values(look.items).every((item) => item.source === "taobao" && item.is_mock === false)));
   assert.ok(result.slot_metrics.every((slot) => slot.candidate_gate_fail >= 2));
+  assert.equal(Object.keys(result).includes("diagnostic_source"), false);
+  assert.equal(JSON.stringify(result).includes("diagnostic_source"), false);
+  const trace = buildShoppingAgentDiagnosticTrace(result);
+  assert.deepEqual(trace.slots.map((slot) => slot.category),
+    ["top", "bottom", "shoes"]);
+  assert.ok(trace.slots.every((slot) => slot.recall.candidates.length > 0));
+  assert.ok(trace.slots.every((slot) => slot.candidate_gate.decisions.length > 0));
+  assert.ok(trace.slots.every((slot) => slot.selector.ai_input_candidate_ids.length > 0));
+  assert.equal(trace.composer.looks.length, 2);
 });
 
 test("planner AI failure uses deterministic User Truth fallback without extra AI calls", async () => {
