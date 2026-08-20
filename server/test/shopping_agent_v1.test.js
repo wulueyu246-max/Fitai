@@ -1083,6 +1083,63 @@ test("Shopping Intent preserves only flexible slot intent and one executable que
   assert.ok(intent.slots.every((slot) => !Object.hasOwn(slot, "product_type")));
 });
 
+test("female daily and date search plans cannot drift to a neutral-first direction", () => {
+  const input = normalizeAgentInput({
+    user_input: "日常约会出去玩，帮我搭一套",
+    gender: "female",
+  });
+  const rawPlan = plan();
+  rawPlan.shopping_intent.slots[0].search_query = "中性 短款 针织衫";
+  rawPlan.shopping_intent.slots[1].search_query = "女 neutral A字 半身裙";
+  rawPlan.shopping_intent.slots[2].search_query = "中性 浅口 鞋";
+
+  const intent = buildShoppingIntent(rawPlan.shopping_intent, input);
+
+  assert.deepEqual(intent.slots.map((slot) => slot.search_query), [
+    "女 短款 针织衫",
+    "女 A字 半身裙",
+    "女 浅口 鞋",
+  ]);
+  assert.ok(intent.slots.every((slot) => /^女/u.test(slot.search_query)));
+  assert.ok(intent.slots.every((slot) =>
+    !/中性|男女同款|男女通用|无性别|unisex|neutral/i.test(slot.search_query)));
+  assert.equal(
+    intent.slots[1].search_plan_fallback_reason,
+    "FEMALE_NEUTRAL_SEARCH_INTENT_DRIFT",
+  );
+});
+
+test("explicit neutral female intent is allowed while male and unisex plans stay unchanged", () => {
+  const explicitFemale = buildSearchPlan({
+    category: "top",
+    search_query: "中性 短款 针织衫",
+  }, {
+    gender: "female",
+    category: "top",
+    userInput: "想穿得中性利落一点",
+  });
+  const male = buildSearchPlan({
+    category: "top",
+    search_query: "男 短款 针织衫",
+  }, {
+    gender: "male",
+    category: "top",
+    userInput: "日常休闲",
+  });
+  const unisex = buildSearchPlan({
+    category: "top",
+    search_query: "中性 短款 针织衫",
+  }, {
+    gender: "unisex",
+    category: "top",
+    userInput: "日常休闲",
+  });
+
+  assert.equal(explicitFemale.query, "女 中性 短款 针织衫");
+  assert.equal(male.query, "男 短款 针织衫");
+  assert.equal(unisex.query, "中性 短款 针织衫");
+});
+
 test("Search Recall Boundary strips weather, color and excess attributes before Taobao", () => {
   const input = normalizeAgentInput({
     user_input: "我要出去玩，帮我搭一套",

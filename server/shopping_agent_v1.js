@@ -94,6 +94,7 @@ const QUERY_NON_RECALL_TERMS = Object.freeze([
   "棉", "真丝", "亚麻", "皮革", "羊毛", "雪纺", "透明",
 ]);
 const WEATHER_PRODUCT_TERMS = Object.freeze(["雨靴", "雨鞋", "防晒衣", "皮肤衣"]);
+const NEUTRAL_SEARCH_DIRECTION_PATTERN = /中性|男女同款|男女通用|无性别|unisex|neutral/i;
 
 const STRING_ARRAY_SCHEMA = Object.freeze({
   type: "array",
@@ -2000,7 +2001,11 @@ function buildInitialSearchPlanFallback(rawSlot, {
     family = CATEGORY_LABELS[category];
   }
   const feature = matchingTerms(evidence, QUERY_FEATURE_TERMS[category])[0] || "";
-  const style = matchingTerms(evidence, QUERY_STYLE_TERMS)[0] || "";
+  const explicitNeutral = userExplicitlyRequestsNeutral(userInput);
+  const style = gender === "female" && explicitNeutral &&
+      NEUTRAL_SEARCH_DIRECTION_PATTERN.test(evidence)
+    ? "中性"
+    : matchingTerms(evidence, QUERY_STYLE_TERMS)[0] || "";
   const query = [recallGenderLabel(gender), style, feature, family]
     .filter(Boolean)
     .join(" ")
@@ -2030,6 +2035,14 @@ function normalizeSearchQueryBoundary(value, gender, category, {userInput = ""} 
   if (genderPattern && !genderPattern.test(query)) {
     throw schemaError(`${category}.search_query must contain gender`);
   }
+  const explicitNeutral = userExplicitlyRequestsNeutral(userInput);
+  if (gender === "female" && !explicitNeutral &&
+      NEUTRAL_SEARCH_DIRECTION_PATTERN.test(query)) {
+    throw schemaError(
+      `${category}.search_query defaults a female request to neutral`,
+      "FEMALE_NEUTRAL_SEARCH_INTENT_DRIFT",
+    );
+  }
   if (explicitGenderConflict(query, gender)) {
     throw schemaError(`${category}.search_query conflicts with authoritative gender`);
   }
@@ -2054,7 +2067,10 @@ function normalizeSearchQueryBoundary(value, gender, category, {userInput = ""} 
   const nonRecall = matchingTerms(query, QUERY_NON_RECALL_TERMS);
   const rawAttributeCount = new Set([...features, ...styles, ...nonRecall]).size;
   const feature = features[0] || "";
-  const style = styles[0] || "";
+  const style = gender === "female" && explicitNeutral &&
+      NEUTRAL_SEARCH_DIRECTION_PATTERN.test(query)
+    ? "中性"
+    : styles[0] || "";
   const simplifiedQuery = [genderLabel, style, feature, family]
     .filter(Boolean)
     .join(" ")
@@ -2130,6 +2146,12 @@ function userExplicitlyRequestsTerm(userInput, term) {
     return /(?:要|想要|需要|买|找).{0,8}(?:防晒衣|皮肤衣)/.test(input);
   }
   return false;
+}
+
+function userExplicitlyRequestsNeutral(userInput) {
+  return /中性|无性别|男友风|boyfriend|androgynous|unisex|neutral/i.test(
+    String(userInput || ""),
+  );
 }
 
 function normalizeRefinementQuery(value, gender, category) {
@@ -3386,9 +3408,9 @@ function buildPlannerMessages(input, fashionKnowledge) {
     {
       role: "system",
       content: `You are FitAI Shopping Intent and Taobao Search Planner V1.
-Decide one coherent, purchasable styling direction before marketplace search. Real-time weather is disabled and is not an input to this Shopping Agent. Do not infer or add temperature, humidity, rain, wind, weather constraints, weather materials, weather comfort or weather safety rules. Treat the user's raw text as immutable user_input, but never call or assume any real-time weather service.
-Create exactly three slots: top, bottom and shoes. Shopping Intent is flexible intent, not an imagined SKU contract. Hard constraints contain only truly non-negotiable gender/category/safety requirements. Put ordinary aesthetic choices in soft_preferences.
-Generate exactly one high-recall Chinese Taobao query per slot. A query may contain only: gender direction, a broad category/product family, one core silhouette or key feature, and at most one truly important style word. Body strategy, persona detail, colors, materials, comfort explanations and secondary design elements do not belong in the query. Never include reasons, prompt text, colons or multiple alternatives. Return only the strict JSON object.`,
+ Decide one coherent, purchasable styling direction before marketplace search. Real-time weather is disabled and is not an input to this Shopping Agent. Do not infer or add temperature, humidity, rain, wind, weather constraints, weather materials, weather comfort or weather safety rules. Treat the user's raw text as immutable user_input, but never call or assume any real-time weather service.
+ Create exactly three slots: top, bottom and shoes. Shopping Intent is flexible intent, not an imagined SKU contract. Hard constraints contain only truly non-negotiable gender/category/safety requirements. Put ordinary aesthetic choices in soft_preferences.
+ Generate exactly one high-recall Chinese Taobao query per slot. A query may contain only: gender direction, a broad category/product family, one core silhouette or key feature, and at most one truly important style word. For authoritative_gender=female, every query must use an explicit female direction such as 女/女款; for daily, casual, date or travel requests, never default to 中性/unisex/neutral unless the immutable user_input explicitly requests a neutral or androgynous style. Body strategy, persona detail, colors, materials, comfort explanations and secondary design elements do not belong in the query. Never include reasons, prompt text, colons or multiple alternatives. Return only the strict JSON object.`,
     },
     {
       role: "user",
