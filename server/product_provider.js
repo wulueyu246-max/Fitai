@@ -672,11 +672,23 @@ class TaobaoProductProvider extends ProductProvider {
     }
     const outfitBlueprint = filters.outfit_blueprint || filters.outfitBlueprint ||
       filters.recommendation_context?.outfit_blueprint || {};
-    const translatedSearchPlan = expandBlueprintSearchPlan(
-      requirement,
-      outfitBlueprint,
-      buildTaobaoSearchPlan(requirement),
-    );
+    const dynamicConceptQueries = requirement.query_plan_version ===
+      "concept_search_query_planner.v1"
+      ? requirementSearchKeywords(requirement).slice(0, 4)
+      : [];
+    const translatedSearchPlan = dynamicConceptQueries.length >= 2
+      ? {
+        original_keyword: dynamicConceptQueries[0],
+        exact: dynamicConceptQueries[0],
+        fallbacks: dynamicConceptQueries.slice(1),
+        expanded_queries: dynamicConceptQueries,
+        blueprint_element: requirement.item_name,
+      }
+      : expandBlueprintSearchPlan(
+        requirement,
+        outfitBlueprint,
+        buildTaobaoSearchPlan(requirement),
+      );
     // Translation happens once at the Purchase Specification boundary. Every
     // downstream search stage reads the frozen, executable query list.
     const purchaseSpecification = Object.freeze({
@@ -684,12 +696,15 @@ class TaobaoProductProvider extends ProductProvider {
       search_queries: Object.freeze([
         translatedSearchPlan.exact,
         ...translatedSearchPlan.fallbacks,
-      ].filter(Boolean).slice(0, 3)),
+      ].filter(Boolean).slice(0, dynamicConceptQueries.length >= 2 ? 4 : 3)),
     });
     const searchPlan = {
       ...translatedSearchPlan,
       exact: purchaseSpecification.search_queries[0] || "",
-      fallbacks: purchaseSpecification.search_queries.slice(1, 3),
+      fallbacks: purchaseSpecification.search_queries.slice(
+        1,
+        dynamicConceptQueries.length >= 2 ? 4 : 3,
+      ),
       expanded_queries: purchaseSpecification.search_queries,
     };
     this.logger.info?.("淘宝商品搜索需求", {
@@ -704,12 +719,40 @@ class TaobaoProductProvider extends ProductProvider {
       item_name: requirement.item_name,
       query_reason: requirement.query_reason || undefined,
       source_elements: requirement.source_elements,
+      query_plan_version: requirement.query_plan_version || undefined,
+      commerce_query_count: dynamicConceptQueries.length || undefined,
+      commerce_negatives:
+        requirement.commerce_query_plan?.commerce_negatives || undefined,
       purchase_specification: purchaseSpecification,
     });
     const candidateLimit = Math.min(positiveInteger(filters.limit, 20), 20);
     let products = [];
     let successfulQuery = "";
-    if (searchPlan.exact) {
+    if (dynamicConceptQueries.length >= 2) {
+      const perQueryLimit = Math.max(5, Math.min(
+        8,
+        Math.ceil(24 / dynamicConceptQueries.length),
+      ));
+      const plannedBatches = await Promise.all(dynamicConceptQueries.map(
+        (searchKeyword, index) => this.#search({
+          ...filters,
+          ...requirement,
+          originalKeyword: searchPlan.original_keyword,
+          searchKeyword,
+          fallbackLevel: index,
+          pageNo: 1,
+          minimumRelevanceScore: 35,
+          limit: perQueryLimit,
+        }, metrics),
+      ));
+      const successfulQueries = dynamicConceptQueries.filter(
+        (_query, index) => plannedBatches[index].length > 0,
+      );
+      successfulQuery = successfulQueries.join(" | ");
+      products = uniqueProducts(plannedBatches.flat())
+        .sort((left, right) =>
+          Number(right.relevance_score || 0) - Number(left.relevance_score || 0));
+    } else if (searchPlan.exact) {
       products = await this.#search({
         ...filters,
         ...requirement,
@@ -725,7 +768,8 @@ class TaobaoProductProvider extends ProductProvider {
     // A raw hit that fails the sole textual Candidate Gate is not a usable
     // recall. Continue through the specification-owned fallback queries before
     // declaring the slot empty.
-    if (gateCandidates(products, purchaseSpecification).length === 0 &&
+    if (dynamicConceptQueries.length < 2 &&
+        gateCandidates(products, purchaseSpecification).length === 0 &&
         searchPlan.fallbacks.length > 0) {
       const fallbackBatches = await Promise.all(searchPlan.fallbacks.map(
         (searchKeyword, index) => this.#search({
@@ -1236,7 +1280,7 @@ function normalizeFilters(filters = {}) {
     searchKeywords: normalizeFilterList(
       filters.search_keywords ?? filters.searchKeywords,
       "search_keywords",
-      3,
+      4,
     ),
     negativeKeywords: normalizeFilterList(
       filters.negative_keywords ?? filters.negativeKeywords,
@@ -1649,15 +1693,23 @@ function recommendationCacheKey(queries, context = {}) {
     request_id: String(context.requestId || query?.request_id || "").trim(),
     look_id: String(query?.look_id || query?.lookId || "").trim(),
     category: String(query?.category || "").trim().toLowerCase(),
-    keyword: String(
-      query?.search_keywords?.[0] ||
-      query?.searchKeywords?.[0] ||
-      query?.keyword ||
-      query?.item_name ||
-      query?.itemName ||
-      "",
-    ).trim(),
+    keywords: requirementSearchKeywords(query),
   })));
+}
+
+function requirementSearchKeywords(requirement = {}) {
+  const supplied = [...new Set([
+    ...(Array.isArray(requirement?.search_keywords)
+      ? requirement.search_keywords : []),
+    ...(Array.isArray(requirement?.searchKeywords)
+      ? requirement.searchKeywords : []),
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+  if (supplied.length > 0) return supplied.slice(0, 4);
+  return [...new Set([
+    requirement?.keyword,
+    requirement?.item_name,
+    requirement?.itemName,
+  ].map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 1);
 }
 
 function markRerankFallback(products) {

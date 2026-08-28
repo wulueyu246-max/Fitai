@@ -269,7 +269,7 @@ function normalizeProductRequirement(input = {}, context = {}) {
   const searchKeywords = normalizeStringList(
     input.search_keywords || input.searchKeywords || (input.keyword ? [input.keyword] : []),
     "search_keywords",
-    3,
+    4,
   );
   const negativeKeywords = normalizeStringList(
     input.negative_keywords || input.negativeKeywords || [],
@@ -283,6 +283,9 @@ function normalizeProductRequirement(input = {}, context = {}) {
   );
   const translatedQueries = normalizeTranslatedQueries(
     input.translated_queries || input.translatedQueries,
+  );
+  const commerceQueryPlan = normalizeCommerceQueryPlan(
+    input.commerce_query_plan || input.commerceQueryPlan,
   );
   const colors = normalizeStringList(
     input.colors || (input.color ? [input.color] : []),
@@ -320,6 +323,10 @@ function normalizeProductRequirement(input = {}, context = {}) {
       "request_id",
     ),
     look_id: optionalText(input.look_id || input.lookId || context.look_id || context.lookId, "look_id"),
+    concept_id: optionalText(
+      input.concept_id || input.conceptId || context.concept_id || context.conceptId,
+      "concept_id",
+    ),
     slot_key: optionalText(
       input.slot_key || input.slotKey || context.slot_key || context.slotKey,
       "slot_key",
@@ -363,6 +370,10 @@ function normalizeProductRequirement(input = {}, context = {}) {
     scene: optionalText(input.scene || context.scene, "scene"),
     fit: optionalText(input.fit || context.fit, "fit"),
     search_keywords: searchKeywords,
+    query_plan_version: optionalLooseText(
+      input.query_plan_version || input.queryPlanVersion || commerceQueryPlan?.version,
+    ),
+    commerce_query_plan: commerceQueryPlan,
     negative_keywords: uniqueStrings([
       ...negativeKeywords,
       ...(gender === "male" ? MALE_NEGATIVE_TERMS : []),
@@ -386,7 +397,7 @@ function normalizeTranslatedQueries(value) {
   if (!Array.isArray(value)) {
     throw new TypeError("translated_queries must be an array");
   }
-  return value.slice(0, 3).map((entry) => {
+  return value.slice(0, 4).map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       throw new TypeError("translated_queries entries must be objects");
     }
@@ -401,6 +412,57 @@ function normalizeTranslatedQueries(value) {
       query_reason: optionalLooseText(entry.query_reason || entry.queryReason),
     };
   }).filter((entry) => entry.query);
+}
+
+function normalizeCommerceQueryPlan(value) {
+  if (value == null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("commerce_query_plan must be an object");
+  }
+  const candidates = Array.isArray(value.query_candidates)
+    ? value.query_candidates.slice(0, 4).map((entry, index) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new TypeError("commerce_query_plan candidates must be objects");
+      }
+      return {
+        rank: Number.isInteger(Number(entry.rank)) ? Number(entry.rank) : index + 1,
+        query: optionalLooseText(entry.query),
+        reason_codes: normalizeStringList(
+          entry.reason_codes || [],
+          "commerce_query_plan.reason_codes",
+          12,
+        ),
+        source_elements: normalizeStringList(
+          entry.source_elements || [],
+          "commerce_query_plan.source_elements",
+          20,
+        ),
+      };
+    }).filter(({query}) => query)
+    : [];
+  return {
+    version: optionalLooseText(value.version),
+    concept_id: optionalLooseText(value.concept_id),
+    slot: optionalLooseText(value.slot),
+    gender: normalizeGender(value.gender),
+    scene: optionalLooseText(value.scene),
+    query_candidates: candidates,
+    commerce_negatives: normalizeStringList(
+      value.commerce_negatives || [],
+      "commerce_query_plan.commerce_negatives",
+      20,
+    ),
+    hard_gate_negatives: normalizeStringList(
+      value.hard_gate_negatives || [],
+      "commerce_query_plan.hard_gate_negatives",
+      20,
+    ),
+    contextual_negatives: normalizeStringList(
+      value.contextual_negatives || [],
+      "commerce_query_plan.contextual_negatives",
+      20,
+    ),
+  };
 }
 
 function buildSearchKeywords(input = {}, context = {}) {

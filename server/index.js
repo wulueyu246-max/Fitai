@@ -51,6 +51,10 @@ const {
   createTaobaoRawProbeHandler,
 } = require("./taobao_raw_probe_endpoint");
 const {
+  DYNAMIC_TAOBAO_QUERY_VALIDATION_PATH,
+  createDynamicTaobaoQueryValidationHandler,
+} = require("./dynamic_taobao_query_validation_endpoint");
+const {
   buildSearchKeywords,
   normalizeGender,
   normalizeProductCategory,
@@ -5183,6 +5187,10 @@ app.get(TAOBAO_RAW_PROBE_ARTIFACT_PATH,
   createTaobaoRawProbeArtifactDownloadHandler({
     environment: () => process.env,
     artifactStore: taobaoRawProbeArtifactStore,
+  }));
+app.post(DYNAMIC_TAOBAO_QUERY_VALIDATION_PATH,
+  createDynamicTaobaoQueryValidationHandler({
+    environment: () => process.env,
   }));
 
 app.get("/products/:id/stats", async (req, res, next) => {
