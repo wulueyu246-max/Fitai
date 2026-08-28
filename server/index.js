@@ -44,7 +44,10 @@ const {
   createProductProvider,
 } = require("./product_provider");
 const {
+  TAOBAO_RAW_PROBE_ARTIFACT_PATH,
   TAOBAO_RAW_PROBE_PATH,
+  createTaobaoRawProbeArtifactDownloadHandler,
+  createTaobaoRawProbeArtifactStore,
   createTaobaoRawProbeHandler,
 } = require("./taobao_raw_probe_endpoint");
 const {
@@ -5170,9 +5173,17 @@ app.get("/products/search", async (req, res, next) => {
   }
 });
 
+const taobaoRawProbeArtifactStore = createTaobaoRawProbeArtifactStore();
+
 app.post(TAOBAO_RAW_PROBE_PATH, createTaobaoRawProbeHandler({
   environment: () => process.env,
+  artifactStore: taobaoRawProbeArtifactStore,
 }));
+app.get(TAOBAO_RAW_PROBE_ARTIFACT_PATH,
+  createTaobaoRawProbeArtifactDownloadHandler({
+    environment: () => process.env,
+    artifactStore: taobaoRawProbeArtifactStore,
+  }));
 
 app.get("/products/:id/stats", async (req, res, next) => {
   try {
