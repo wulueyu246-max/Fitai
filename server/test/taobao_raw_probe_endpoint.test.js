@@ -36,7 +36,11 @@ test("probe and artifact scope are fixed and bounded", () => {
   assert.equal(TAOBAO_RAW_PROBE_PATH, "/internal/probes/taobao-raw-v1");
   assert.equal(TAOBAO_RAW_PROBE_ARTIFACT_PATH,
     "/internal/probes/taobao-raw-v1/artifacts/:artifact_id");
-  assert.deepEqual(TAOBAO_RAW_PROBE_QUERIES, ["女装上衣", "男装裤子", "女鞋"]);
+  assert.deepEqual(TAOBAO_RAW_PROBE_QUERIES, [
+    "女装裤子/半身裙",
+    "男装上衣",
+    "男鞋",
+  ]);
   assert.equal(TAOBAO_RAW_PROBE_PAGE_SIZE, 10);
   assert.equal(TAOBAO_RAW_PROBE_MAX_PRODUCTS, 30);
   assert.equal(TAOBAO_RAW_PROBE_ARTIFACT_TTL_MS, 15 * 60 * 1000);

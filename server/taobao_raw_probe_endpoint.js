@@ -16,7 +16,11 @@ const {
 const TAOBAO_RAW_PROBE_PATH = "/internal/probes/taobao-raw-v1";
 const TAOBAO_RAW_PROBE_ARTIFACT_PATH =
   `${TAOBAO_RAW_PROBE_PATH}/artifacts/:artifact_id`;
-const TAOBAO_RAW_PROBE_QUERIES = Object.freeze(["女装上衣", "男装裤子", "女鞋"]);
+const TAOBAO_RAW_PROBE_QUERIES = Object.freeze([
+  "女装裤子/半身裙",
+  "男装上衣",
+  "男鞋",
+]);
 const TAOBAO_RAW_PROBE_PAGE_SIZE = 10;
 const TAOBAO_RAW_PROBE_MAX_PRODUCTS = 30;
 const INTERNAL_PROBE_TOKEN_MIN_LENGTH = 32;
