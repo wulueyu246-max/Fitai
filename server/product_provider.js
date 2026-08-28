@@ -49,6 +49,9 @@ const {
 const {
   DEFAULT_MAX_CANDIDATES_PER_SLOT,
 } = require("./visual_product_verification");
+const {
+  buildRawTaobaoProduct,
+} = require("./taobao_candidate_enrichment");
 
 const PRODUCT_CATEGORIES = SUPPORTED_PRODUCT_CATEGORIES;
 const DEFAULT_SAMPLE_MATERIAL_ID = "28029";
@@ -153,6 +156,7 @@ class TaobaoProductProvider extends ProductProvider {
     pipelineBudgetMs = PRODUCT_PIPELINE_BUDGET_MS,
     taobaoStageBudgetMs = TAOBAO_STAGE_BUDGET_MS,
     rerankBudgetMs = PRODUCT_RERANK_BUDGET_MS,
+    rawCapture = null,
     logger = console,
   }) {
     super();
@@ -175,6 +179,7 @@ class TaobaoProductProvider extends ProductProvider {
       MAX_VISUAL_CANDIDATES_PER_SLOT,
     );
     this.logger = logger;
+    this.rawCapture = typeof rawCapture === "function" ? rawCapture : null;
     this.recommendationCacheTtlMs = positiveInteger(
       recommendationCacheTtlMs,
       DEFAULT_RECOMMENDATION_CACHE_TTL_MS,
@@ -956,7 +961,7 @@ class TaobaoProductProvider extends ProductProvider {
         method: TAOBAO_MATERIAL_SEARCH_METHOD,
         ...details,
       });
-    });
+    }, this.rawCapture);
     if (metrics) {
       metrics.taobaoCount += Number(mappingDetails.rawCount || 0);
       metrics.semanticPassCount += products.length;
@@ -1000,7 +1005,7 @@ class TaobaoProductProvider extends ProductProvider {
         method: TAOBAO_MATERIAL_SAMPLE_METHOD,
         ...details,
       });
-    });
+    }, this.rawCapture);
   }
 }
 
@@ -1104,6 +1109,7 @@ function createProductProvider({
   client,
   reranker = null,
   visualVerifier = null,
+  rawCapture = null,
 } = {}) {
   const mode = String(environment.PRODUCT_PROVIDER || "auto").trim().toLowerCase();
   if (!new Set(["mock", "taobao", "auto"]).has(mode)) {
@@ -1164,6 +1170,7 @@ function createProductProvider({
       sampleMaterialId: environment.TAOBAO_SAMPLE_MATERIAL_ID || DEFAULT_SAMPLE_MATERIAL_ID,
       reranker,
       visualVerifier,
+      rawCapture,
       visualVerificationBudgetMs: positiveInteger(
         environment.PRODUCT_VISUAL_VERIFICATION_TIMEOUT_MS,
         PRODUCT_VISUAL_VERIFICATION_BUDGET_MS,
@@ -1287,8 +1294,22 @@ function extractTaobaoItems(payload) {
   return Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
 }
 
-function mapPayload(payload, filters, pid, origin, onDiagnostics) {
+function mapPayload(payload, filters, pid, origin, onDiagnostics, onRawProducts) {
   const rawItems = extractTaobaoItems(payload);
+  if (typeof onRawProducts === "function") {
+    const query = filters.searchKeyword || filters.keyword || buildSearchKeyword(filters);
+    const observedAt = new Date().toISOString();
+    const rawProducts = rawItems.map((item) => buildRawTaobaoProduct(item, {
+      query,
+      observedAt,
+    }));
+    onRawProducts({
+      query,
+      origin,
+      products: rawProducts,
+      responseSummary: safeTaobaoResponseShape(payload),
+    });
+  }
   const mapped = rawItems.map((item) => {
     try {
       return mapTaobaoProduct(item, {pid, fallbackCategory: filters.category, filters, origin});
@@ -1356,6 +1377,7 @@ function safeTaobaoResponseShape(payload) {
       ? Object.keys(resultList).sort().slice(0, 20)
       : [],
     totalResults: firstNumber(response.total_results, response.totalResults) ?? null,
+    requestId: firstText(response.request_id, response.requestId) || null,
   };
 }
 

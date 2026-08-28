@@ -44,6 +44,10 @@ const {
   createProductProvider,
 } = require("./product_provider");
 const {
+  TAOBAO_RAW_PROBE_PATH,
+  createTaobaoRawProbeHandler,
+} = require("./taobao_raw_probe_endpoint");
+const {
   buildSearchKeywords,
   normalizeGender,
   normalizeProductCategory,
@@ -5165,6 +5169,10 @@ app.get("/products/search", async (req, res, next) => {
     return next(error);
   }
 });
+
+app.post(TAOBAO_RAW_PROBE_PATH, createTaobaoRawProbeHandler({
+  environment: () => process.env,
+}));
 
 app.get("/products/:id/stats", async (req, res, next) => {
   try {
