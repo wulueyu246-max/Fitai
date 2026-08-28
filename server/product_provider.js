@@ -416,6 +416,8 @@ class TaobaoProductProvider extends ProductProvider {
               ...context,
               ...query,
               ...requirement,
+              commerce_query_plan:
+                query.commerce_query_plan || requirement.commerce_query_plan,
               limit: 20,
             }, metrics),
             Math.max(1, Math.min(
@@ -672,10 +674,20 @@ class TaobaoProductProvider extends ProductProvider {
     }
     const outfitBlueprint = filters.outfit_blueprint || filters.outfitBlueprint ||
       filters.recommendation_context?.outfit_blueprint || {};
-    const dynamicConceptQueries = requirement.query_plan_version ===
-      "concept_search_query_planner.v1"
+    const commerceQueryPlan = filters.commerce_query_plan ||
+      requirement.commerce_query_plan || {};
+    const queryPlanVersion = String(requirement.query_plan_version ||
+      commerceQueryPlan.version || "");
+    const dynamicConceptQueries = new Set([
+      "concept_search_query_planner.v1",
+      "concept_search_query_planner.v2",
+    ]).has(queryPlanVersion)
       ? requirementSearchKeywords(requirement).slice(0, 4)
       : [];
+    const dynamicFallbackQuery = queryPlanVersion ===
+        "concept_search_query_planner.v2"
+      ? String(commerceQueryPlan?.fallback_query?.query || "").trim()
+      : "";
     const translatedSearchPlan = dynamicConceptQueries.length >= 2
       ? {
         original_keyword: dynamicConceptQueries[0],
@@ -721,6 +733,7 @@ class TaobaoProductProvider extends ProductProvider {
       source_elements: requirement.source_elements,
       query_plan_version: requirement.query_plan_version || undefined,
       commerce_query_count: dynamicConceptQueries.length || undefined,
+      conditional_fallback_query: dynamicFallbackQuery || undefined,
       commerce_negatives:
         requirement.commerce_query_plan?.commerce_negatives || undefined,
       purchase_specification: purchaseSpecification,
@@ -728,6 +741,9 @@ class TaobaoProductProvider extends ProductProvider {
     const candidateLimit = Math.min(positiveInteger(filters.limit, 20), 20);
     let products = [];
     let successfulQuery = "";
+    let queryFallbackLevel = 0;
+    let queryFallbackReason = null;
+    const executedQueries = [];
     if (dynamicConceptQueries.length >= 2) {
       const perQueryLimit = Math.max(5, Math.min(
         8,
@@ -739,12 +755,13 @@ class TaobaoProductProvider extends ProductProvider {
           ...requirement,
           originalKeyword: searchPlan.original_keyword,
           searchKeyword,
-          fallbackLevel: index,
+          fallbackLevel: 0,
           pageNo: 1,
           minimumRelevanceScore: 35,
           limit: perQueryLimit,
         }, metrics),
       ));
+      executedQueries.push(...dynamicConceptQueries);
       const successfulQueries = dynamicConceptQueries.filter(
         (_query, index) => plannedBatches[index].length > 0,
       );
@@ -752,6 +769,34 @@ class TaobaoProductProvider extends ProductProvider {
       products = uniqueProducts(plannedBatches.flat())
         .sort((left, right) =>
           Number(right.relevance_score || 0) - Number(left.relevance_score || 0));
+      if (queryPlanVersion === "concept_search_query_planner.v2") {
+        const highRecallCount = plannedBatches[0]?.length || 0;
+        const intentCount = plannedBatches[1]?.length || 0;
+        if (intentCount === 0 && highRecallCount > 0) {
+          queryFallbackLevel = 1;
+          queryFallbackReason = "INTENT_QUERY_ZERO";
+        }
+        if (highRecallCount === 0 && intentCount === 0 && dynamicFallbackQuery) {
+          const fallbackProducts = await this.#search({
+            ...filters,
+            ...requirement,
+            originalKeyword: searchPlan.original_keyword,
+            searchKeyword: dynamicFallbackQuery,
+            fallbackLevel: 2,
+            pageNo: 1,
+            minimumRelevanceScore: 35,
+            limit: perQueryLimit,
+          }, metrics);
+          executedQueries.push(dynamicFallbackQuery);
+          queryFallbackLevel = 2;
+          queryFallbackReason = "INTENT_AND_HIGH_RECALL_ZERO";
+          if (fallbackProducts.length > 0) successfulQuery = dynamicFallbackQuery;
+          products = uniqueProducts([...products, ...fallbackProducts])
+            .sort((left, right) =>
+              Number(right.relevance_score || 0) -
+              Number(left.relevance_score || 0));
+        }
+      }
     } else if (searchPlan.exact) {
       products = await this.#search({
         ...filters,
@@ -801,9 +846,15 @@ class TaobaoProductProvider extends ProductProvider {
         ...searchPlan.fallbacks,
       ].filter(Boolean),
       successful_query: successfulQuery || null,
+      executed_queries: executedQueries,
+      fallback_level: queryFallbackLevel,
+      fallback_reason: queryFallbackReason,
       candidate_count: products.length,
     });
     const funnel = metrics?.funnel || (metrics ? (metrics.funnel = {}) : {});
+    funnel.query_fallback_level = queryFallbackLevel;
+    funnel.query_fallback_reason = queryFallbackReason;
+    funnel.executed_queries = executedQueries;
     funnel.raw_count = Number(metrics?.taobaoCount || 0);
     funnel.valid_count = products.length;
     const gateAssessments = products.map((product) =>
@@ -970,6 +1021,12 @@ class TaobaoProductProvider extends ProductProvider {
           metrics.zeroResultRecall = true;
           metrics.recallErrorCode = "ZERO_RESULT_RECALL";
         }
+        this.rawCapture?.({
+          query: filters.searchKeyword || buildSearchKeyword(filters),
+          origin: "search",
+          products: [],
+          responseSummary: {empty: true, requestId: null},
+        });
         this.logger.info?.("淘宝商品搜索无结果", {
           requestId: filters.requestId || undefined,
           provider: "taobao",
@@ -1694,6 +1751,9 @@ function recommendationCacheKey(queries, context = {}) {
     look_id: String(query?.look_id || query?.lookId || "").trim(),
     category: String(query?.category || "").trim().toLowerCase(),
     keywords: requirementSearchKeywords(query),
+    fallback_keyword: String(
+      query?.commerce_query_plan?.fallback_query?.query || "",
+    ).trim(),
   })));
 }
 

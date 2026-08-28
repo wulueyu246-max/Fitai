@@ -4,47 +4,11 @@ const {normalizeGender} = require("./product_relevance");
 const {listStyleProfiles} = require("./style_intelligence");
 
 const CONCEPT_SEARCH_QUERY_PLANNER_VERSION =
-  "concept_search_query_planner.v1";
+  "concept_search_query_planner.v2";
 const MIN_QUERY_COUNT = 2;
-const MAX_QUERY_COUNT = 4;
-const MAX_QUERY_TERMS = 7;
-const MAX_QUERY_LENGTH = 48;
-
-const SCENE_TERMS = Object.freeze([
-  [/(?:nightlife|bar|ktv|party|夜生活|酒吧|聚会)/iu, "聚会"],
-  [/(?:date|约会)/iu, "约会"],
-  [/(?:travel|旅行|出游)/iu, "出游"],
-  [/(?:commute|work|通勤|工作)/iu, "通勤"],
-  [/(?:daily|日常)/iu, "日常"],
-]);
-
-const FORMALITY_TERMS = Object.freeze([
-  [/(?:^|_)(?:relaxed)(?:$|_)/iu, "休闲"],
-  [/(?:polished_casual)/iu, "休闲时髦"],
-  [/(?:elevated)/iu, "精致利落"],
-  [/(?:formal)/iu, "正式"],
-]);
-
-const VISUAL_DIRECTION_TERMS = Object.freeze([
-  [/(?:clean_or_gently_defined|clean_vertical|precise_proportion)/iu, "利落合身"],
-  [/(?:structured_with_clear_line)/iu, "直筒有型"],
-  [/(?:refined_low_visual_noise)/iu, "简约精致"],
-  [/(?:relaxed_with_visible_structure)/iu, "宽松有型"],
-  [/(?:easy_line_with_controlled_length)/iu, "松弛直线"],
-  [/(?:lightweight_relaxed)/iu, "轻便休闲"],
-  [/(?:defined_focal_shape)/iu, "设计感廓形"],
-  [/(?:supporting_shape_with_clear_proportion)/iu, "比例利落"],
-  [/(?:design_led_but_wearable)/iu, "设计感"],
-  [/(?:balanced_everyday_shape|versatile_balanced_line)/iu, "日常有型"],
-  [/(?:versatile_scene_compatible)/iu, "百搭"],
-]);
-
-const COLOR_TERMS = Object.freeze([
-  [/(?:restrained_harmonious|low_to_medium)/iu, "低饱和"],
-  [/(?:soft_harmonious)/iu, "柔和色系"],
-  [/(?:focused_accent|medium_to_high)/iu, "重点色"],
-  [/(?:versatile_neutral)/iu, "中性色"],
-]);
+const MAX_QUERY_COUNT = 3;
+const MAX_QUERY_TERMS = 3;
+const MAX_QUERY_LENGTH = 24;
 
 function unique(values) {
   return [...new Set((Array.isArray(values) ? values : [values])
@@ -72,36 +36,58 @@ function valuesOf(evidence) {
   return unique(Array.isArray(value) ? value : value == null ? [] : [value]);
 }
 
-function firstMappedTerm(value, rules) {
-  const text = String(value || "");
-  return rules.find(([pattern]) => pattern.test(text))?.[1] || "";
-}
-
 function audienceTerm(gender) {
   const normalized = normalizeGender(gender);
-  if (normalized === "female") return "女士";
-  if (normalized === "male") return "男士";
+  if (normalized === "female") return "女";
+  if (normalized === "male") return "男";
   return "中性";
 }
 
-function categoryTerm(slot, gender) {
+function concreteCategoryTerm(slot, gender, direction) {
   const normalizedGender = normalizeGender(gender);
+  const normalizedDirection = String(direction || "");
+  if (slot === "top") {
+    if (/(?:relaxed|easy|lightweight)/iu.test(normalizedDirection)) return "T恤";
+    return normalizedGender === "female" ? "短袖上衣" :
+      normalizedGender === "male" ? "T恤" : "上衣";
+  }
+  if (slot === "bottom") {
+    if (/(?:easy|relaxed)/iu.test(normalizedDirection)) {
+      return normalizedGender === "female" ? "阔腿裤" : "休闲裤";
+    }
+    if (/(?:supporting_shape|focal)/iu.test(normalizedDirection)) {
+      return normalizedGender === "female" ? "半身裙" : "直筒裤";
+    }
+    return "直筒裤";
+  }
+  if (slot === "shoes") {
+    if (normalizedGender === "female" &&
+        /(?:refined|design_led|focal)/iu.test(normalizedDirection)) {
+      return "单鞋";
+    }
+    return "休闲鞋";
+  }
   const terms = {
-    top: normalizedGender === "female" ? "女装上衣" :
-      normalizedGender === "male" ? "男装上衣" : "上衣",
-    bottom: normalizedGender === "female" ? "女装下装" :
-      normalizedGender === "male" ? "男装裤子" : "下装",
-    shoes: normalizedGender === "female" ? "女鞋" :
-      normalizedGender === "male" ? "男鞋" : "鞋",
     dress: "连衣裙",
-    outerwear: normalizedGender === "female" ? "女装外套" :
-      normalizedGender === "male" ? "男装外套" : "外套",
-    bag: normalizedGender === "male" ? "男包" :
-      normalizedGender === "female" ? "女包" : "包",
+    outerwear: "外套",
+    bag: "包",
     accessory: "配饰",
     socks: "袜子",
   };
   return terms[String(slot || "").toLowerCase()] || String(slot || "服饰");
+}
+
+function broadCategoryTerm(slot) {
+  return {
+    top: "上衣",
+    bottom: "裤子",
+    shoes: "鞋",
+    dress: "连衣裙",
+    outerwear: "外套",
+    bag: "包",
+    accessory: "配饰",
+    socks: "袜子",
+  }[String(slot || "").toLowerCase()] || String(slot || "服饰");
 }
 
 function impressionCommerceTerms(brain) {
@@ -138,10 +124,72 @@ function styleCommerceTerm(style, gender) {
 
 function compactQuery(tokens) {
   const values = unique(tokens).slice(0, MAX_QUERY_TERMS);
-  while (values.join(" ").length > MAX_QUERY_LENGTH && values.length > 3) {
-    values.splice(values.length - 2, 1);
+  while (values.join(" ").length > MAX_QUERY_LENGTH && values.length > 2) {
+    values.pop();
   }
   return values.join(" ");
+}
+
+function strongestSearchableSignal({
+  impressions,
+  direction,
+  styleTerm,
+  statement,
+  slot,
+}) {
+  const values = unique(impressions);
+  const normalizedDirection = String(direction || "");
+  if (slot === "shoes") {
+    if (/(?:design_led|defined_focal|focal)/iu.test(normalizedDirection)) {
+      return "设计感";
+    }
+    if (/(?:relaxed|easy|lightweight)/iu.test(normalizedDirection)) {
+      return "轻便";
+    }
+    return ["时髦", "年轻", "设计感", "精致", "经典"]
+      .find((term) => values.includes(term)) || styleTerm || "百搭";
+  }
+  if (/(?:defined_focal|design_led|focal)/iu.test(normalizedDirection)) {
+    return "设计感";
+  }
+  if (/(?:relaxed|easy|lightweight)/iu.test(normalizedDirection)) return "宽松";
+  if (/(?:clean|structured|refined|precise)/iu.test(normalizedDirection)) {
+    return ["时髦", "年轻", "干净利落", "设计感", "精致", "经典"]
+      .find((term) => values.includes(term)) || styleTerm || "利落";
+  }
+  return values[0] || styleTerm || statementCommerceTerm(statement) || "百搭";
+}
+
+function queryCandidate({
+  rank,
+  queryId,
+  queryType,
+  execution,
+  query,
+  coreCategory,
+  aestheticSignal,
+  fallbackLevel = 0,
+  fallbackReason = null,
+  reasonCodes = [],
+}) {
+  return deepFreeze({
+    rank,
+    query_id: queryId,
+    query_type: queryType,
+    execution,
+    query,
+    core_category: coreCategory,
+    aesthetic_signal: aestheticSignal || null,
+    searchable_signal_budget: {
+      core_category_terms: 1,
+      aesthetic_terms: aestheticSignal ? 1 : 0,
+      max_aesthetic_terms: 1,
+    },
+    fallback_level: fallbackLevel,
+    fallback_reason: fallbackReason,
+    reason_codes: unique(reasonCodes),
+    source_elements: unique([coreCategory, aestheticSignal]),
+  });
 }
 
 function conditionalCommerceNegatives({brain, formality, slot}) {
@@ -207,80 +255,59 @@ function planConceptSearchQueries({
     lookConcept?.style_anchor?.value ||
     lookConcept?.style_anchor?.compatible_with || "",
   );
-  const sceneTerm = firstMappedTerm(scene, SCENE_TERMS);
-  const formalityTerm = firstMappedTerm(formality, FORMALITY_TERMS);
-  const directionTerm = firstMappedTerm(direction, VISUAL_DIRECTION_TERMS);
-  const colorTerm = firstMappedTerm(
-    `${lookConcept?.color_direction?.palette || ""} ` +
-    `${lookConcept?.color_direction?.intensity || ""}`,
-    COLOR_TERMS,
-  );
   const statement = String(
     valueOf(brain.statement_level, lookConcept?.statement_level || ""),
   );
-  const statementTerm = statementCommerceTerm(statement);
   const styleTerm = styleCommerceTerm(style, gender);
   const audience = audienceTerm(gender);
-  const categoryLabel = categoryTerm(category, gender);
+  const categoryLabel = concreteCategoryTerm(category, gender, direction);
+  const broadCategoryLabel = broadCategoryTerm(category);
+  const aestheticSignal = strongestSearchableSignal({
+    impressions,
+    direction,
+    styleTerm,
+    statement,
+    slot: category,
+  });
   const negatives = conditionalCommerceNegatives({brain, formality, slot: category});
-
-  const records = [
-    {
-      query: compactQuery([
-        audience,
-        ...impressions.slice(0, 2),
-        styleTerm,
-        directionTerm || statementTerm,
-        categoryLabel,
-      ]),
-      reason_codes: unique([
-        impressions.length > 0 ? "USER_DESIRED_IMPRESSION" : "",
-        styleTerm ? "STYLE_ANCHOR_NORMALIZED" : "",
-        directionTerm ? "CONCEPT_VISUAL_DIRECTION" : "CONCEPT_STATEMENT_LEVEL",
-      ]),
-    },
-    {
-      query: compactQuery([
-        audience,
-        sceneTerm,
-        formalityTerm,
-        directionTerm,
-        colorTerm,
-        categoryLabel,
-      ]),
-      reason_codes: unique([
-        sceneTerm ? "SCENE_INTENT" : "",
-        formalityTerm ? "FORMALITY" : "",
-        directionTerm ? "SILHOUETTE_OR_FOOTWEAR_DIRECTION" : "",
-        colorTerm ? "COLOR_DIRECTION" : "",
-      ]),
-    },
-  ].filter((record, index, all) => record.query &&
-    all.findIndex((item) => item.query === record.query) === index);
-
-  if (records.length < MIN_QUERY_COUNT) {
-    records.push({
-      query: compactQuery([audience, sceneTerm, statementTerm, categoryLabel]),
-      reason_codes: ["SAFE_COMMERCE_FALLBACK"],
-    });
-  }
-  const queryCandidates = records.slice(0, MAX_QUERY_COUNT).map((record, index) =>
-    deepFreeze({
-      rank: index + 1,
-      query: record.query,
-      reason_codes: record.reason_codes,
-      source_elements: unique([
-        ...impressions,
-        sceneTerm,
-        formalityTerm,
-        directionTerm,
-        colorTerm,
-        styleTerm,
-      ]),
-    }));
+  const q1 = compactQuery([audience, categoryLabel]);
+  const q2 = compactQuery([audience, categoryLabel, aestheticSignal]);
+  const q3 = compactQuery([audience, broadCategoryLabel]);
+  const queryCandidates = [
+    queryCandidate({
+      rank: 1,
+      queryId: "Q1",
+      queryType: "HIGH_RECALL",
+      execution: "DEFAULT",
+      query: q1,
+      coreCategory: categoryLabel,
+      reasonCodes: ["GENDER_AND_CONCRETE_CATEGORY"],
+    }),
+    queryCandidate({
+      rank: 2,
+      queryId: "Q2",
+      queryType: "INTENT",
+      execution: "DEFAULT",
+      query: q2,
+      coreCategory: categoryLabel,
+      aestheticSignal,
+      reasonCodes: ["ONE_STRONGEST_SEARCHABLE_SIGNAL"],
+    }),
+  ];
   if (queryCandidates.length < MIN_QUERY_COUNT) {
     throw new TypeError("Concept Search Query Plan requires at least two queries");
   }
+  const fallbackQuery = queryCandidate({
+    rank: 3,
+    queryId: "Q3",
+    queryType: "BROAD_CATEGORY_FALLBACK",
+    execution: "ON_Q1_Q2_ZERO",
+    query: q3,
+    coreCategory: broadCategoryLabel,
+    fallbackLevel: 2,
+    fallbackReason: "INTENT_AND_HIGH_RECALL_ZERO",
+    reasonCodes: ["BROAD_CATEGORY_FALLBACK"],
+  });
 
   return deepFreeze({
     version: CONCEPT_SEARCH_QUERY_PLANNER_VERSION,
@@ -296,15 +323,32 @@ function planConceptSearchQueries({
       statement_level: valueOf(brain.statement_level, lookConcept?.statement_level),
     },
     query_candidates: queryCandidates,
+    fallback_query: fallbackQuery,
     commerce_negatives: unique([...negatives.hard, ...negatives.contextual]),
     hard_gate_negatives: negatives.hard,
     contextual_negatives: negatives.contextual,
     trace: {
-      semantic_compiler: "zh-CN_commerce_v1",
+      semantic_compiler: "zh-CN_recall_precision_v2",
       abstract_tokens_sent: false,
+      searchable_signal_budget: {
+        core_category_required: true,
+        max_aesthetic_terms: 1,
+      },
+      default_query_ids: ["Q1", "Q2"],
+      fallback_query_id: "Q3",
+      excluded_from_query: {
+        avoid: valuesOf(brain.explicit_avoid),
+        scene,
+        formality,
+        color: lookConcept?.color_direction || null,
+        body_fit: bodyFitProfile?.version ? "DOWNSTREAM_SOFT_SIGNAL" : "UNAVAILABLE",
+        quality: lookConcept?.quality_direction || null,
+        market: marketPreference || valueOf(brain.trend_preference),
+      },
       body_fit_signal: bodyFitProfile?.version ? "AVAILABLE_SOFT" : "UNAVAILABLE",
       market_preference: marketPreference || valueOf(brain.trend_preference),
-      query_count: queryCandidates.length,
+      default_query_count: queryCandidates.length,
+      maximum_query_count: queryCandidates.length + 1,
     },
   });
 }

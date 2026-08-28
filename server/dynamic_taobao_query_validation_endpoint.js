@@ -8,7 +8,7 @@ const {interpretUserIntent} = require("./user_intent_brain");
 
 const DYNAMIC_TAOBAO_QUERY_VALIDATION_PATH =
   "/internal/probes/taobao-query-planning-v1";
-const QUERY_PLAN_VERSION = "concept_search_query_planner.v1";
+const QUERY_PLAN_VERSION = "concept_search_query_planner.v2";
 const INTERNAL_PROBE_TOKEN_MIN_LENGTH = 32;
 const MAX_TITLES_PER_QUERY = 5;
 
@@ -72,6 +72,7 @@ async function executeDynamicTaobaoQueryValidation({
   logger = console,
 } = {}) {
   const captures = new Map();
+  let activeCaptureScope = "";
   const provider = providerFactory({
     environment: {
       ...environment,
@@ -83,11 +84,11 @@ async function executeDynamicTaobaoQueryValidation({
     visualVerifier: null,
     rawCapture: ({query, products, responseSummary}) => {
       const normalizedQuery = String(query || "").trim();
-      if (!normalizedQuery) return;
+      if (!normalizedQuery || !activeCaptureScope) return;
       const titles = (Array.isArray(products) ? products : [])
         .map((product) => String(product?.text?.title || "").trim())
         .filter(Boolean);
-      captures.set(normalizedQuery, Object.freeze({
+      captures.set(captureKey(activeCaptureScope, normalizedQuery), Object.freeze({
         result_count: Array.isArray(products) ? products.length : 0,
         titles: Object.freeze(titles.slice(0, MAX_TITLES_PER_QUERY)),
         request_id_present: Boolean(responseSummary?.requestId),
@@ -107,24 +108,30 @@ async function executeDynamicTaobaoQueryValidation({
     const compiled = compileLookConceptPortfolio(decisionContext);
     const requirements = compiled.requirements;
     for (const requirement of requirements) {
+      const captureScope = requirement.slot_key ||
+        `${requirement.concept_id}:${requirement.category}`;
+      activeCaptureScope = captureScope;
       try {
         await provider.recommendForQueries([requirement], {
           requestId: `${decisionContext.request_id}:${requirement.slot_key}`,
         });
       } catch (error) {
         const hasCapturedRecall = requirement.search_keywords.some((query) =>
-          captures.has(query));
+          captures.has(captureKey(captureScope, query)));
         if (!hasCapturedRecall) throw error;
         logger.warn?.("dynamic_query_downstream_ignored_after_raw_capture", {
           category: requirement.category,
           errorCode: safeErrorCode(error),
         });
+      } finally {
+        activeCaptureScope = "";
       }
     }
     cases.push(summarizeCase(definition, decisionContext, compiled, captures));
   }
 
   const queryCount = cases.reduce((sum, entry) => sum + entry.query_count, 0);
+  const fallbackCount = cases.reduce((sum, entry) => sum + entry.fallback_count, 0);
   return Object.freeze({
     validation_status: "SUCCESS",
     provider: "taobao",
@@ -132,8 +139,10 @@ async function executeDynamicTaobaoQueryValidation({
     query_plan_version: QUERY_PLAN_VERSION,
     case_count: cases.length,
     query_count: queryCount,
+    fallback_count: fallbackCount,
     limits: Object.freeze({
-      queries_per_slot: 2,
+      default_queries_per_slot: 2,
+      fallback_queries_per_slot_max: 1,
       page_size_max: 8,
       page_count: 1,
       title_sample_per_query: MAX_TITLES_PER_QUERY,
@@ -274,38 +283,75 @@ function summarizeCase(definition, context, compiled, captures) {
   const concepts = compiled.looks.map((look) => Object.freeze({
     concept_id: look.concept_id,
     concept_name: look.concept.concept_name,
-    slots: Object.freeze(look.items.map((requirement) => Object.freeze({
-      slot: requirement.category,
-      intent: Object.freeze({
-        desired_impression: valuesOf(brain.desired_impression),
-        formality: valueOf(brain.formality_preference),
-        avoid: valuesOf(brain.explicit_avoid),
-        statement_level: valueOf(brain.statement_level),
-        style_flexibility: valueOf(brain.style_flexibility),
-      }),
-      avoid: Object.freeze([
-        ...(requirement.commerce_query_plan?.commerce_negatives || []),
-      ]),
-      queries: Object.freeze(requirement.search_keywords.map((query) => {
-        const capture = captures.get(query) || {result_count: 0, titles: []};
-        return Object.freeze({
-          q: query,
-          result_count: capture.result_count,
-          titles: Object.freeze([...capture.titles]),
-          quality: qualitySignals(definition.case_id, capture.titles),
-        });
-      })),
-    }))),
+    slots: Object.freeze(look.items.map((requirement) =>
+      summarizeSlot(definition, brain, requirement, captures))),
   }));
+  const slots = concepts.flatMap((concept) => concept.slots);
   return Object.freeze({
     case_id: definition.case_id,
     gender: definition.gender,
     scene: definition.scene,
     raw_user_input: definition.raw_user_input,
-    query_count: concepts.reduce((sum, concept) => sum +
-      concept.slots.reduce((slotSum, slot) => slotSum + slot.queries.length, 0), 0),
+    query_count: slots.reduce((sum, slot) => sum +
+      slot.queries.filter(({executed}) => executed).length, 0),
+    fallback_count: slots.filter(({fallback_used}) => fallback_used).length,
     concepts: Object.freeze(concepts),
   });
+}
+
+function summarizeSlot(definition, brain, requirement, captures) {
+  const plan = requirement.commerce_query_plan || {};
+  const planEntries = [
+    ...(Array.isArray(plan.query_candidates) ? plan.query_candidates : []),
+    plan.fallback_query,
+  ].filter(Boolean);
+  const captureScope = requirement.slot_key ||
+    `${requirement.concept_id}:${requirement.category}`;
+  const queries = planEntries.map((entry) => {
+    const capture = captures.get(captureKey(captureScope, entry.query));
+    return Object.freeze({
+      query_id: entry.query_id,
+      query_type: entry.query_type,
+      execution: entry.execution,
+      q: entry.query,
+      executed: Boolean(capture),
+      result_count: Number(capture?.result_count || 0),
+      titles: Object.freeze([...(capture?.titles || [])]),
+      aesthetic_signal: entry.aesthetic_signal || null,
+      searchable_signal_budget: entry.searchable_signal_budget,
+      fallback_level: Number(entry.fallback_level || 0),
+      fallback_reason: entry.fallback_reason || null,
+      quality: qualitySignals(definition.case_id, capture?.titles || []),
+    });
+  });
+  const q1 = queries.find(({query_id: id}) => id === "Q1");
+  const q2 = queries.find(({query_id: id}) => id === "Q2");
+  const q3 = queries.find(({query_id: id}) => id === "Q3");
+  const fallbackLevel = q3?.executed ? 2 :
+    q2?.executed && q2.result_count === 0 && (q1?.result_count || 0) > 0 ? 1 : 0;
+  return Object.freeze({
+    slot: requirement.category,
+    intent: Object.freeze({
+      desired_impression: valuesOf(brain.desired_impression),
+      formality: valueOf(brain.formality_preference),
+      avoid: valuesOf(brain.explicit_avoid),
+      statement_level: valueOf(brain.statement_level),
+      style_flexibility: valueOf(brain.style_flexibility),
+    }),
+    avoid: Object.freeze([
+      ...(plan.commerce_negatives || []),
+    ]),
+    fallback_used: fallbackLevel > 0,
+    fallback_level: fallbackLevel,
+    fallback_reason: fallbackLevel === 2
+      ? "INTENT_AND_HIGH_RECALL_ZERO"
+      : fallbackLevel === 1 ? "INTENT_QUERY_ZERO" : null,
+    queries: Object.freeze(queries),
+  });
+}
+
+function captureKey(scope, query) {
+  return `${String(scope || "").trim()}|${String(query || "").trim()}`;
 }
 
 function qualitySignals(caseId, titles) {

@@ -420,26 +420,13 @@ function normalizeCommerceQueryPlan(value) {
     throw new TypeError("commerce_query_plan must be an object");
   }
   const candidates = Array.isArray(value.query_candidates)
-    ? value.query_candidates.slice(0, 4).map((entry, index) => {
-      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-        throw new TypeError("commerce_query_plan candidates must be objects");
-      }
-      return {
-        rank: Number.isInteger(Number(entry.rank)) ? Number(entry.rank) : index + 1,
-        query: optionalLooseText(entry.query),
-        reason_codes: normalizeStringList(
-          entry.reason_codes || [],
-          "commerce_query_plan.reason_codes",
-          12,
-        ),
-        source_elements: normalizeStringList(
-          entry.source_elements || [],
-          "commerce_query_plan.source_elements",
-          20,
-        ),
-      };
-    }).filter(({query}) => query)
+    ? value.query_candidates.slice(0, 4)
+      .map((entry, index) => normalizeCommerceQueryEntry(entry, index))
+      .filter(({query}) => query)
     : [];
+  const fallbackQuery = value.fallback_query == null
+    ? null
+    : normalizeCommerceQueryEntry(value.fallback_query, candidates.length);
   return {
     version: optionalLooseText(value.version),
     concept_id: optionalLooseText(value.concept_id),
@@ -447,6 +434,7 @@ function normalizeCommerceQueryPlan(value) {
     gender: normalizeGender(value.gender),
     scene: optionalLooseText(value.scene),
     query_candidates: candidates,
+    fallback_query: fallbackQuery?.query ? fallbackQuery : null,
     commerce_negatives: normalizeStringList(
       value.commerce_negatives || [],
       "commerce_query_plan.commerce_negatives",
@@ -460,6 +448,42 @@ function normalizeCommerceQueryPlan(value) {
     contextual_negatives: normalizeStringList(
       value.contextual_negatives || [],
       "commerce_query_plan.contextual_negatives",
+      20,
+    ),
+  };
+}
+
+function normalizeCommerceQueryEntry(entry, index) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new TypeError("commerce_query_plan candidates must be objects");
+  }
+  const budget = entry.searchable_signal_budget;
+  return {
+    rank: Number.isInteger(Number(entry.rank)) ? Number(entry.rank) : index + 1,
+    query_id: optionalLooseText(entry.query_id),
+    query_type: optionalLooseText(entry.query_type),
+    execution: optionalLooseText(entry.execution),
+    query: optionalLooseText(entry.query),
+    core_category: optionalLooseText(entry.core_category),
+    aesthetic_signal: optionalLooseText(entry.aesthetic_signal),
+    searchable_signal_budget: budget && typeof budget === "object" &&
+        !Array.isArray(budget)
+      ? {
+        core_category_terms: Math.max(0, Number(budget.core_category_terms) || 0),
+        aesthetic_terms: Math.max(0, Number(budget.aesthetic_terms) || 0),
+        max_aesthetic_terms: Math.max(0, Number(budget.max_aesthetic_terms) || 0),
+      }
+      : null,
+    fallback_level: Math.max(0, Number(entry.fallback_level) || 0),
+    fallback_reason: optionalLooseText(entry.fallback_reason),
+    reason_codes: normalizeStringList(
+      entry.reason_codes || [],
+      "commerce_query_plan.reason_codes",
+      12,
+    ),
+    source_elements: normalizeStringList(
+      entry.source_elements || [],
+      "commerce_query_plan.source_elements",
       20,
     ),
   };
