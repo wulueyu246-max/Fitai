@@ -15,6 +15,10 @@ function bodyStrategyEvidence(blueprint = {}, context = {}) {
   const stylingStrategy = context.styling_strategy || context.stylingStrategy ||
     context.outfit_plan?.styling_strategy ||
     context.recommendation_context?.styling_strategy || {};
+  const bodyFitProfile = context.body_fit_profile ||
+    context.user_profile?.body_fit_profile ||
+    context.user_requirements?.body_fit_profile ||
+    context.decision_context?.body_fit_profile || {};
   return flattenText([
     blueprint.core_elements,
     blueprint.visual_keywords,
@@ -27,6 +31,12 @@ function bodyStrategyEvidence(blueprint = {}, context = {}) {
     stylingStrategy.bottom_strategy,
     stylingStrategy.shoe_strategy,
     stylingStrategy.silhouette_strategy,
+    context.body_fit_soft_signals,
+    bodyFitProfile.proportion_goals,
+    bodyFitProfile.garment_preferences,
+    bodyFitProfile.fit_prefer,
+    bodyFitProfile.trace?.proportion_goals,
+    bodyFitProfile.trace?.garment_preferences,
   ]).join(" ").toLowerCase();
 }
 
@@ -47,10 +57,13 @@ function bodyStrategyMatchAssessment(
   blueprint = {},
   context = {},
 ) {
-  const strategy = bodyStrategyEvidence(blueprint, context);
+  const strategy = bodyStrategyEvidence(blueprint, {
+    ...context,
+    body_fit_soft_signals: requirement.body_fit_soft_signals,
+  });
   const evidence = productEvidence(product, requirement);
   const category = String(requirement.category || product.category || "").toLowerCase();
-  const raiseWaistline = /提高腰线|高腰|显腿长|延长腿|腿部延长|纵向延伸|elongate_legs|raise_visual_waistline|create_vertical_line/u
+  const raiseWaistline = /提高腰线|高腰|显腿长|延长腿线|腿部延伸|纵向延伸|elongate_legs|raise_visual_waistline|create_vertical_line/u
     .test(strategy);
   if (!raiseWaistline) {
     return Object.freeze({
@@ -77,23 +90,23 @@ function bodyStrategyMatchAssessment(
 
   if (category === "top") {
     reward(/短款|露腰/u, "短款上衣", 20);
-    reward(/合身|修身|收腰/u, "合身收腰", 15);
-    penalize(/盖臀|遮臀/u, "盖臀长上衣", 45);
-    if (/长款|中长款/u.test(evidence) && /宽松|oversize|廓形/u.test(evidence)) {
+    reward(/收腰|修身|合身/u, "合身收腰", 15);
+    penalize(/盖臀|长款/u, "盖臀长上衣", 45);
+    if (/长款|中长款/u.test(evidence) && /宽松|oversize|遮臀/u.test(evidence)) {
       score -= 35;
-      conflicts.push("宽松长款上衣");
+      conflicts.push("宽松盖臀长上衣");
     }
   } else if (category === "bottom") {
     reward(/高腰|中高腰/u, "高腰", 30);
-    reward(/直筒|垂坠|纵向|显腿长/u, "纵向延伸", 15);
-    reward(/a字|收腰/u, "腰线塑造", 10);
+    reward(/直筒|垂坠|垂感|显腿长/u, "纵向延伸", 15);
+    reward(/a字|九分/ui, "合理下装长度", 10);
     penalize(/低腰/u, "低腰", 55);
     penalize(/拖地/u, "拖地裤", 25);
   } else if (category === "shoes") {
     reward(/浅口/u, "浅口", 15);
     reward(/尖头|杏仁头/u, "延长鞋头", 15);
     reward(/低跟|中低跟|3cm|4cm|5cm|6cm/u, "适度跟高", 10);
-    if (/高帮/u.test(evidence) && /厚重|笨重|重型|厚底/u.test(evidence)) {
+    if (/高帮/u.test(evidence) && /厚重|粗重|厚底|笨重/u.test(evidence)) {
       score -= 50;
       conflicts.push("厚重高帮鞋");
     }

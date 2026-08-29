@@ -90,6 +90,11 @@ const NON_FASHION_PRODUCT_TERMS = Object.freeze([
   "清洁剂", "垃圾袋", "母婴", "奶粉", "尿不湿", "宠物", "猫粮", "狗粮",
   "手机", "耳机", "充电器", "数据线", "数码", "家居", "家具", "收纳箱",
   "口红", "粉底", "面膜", "护肤", "美妆", "日用品", "生活用品",
+  "除湿帽", "干发帽", "蒸发帽", "焗油帽", "染发帽", "浴帽", "洗头帽",
+  "防尘帽", "无尘帽", "工作帽", "一次性帽", "一次性头套", "医用帽",
+  "孕妇", "产妇", "月子", "孕产", "防风帽", "睡帽", "厨师帽", "医疗帽",
+  "安全帽", "头套", "护耳罩", "工具包", "保温包", "收纳包", "收纳袋",
+  "防水袋", "妈咪包", "护理用品", "家居用品",
 ]);
 
 const CORE_OUTFIT_CATEGORIES = Object.freeze([
@@ -200,6 +205,46 @@ function normalizeGender(value) {
     return "female";
   }
   return "unisex";
+}
+
+function normalizeCandidateGender(value) {
+  const normalized = normalizeText(value);
+  if (/^(male|man|men)$/.test(normalized) || /男性|男士|男生|^男$/.test(normalized)) {
+    return "male";
+  }
+  if (/^(female|woman|women)$/.test(normalized) || /女性|女士|女生|^女$/.test(normalized)) {
+    return "female";
+  }
+  if (/^(unisex|neutral)$/.test(normalized) || /中性|男女同款|男女款|男女可穿/.test(normalized)) {
+    return "unisex";
+  }
+  return "unknown";
+}
+
+function authoritativeProductGender(product = {}) {
+  const explicit = normalizeCandidateGender(
+    product.original_gender ?? product.originalGender ?? product.gender,
+  );
+  if (explicit !== "unknown") return explicit;
+  const evidence = normalizeText([
+    product.title,
+    product.name,
+    product._category_text,
+    product.category,
+    ...(Array.isArray(product.tags) ? product.tags : []),
+  ].filter(Boolean).join(" "));
+  const male = containsAny(evidence, GENDER_TERMS.male);
+  const female = containsAny(evidence, GENDER_TERMS.female) ||
+    containsAny(evidence, ["连衣裙", "半身裙", "女式", "女性版型"]);
+  const explicitlyUnisex = containsAny(evidence, [
+    "中性", "男女同款", "男女款", "男女可穿",
+  ]);
+  if (explicitlyUnisex) return "unisex";
+  // “情侣”本身可以表示 unisex，但不能抹掉标题中明确的单一性别。
+  if (containsAny(evidence, ["情侣"]) && !male && !female) return "unisex";
+  if (male && !female) return "male";
+  if (female && !male) return "female";
+  return "unknown";
 }
 
 function normalizeProductCategory(value) {
@@ -317,6 +362,16 @@ function normalizeProductRequirement(input = {}, context = {}) {
     "avoid_attributes",
     20,
   );
+  const bodyFitSoftSignals = normalizeStringList(
+    input.body_fit_soft_signals || input.bodyFitSoftSignals || [],
+    "body_fit_soft_signals",
+    20,
+  );
+  const marketSoftSignals = normalizeStringList(
+    input.market_soft_signals || input.marketSoftSignals || [],
+    "market_soft_signals",
+    12,
+  );
   return {
     request_id: optionalText(
       input.request_id || input.requestId || context.request_id || context.requestId,
@@ -360,6 +415,12 @@ function normalizeProductRequirement(input = {}, context = {}) {
     required_attributes: requiredAttributes,
     preferred_attributes: preferredAttributes,
     avoid_attributes: avoidAttributes,
+    body_fit_soft_signals: bodyFitSoftSignals,
+    market_soft_signals: marketSoftSignals,
+    market_influence_cap: Math.max(0, Math.min(
+      0.08,
+      Number(input.market_influence_cap || input.marketInfluenceCap || 0) || 0,
+    )),
     color: optionalText(colors[0] || input.color || context.color, "color"),
     material: optionalText(
       materials[0] || input.material || context.material,
@@ -371,7 +432,8 @@ function normalizeProductRequirement(input = {}, context = {}) {
     fit: optionalText(input.fit || context.fit, "fit"),
     search_keywords: searchKeywords,
     query_plan_version: optionalLooseText(
-      input.query_plan_version || input.queryPlanVersion || commerceQueryPlan?.version,
+      input.query_plan_version || input.queryPlanVersion ||
+      commerceQueryPlan?.version,
     ),
     commerce_query_plan: commerceQueryPlan,
     negative_keywords: uniqueStrings([
@@ -670,7 +732,11 @@ function rankProducts(products, input = {}, searchKeyword = "", options = {}) {
     ? Number(options.minimumScore)
     : requirement.gender === "unisex" ? 0 : 50;
   return (Array.isArray(products) ? products : [])
-    .map((product) => scoreProduct(product, requirement, searchKeyword))
+    .map((product) => scoreProduct(
+      product,
+      requirement,
+      product?.search_keyword || searchKeyword,
+    ))
     .filter(Boolean)
     .map((product) => ({
       ...product,
@@ -686,11 +752,28 @@ function scoreProduct(product, requirement, searchKeyword = "") {
   const negativeKeywordConflict = containsNegativeKeyword(title, requirement);
   const qualityBlock = productQualityBlock(product, requirement);
 
+  const originalGender = authoritativeProductGender(product);
+  const rawOriginalCategory = normalizeText(
+    product?.original_category || product?.category,
+  );
+  const originalCategory = rawOriginalCategory === "socks"
+    ? "socks"
+    : normalizeProductCategory(rawOriginalCategory) || requirement.category;
+  const structuredEvidence = normalizeText([
+    title,
+    product?.style,
+    product?.color,
+    product?.color_label,
+    product?.season,
+    ...(Array.isArray(product?.tags) ? product.tags : []),
+  ].filter(Boolean).join(" "));
   let score = 35;
-  if (matchesGender(title, requirement.gender)) score += 20;
-  if (matchesColor(title, requirement.color)) score += 15;
-  if (matchesStyle(title, requirement.style, requirement.fit)) score += 10;
-  if (matchesSeason(title, requirement.season)) score += 5;
+  if (originalGender === requirement.gender) score += 20;
+  else if (originalGender === "unisex") score += 10;
+  else if (matchesGender(title, requirement.gender)) score += 20;
+  if (matchesColor(structuredEvidence, requirement.color)) score += 15;
+  if (matchesStyle(structuredEvidence, requirement.style, requirement.fit)) score += 10;
+  if (matchesSeason(structuredEvidence, requirement.season)) score += 5;
   score += Math.min(keywordOverlapScore(title, searchKeyword, requirement), 15);
   score += categoryPriorityScore(requirement.category);
   if (title.includes("同款")) score -= 10;
@@ -699,10 +782,13 @@ function scoreProduct(product, requirement, searchKeyword = "") {
   return {
     ...publicProduct,
     look_id: requirement.look_id,
-    category: requirement.category,
+    category: originalCategory,
+    original_category: originalCategory,
     search_subcategory: requirement.search_subcategory,
     semantic_match: true,
-    gender: requirement.gender,
+    gender: originalGender,
+    original_gender: originalGender,
+    requested_gender: requirement.gender,
     search_keyword: normalizeWhitespace(searchKeyword),
     relevance_score: Math.min(score, 100),
     relevance_negative_conflict: negativeKeywordConflict,
@@ -931,6 +1017,8 @@ module.exports = {
   categoryPriority,
   matchesTargetCategory,
   normalizeGender,
+  normalizeCandidateGender,
+  authoritativeProductGender,
   normalizeProductCategory,
   normalizeProductRequirement,
   normalizeSearchSubcategory,

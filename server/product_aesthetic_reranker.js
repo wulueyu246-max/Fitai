@@ -5,28 +5,61 @@ const {
   semanticCategoryMatch,
 } = require("./product_relevance");
 const {
-  PRODUCT_INTENT_WEIGHTS,
+  evaluateStyleGate,
+  hasActionableStyleConstraints,
   intentDebugSummary,
   resolveIntentPriorityScore,
+  shouldRejectForStyle,
   styleMatchScore,
 } = require("./intent_priority");
-const {blueprintMatchAssessment} = require("./outfit_blueprint");
+const {
+  blueprintMatchAssessment,
+  blueprintMatchPassesHardGate,
+} = require("./outfit_blueprint");
+const {
+  resolveAestheticTargetProfile,
+} = require("./style_intelligence");
 
 const DEFAULT_SELECTION_LIMIT = 6;
+const MAX_SELECTION_LIMIT = 6;
 const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000;
 const DEFAULT_CACHE_ENTRIES = 100;
-const DEFAULT_VISUAL_CANDIDATES_PER_GROUP = 4;
-const MAX_CANDIDATES_PER_LOOK = 16;
+const DEFAULT_VISUAL_CANDIDATES_PER_GROUP = 8;
+const MAX_CANDIDATES_PER_LOOK = 48;
 const MAX_PRODUCT_AI_MS = 20_000;
 const MAX_VISUAL_IMAGES_PER_REQUEST = 40;
 const HIGH_QUALITY_BRAND_SCORE = 65;
-const BLUEPRINT_PRODUCT_WEIGHTS = Object.freeze({
-  blueprint: 40,
-  style: 20,
-  quality: 15,
-  visual: 10,
-  brand: 10,
-  weather: 5,
+const CALIBRATED_PRODUCT_WEIGHTS = Object.freeze({
+  style_fit: 0.34,
+  occasion_fit: 0.13,
+  silhouette_fit: 0.09,
+  color_fit: 0.06,
+  footwear_fit: 0.08,
+  quality_fit: 0.10,
+  gender_fit: 0.06,
+  relevance: 0.06,
+  blueprint: 0.04,
+  aesthetic: 0.02,
+  visual: 0.01,
+  body: 0.01,
+});
+const RERANKER_CALIBRATION_VERSION = "universal_aesthetic_reranker_v1";
+const QUALITY_TIER_VALUE = Object.freeze({
+  budget: 0.25,
+  standard: 0.5,
+  mid: 0.65,
+  premium: 0.82,
+  luxury: 1,
+});
+const SCENE_COMPATIBILITY = Object.freeze({
+  date: Object.freeze(["daily", "party"]),
+  daily: Object.freeze(["date", "travel", "commute"]),
+  commute: Object.freeze(["work", "daily"]),
+  work: Object.freeze(["commute", "daily"]),
+  ktv: Object.freeze(["party", "date"]),
+  party: Object.freeze(["ktv", "date"]),
+  travel: Object.freeze(["daily"]),
+  formal_event: Object.freeze(["party", "work"]),
 });
 
 const BRAND_TIERS = Object.freeze({
@@ -62,6 +95,9 @@ const NEGATIVE_TITLE_QUALITY_TERMS = Object.freeze([
 const STRONG_IMAGE_QUALITY_HINTS = new Set([
   "white_background", "model_display", "official",
 ]);
+const FEMININE_DRESS_SCENE_PATTERN = /约会|甜美|高级|优雅|法式|浪漫|精致|date|sweet|elegant|premium|romantic/i;
+const DRESS_DESIGN_DETAIL_PATTERN = /收腰|高腰|腰封|裹身|不对称|立体剪裁|褶裥|拼接|荷叶边|方领|v领|泡泡袖|开衩|鱼尾|a字|伞摆|百褶|提花|蕾丝|刺绣|廓形/i;
+const BASIC_DRESS_PATTERN = /纯色|基础款|基本款|普通款|简约基础|通勤基础/i;
 
 class ProductAestheticReranker {
   constructor({
@@ -123,14 +159,30 @@ class ProductAestheticReranker {
   }
 
   async rerank({groups, context = {}, requestId = "", selectionLimit = DEFAULT_SELECTION_LIMIT}) {
+    const gateProfile = contextStyleProfile(context);
+    const gatePriority = resolveIntentPriorityScore(gateProfile);
+    for (const group of Array.isArray(groups) ? groups : []) {
+      for (const product of Array.isArray(group?.candidates) ? group.candidates : []) {
+        const gate = evaluateStyleGate(product, gateProfile, gatePriority);
+        if (!gate.allowed) {
+          this.logger.info?.("Style Gate rejected candidate", {
+            title: product.title,
+            category: group?.requirement?.category || product.category,
+            style_conflict: true,
+            matched_negative_keywords: gate.matched_negative_keywords,
+            intent_priority_score: gate.intent_priority_score,
+          });
+        }
+      }
+    }
     const qualityBlocks = collectQualityBlocks(groups);
     if (qualityBlocks.length > 0) {
-      this.logger.info?.("商品质量排序标注", {
+      this.logger.warn?.("商品质量过滤", {
         requestId: requestId || undefined,
         stage: "ai_reranker",
         blocked_category: [...new Set(qualityBlocks.map((item) => item.blocked_category))],
         blocked_keyword: [...new Set(qualityBlocks.map((item) => item.blocked_keyword))],
-        warningCount: qualityBlocks.length,
+        blockedCount: qualityBlocks.length,
       });
     }
     const prefilterCount = (Array.isArray(groups) ? groups : []).reduce(
@@ -397,10 +449,14 @@ class ProductAestheticReranker {
 function buildMessages(groups, context) {
   const styleProfile = contextStyleProfile(context);
   const outfitBlueprint = contextOutfitBlueprint(context);
+  const aestheticTarget = contextAestheticTarget(
+    context,
+    (Array.isArray(groups) ? groups : []).map((group) => group?.requirement),
+  );
   const payload = {
     intent_priority_score: resolveIntentPriorityScore(styleProfile),
-    product_intent_weights: PRODUCT_INTENT_WEIGHTS,
-    blueprint_product_weights: BLUEPRINT_PRODUCT_WEIGHTS,
+    calibrated_product_weights: CALIBRATED_PRODUCT_WEIGHTS,
+    aesthetic_target_profile: aestheticTarget,
     outfit_blueprint: outfitBlueprint,
     user_profile: compactProfile(context.user_profile || context.userProfile || {
       gender: context.gender,
@@ -441,6 +497,14 @@ function buildMessages(groups, context) {
         brand: product.brand,
         shop_name: product.shop_name,
         material: product.material,
+        category: product.category,
+        subcategory: product.subcategory,
+        original_gender: product.original_gender || product.gender,
+        style: product.style,
+        style_tags: product.style_tags,
+        occasion_tags: product.occasion_tags || product.occasions,
+        color: product.color,
+        quality_tier: product.quality_tier,
         sales: product.sales,
         relevance_score: product.relevance_score,
         catalog_aesthetic_score: product.catalog_aesthetic_score,
@@ -458,6 +522,13 @@ function buildMessages(groups, context) {
         matched_elements: product.matched_elements,
         conflict_elements: product.conflict_elements,
         style_match_score: product.style_match_score,
+        style_fit_score: product.style_fit_score,
+        occasion_fit_score: product.occasion_fit_score,
+        color_fit_score: product.color_fit_score,
+        silhouette_fit_score: product.silhouette_fit_score,
+        footwear_fit_score: product.footwear_fit_score,
+        quality_fit_score: product.quality_fit_score,
+        gender_fit_score: product.gender_fit_score,
         budget_preference_score: product.budget_preference_score,
         budget_note: product.budget_note,
         aesthetic_quality_flags: product.aesthetic_quality_flags,
@@ -472,15 +543,17 @@ function buildMessages(groups, context) {
         "All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.",
         "Never select underwear, bras, sleepwear, homewear, adult products, shapewear, or swimwear unless explicit_user_search is true. Socks or hosiery are allowed only when the concrete outfit_blueprint requires them.",
         "Prioritize top, bottom, shoes, outerwear, dress, and bag over accessory, underwear, and homewear.",
-        "Prioritize brand tiers S, A, and credible original/designer B over ordinary or unbranded C products. Use brand_quality_score as an independent ranking signal.",
+        "For female date, sweet, elegant, premium, or romantic dress requirements, rank visible tailoring, a defined waistline, considered skirt shape, and refined feminine design details above generic solid-color basic dresses. Do not apply this preference to explicitly neutral or unisex intent.",
+        "For hats, bags, and accessories, exclude maternity, household, protective, storage, medical, workwear, and other non-fashion utility products even when their marketplace category superficially matches.",
+        "Brand is only a weak secondary tie-breaker after aesthetic target fit. A known brand must never outrank a severe style or occasion mismatch.",
         "Never select titles containing manufacturer/wholesale/clearance/viral bargain/street stall/student budget/copy/replica/high replica marketing terms. Only use brand_fallback products when stronger branded candidates are insufficient.",
         "Treat item_budget and outfit_budget as soft preferences for brand choice, price ranking, value assessment, and recommendation reasons; never use them as hard filters.",
         "A slightly over-budget product may be selected when its quality or outfit fit justifies it, but the reason must clearly explain that tradeoff.",
         "Use styling_strategy plus every Look's styling_goal and proportion_strategy as the source of truth for body-proportion fit.",
-        "Use style_semantics and style_profile as the sole source of truth for style_match. Do not reinterpret raw user wording.",
+        "Use aesthetic_target_profile as the primary source of truth for style, occasion, color, silhouette, footwear, quality, and gender fit. Legacy style_semantics/style_profile are fallback context only.",
         "Treat outfit_blueprint as the highest-priority source of truth for what the outfit contains. Marketplace inventory only supplies the concrete items already decided by the blueprint.",
-        "Never select an avoid_items conflict. blueprint_match_score has the highest final ranking weight; image quality, sales, brand, or variety cannot override a poor blueprint match.",
-        "For final product selection, use blueprint_product_weights exactly: blueprint_match is the highest signal, followed by relevance and quality; diversity is only a light penalty.",
+        "Never select an avoid_items conflict. Blueprint remains a hard contract, but among valid candidates aesthetic_target_profile fit determines ranking; image quality, sales, brand, or variety cannot override poor target fit.",
+        "Use calibrated_product_weights for ranking. Diversity and brand are tie-breakers only, never core aesthetic signals.",
         "Weather is a weak functional constraint only. It may affect waterproofing, breathability, sole, or material, but must never replace the requested style.",
         "Every selected product must include style_match_score and weather_match_score from 0 to 100. If intent_priority_score is above 80, never select a product with style_match_score below 50.",
         "A strong conflict with must_express, must_avoid, silhouette, preferred materials, or continuous style dimensions is disqualifying; brand or image quality cannot override it.",
@@ -637,13 +710,8 @@ function applyVisualAssessments(groups, payload) {
         ...(assessments.get(`${requirementIndex}:${product.product_id}`) ||
           assessments.get(`id:${product.product_id}`) ||
           visualAssessmentDefaults(product)),
-        commercial_ad_warning: Number(
-          assessments.get(`${requirementIndex}:${product.product_id}`)?.commercial_ad_penalty ||
-          assessments.get(`id:${product.product_id}`)?.commercial_ad_penalty ||
-          product.commercial_ad_penalty ||
-          0,
-        ) >= 60,
       }))
+      .filter((product) => product.commercial_ad_penalty < 60)
       .sort((left, right) => candidateQualityPrior(right) - candidateQualityPrior(left)),
   }));
 }
@@ -732,6 +800,36 @@ function contextStyleSemantics(context = {}) {
     context.outfitPlan?.styleSemantics || {};
 }
 
+function contextAestheticTarget(context = {}, requirements = []) {
+  const configured = context.aesthetic_target_profile ||
+    context.aestheticTargetProfile ||
+    context.recommendation_context?.aesthetic_target_profile ||
+    context.recommendationContext?.aestheticTargetProfile;
+  if (configured && Array.isArray(configured.style_targets)) return configured;
+
+  const firstRequirement = (Array.isArray(requirements) ? requirements : [])
+    .find((requirement) => requirement && typeof requirement === "object") || {};
+  const style = context.style || context.requested_style ||
+    context.user_requirements?.style || context.userRequirements?.style ||
+    firstRequirement.style;
+  const scene = context.scene || context.occasion ||
+    context.user_requirements?.scene || context.userRequirements?.scene ||
+    firstRequirement.scene || firstRequirement.occasion;
+  const gender = context.gender || context.authoritative_gender ||
+    context.user_profile?.gender || context.userProfile?.gender ||
+    firstRequirement.gender;
+  if (![style, scene, gender].some((value) => String(value || "").trim())) {
+    return null;
+  }
+  return resolveAestheticTargetProfile({
+    gender,
+    scene,
+    style,
+    item_budget: context.item_budget ?? context.itemBudget,
+    outfit_budget: context.outfit_budget ?? context.outfitBudget,
+  });
+}
+
 function productStyleEvidence(product = {}, requirement = {}) {
   return [
     product.title,
@@ -739,7 +837,19 @@ function productStyleEvidence(product = {}, requirement = {}) {
     product.shop_name,
     product.material,
     product.style,
+    product.style_tags,
+    product.aesthetic_tags,
+    product.silhouette_tags,
+    product.detail_tags,
+    product.occasion,
+    product.occasion_tags,
+    product.occasions,
+    product.subcategory,
+    product.quality_tier,
     product.color,
+    requirement.style,
+    requirement.scene,
+    requirement.occasion,
   ].filter(Boolean).join(" ");
 }
 
@@ -751,6 +861,12 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
   const styleProfile = contextStyleProfile(context);
   const styleSemantics = contextStyleSemantics(context);
   const outfitBlueprint = contextOutfitBlueprint(context);
+  const aestheticTarget = contextAestheticTarget(
+    context,
+    (Array.isArray(groups) ? groups : []).map((group) => group?.requirement),
+  );
+  const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
+  const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
   const candidates = new Map();
   const productGroups = new Map();
   safeGroups.forEach((group, groupIndex) => {
@@ -774,11 +890,17 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
     const match = candidates.get(`${groupIndex}:${id}`);
     const selectionKey = `${groupIndex}:${id}`;
     if (!match || seen.has(selectionKey)) continue;
+    if (!evaluateStyleGate(
+      match.product,
+      styleProfile,
+      intentPriorityScore,
+    ).allowed) continue;
     const blueprintMatch = blueprintMatchAssessment(
       match.product,
       safeGroups[match.groupIndex]?.requirement,
       outfitBlueprint,
     );
+    if (!blueprintMatchPassesHardGate(blueprintMatch, intentPriorityScore)) continue;
     const catalogAesthetic = boundedScore(match.product.catalog_aesthetic_score ?? 50);
     const brandQuality = boundedScore(match.product.brand_quality_score ?? BRAND_SCORE.C);
     const aiAesthetic = score(item.aesthetic_score ?? item.ai_taste_score);
@@ -811,22 +933,35 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
       styleProfile,
       styleSemantics,
     });
-    const selectedStyleMatch = score(item.style_match_score) ?? localStyleMatch;
+    const targetAssessment = match.product.aesthetic_target_assessment ||
+      candidateAestheticTargetAssessment(
+        match.product,
+        safeGroups[match.groupIndex]?.requirement,
+        aestheticTarget,
+      );
+    const selectedStyleMatch = aestheticTarget
+      ? styleGateScore(targetAssessment, localStyleMatch)
+      : score(item.style_match_score) ?? localStyleMatch;
+    if (shouldRejectForStyle({
+      intentPriorityScore,
+      styleMatch: selectedStyleMatch,
+      enforce: enforceStyleThreshold,
+    })) continue;
     const weatherMatch = score(item.weather_match_score) ?? 70;
     const recommendationReason = appendBudgetNote(
       userFacingChineseText(item.reason, "该商品与当前穿搭方案和身体比例策略相匹配", 240),
       match.product.budget_note,
     );
-    const finalScore = compositeProductScore({
-      matchScore,
+    const calibrated = calibratedProductScore({
+      assessment: targetAssessment,
+      relevanceScore: matchScore,
       blueprintMatchScore: blueprintMatch.score,
-      styleMatchScore: selectedStyleMatch,
       aestheticScore: values.aesthetic_score,
       visualQualityScore: visualQuality,
       bodyStrategyScore: values.body_strategy_match_score,
       brandQualityScore: brandQuality,
-      weatherMatchScore: weatherMatch,
       diversityScore: 100,
+      product: match.product,
     });
     groupProducts.push({
       ...match.product,
@@ -835,14 +970,24 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
       blueprint_match_score: blueprintMatch.score,
       matched_elements: blueprintMatch.matched_elements,
       conflict_elements: blueprintMatch.conflict_elements,
+      aesthetic_target_assessment: targetAssessment,
+      style_fit_score: targetAssessment.style_fit,
+      occasion_fit_score: targetAssessment.occasion_fit,
+      color_fit_score: targetAssessment.color_fit,
+      silhouette_fit_score: targetAssessment.silhouette_fit,
+      footwear_fit_score: targetAssessment.footwear_fit,
+      quality_fit_score: targetAssessment.quality_fit,
+      gender_fit_score: targetAssessment.gender_fit,
       style_match_score: selectedStyleMatch,
       weather_match_score: weatherMatch,
       catalog_aesthetic_score: catalogAesthetic,
       commerce_visual_score: visualQuality,
       brand_quality_score: brandQuality,
       diversity_score: 100,
-      final_score: finalScore,
-      ai_match_score: finalScore,
+      final_score: calibrated.finalScore,
+      ai_match_score: calibrated.finalScore,
+      reranker_score_trace: calibrated.trace,
+      ranking_reason: calibrated.trace.ranking_reason,
       ai_recommendation_reason: recommendationReason,
       ai_concern: userFacingChineseText(item.concern, "", 180),
       recommendation_reason: recommendationReason,
@@ -857,15 +1002,8 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
 
 function groupsBelowMinimum(groups, products) {
   const selectedIds = new Set(products.map(productGroupKey));
-  return groups.filter((group) => {
-    const expected = Math.min(
-      Number(group.selectionLimit) || DEFAULT_SELECTION_LIMIT,
-      group.candidates.length,
-    );
-    const selected = group.candidates.filter((product) =>
-      selectedIds.has(productGroupKey(product))).length;
-    return expected > 0 && selected < expected;
-  });
+  return groups.filter((group) => group.candidates.length >= 4 &&
+    group.candidates.filter((product) => selectedIds.has(productGroupKey(product))).length < 4);
 }
 
 function replaceGroupProducts(products, replacements, groups) {
@@ -887,6 +1025,10 @@ function applyDiversityScores(products, groups, {
   context = {},
 } = {}) {
   const safeGroups = normalizeGroups(groups, selectionLimit, context);
+  const aestheticTarget = contextAestheticTarget(
+    context,
+    safeGroups.map((group) => group.requirement),
+  );
   const available = new Map((Array.isArray(products) ? products : [])
     .map((product) => [productGroupKey(product), product]));
   const previousLookPrimaries = [];
@@ -929,20 +1071,25 @@ function applyDiversityScores(products, groups, {
         const styleMatch = boundedScore(product.style_match_score ?? relevance);
         const weatherMatch = boundedScore(product.weather_match_score ?? 70);
         const exactDuplicate = hasExactDuplicate(product, comparisons);
-        const finalScore = roundScore(Math.max(
-          0,
-          compositeProductScore({
-            matchScore: relevance,
-            blueprintMatchScore: product.blueprint_match_score ?? styleMatch,
-            styleMatchScore: styleMatch,
-            aestheticScore: aesthetic,
-            visualQualityScore: visualQuality,
-            bodyStrategyScore: bodyStrategy,
-            brandQualityScore: brandQuality,
-            weatherMatchScore: weatherMatch,
-            diversityScore: diversity,
-          }) - (exactDuplicate ? 35 : 0),
-        ));
+        const targetAssessment = product.aesthetic_target_assessment ||
+          candidateAestheticTargetAssessment(
+            product,
+            requirement,
+            aestheticTarget,
+          );
+        const calibrated = calibratedProductScore({
+          assessment: targetAssessment,
+          relevanceScore: relevance,
+          blueprintMatchScore: product.blueprint_match_score ?? styleMatch,
+          aestheticScore: aesthetic,
+          visualQualityScore: visualQuality,
+          bodyStrategyScore: bodyStrategy,
+          brandQualityScore: brandQuality,
+          diversityScore: diversity,
+          exactDuplicate,
+          product,
+        });
+        const finalScore = calibrated.finalScore;
         return {
           product: {
             ...product,
@@ -954,8 +1101,18 @@ function applyDiversityScores(products, groups, {
             body_strategy_match_score: bodyStrategy,
             brand_quality_score: brandQuality,
             diversity_score: diversity,
+            aesthetic_target_assessment: targetAssessment,
+            style_fit_score: targetAssessment.style_fit,
+            occasion_fit_score: targetAssessment.occasion_fit,
+            color_fit_score: targetAssessment.color_fit,
+            silhouette_fit_score: targetAssessment.silhouette_fit,
+            footwear_fit_score: targetAssessment.footwear_fit,
+            quality_fit_score: targetAssessment.quality_fit,
+            gender_fit_score: targetAssessment.gender_fit,
             final_score: finalScore,
             ai_match_score: finalScore,
+            reranker_score_trace: calibrated.trace,
+            ranking_reason: calibrated.trace.ranking_reason,
           },
           finalScore,
         };
@@ -1007,8 +1164,7 @@ function diversityScore(product, requirement, comparisons) {
 function hasExactDuplicate(product, comparisons) {
   const current = productFingerprint(product);
   return comparisons.some((previous) =>
-    (current.product_id && current.product_id === previous.product_id) ||
-    (current.image_url && current.image_url === previous.image_url));
+    current.product_id && current.product_id === previous.product_id);
 }
 
 function productFingerprint(product, requirement = {}) {
@@ -1052,6 +1208,391 @@ function boundedScore(value) {
   return Math.max(0, Math.min(100, Number(value) || 0));
 }
 
+function semanticToken(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u3400-\u9fff]+/gu, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function semanticList(value) {
+  return (Array.isArray(value) ? value : [value]).flat(Infinity)
+    .map(semanticToken).filter(Boolean);
+}
+
+function candidateStyleSet(product = {}) {
+  return new Set(semanticList([
+    product.style,
+    product.style_tags,
+    product.aesthetic_tags,
+  ]));
+}
+
+function styleFitAssessment(product = {}, target = null) {
+  const targetStyles = Array.isArray(target?.style_targets)
+    ? target.style_targets : [];
+  if (targetStyles.length === 0) {
+    return {score: 50, classification: "NO_STYLE_TARGET", missing: true};
+  }
+  const candidateStyles = candidateStyleSet(product);
+  if (candidateStyles.size === 0) {
+    return {score: 35, classification: "MISSING_STYLE_METADATA", missing: true};
+  }
+  const compatible = new Set(semanticList(target?.compatible_styles));
+  const conflicting = new Set(semanticList(target?.conflicting_styles));
+  const nearMissTargets = new Set(semanticList(product?.near_miss_styles));
+  let totalWeight = 0;
+  let weightedScore = 0;
+  let strongest = "GENERIC_STYLE";
+  let strongestScore = -1;
+  for (const entry of targetStyles) {
+    const targetId = semanticToken(entry?.id);
+    const weight = Number.isFinite(Number(entry?.weight))
+      ? Math.max(0, Number(entry.weight)) : 1;
+    let scoreValue = 45;
+    let classification = "GENERIC_STYLE";
+    if (candidateStyles.has(targetId)) {
+      scoreValue = 100;
+      classification = "EXACT_STYLE_MATCH";
+    } else if (nearMissTargets.has(targetId)) {
+      scoreValue = 78;
+      classification = "COMPATIBLE_NEAR_MISS";
+    } else if ([...candidateStyles].some((style) => compatible.has(style))) {
+      scoreValue = 72;
+      classification = "COMPATIBLE_STYLE";
+    } else if ([...candidateStyles].some((style) => conflicting.has(style))) {
+      scoreValue = 8;
+      classification = "CONTRADICTORY_STYLE";
+    }
+    totalWeight += weight;
+    weightedScore += scoreValue * weight;
+    if (scoreValue > strongestScore) {
+      strongestScore = scoreValue;
+      strongest = classification;
+    }
+  }
+  return {
+    score: roundScore(weightedScore / (totalWeight || 1)),
+    classification: strongest,
+    missing: false,
+  };
+}
+
+function occasionFitAssessment(product = {}, target = null, requirement = {}) {
+  const targetScene = semanticToken(target?.scene || requirement.scene ||
+    requirement.occasion);
+  if (!targetScene) return {score: 60, classification: "NO_OCCASION_TARGET", missing: true};
+  const occasions = new Set(semanticList([
+    product.occasion,
+    product.occasions,
+    product.occasion_tags,
+  ]));
+  if (occasions.size === 0) {
+    return {score: 40, classification: "MISSING_OCCASION_METADATA", missing: true};
+  }
+  if (occasions.has(targetScene)) {
+    return {score: 100, classification: "EXACT_OCCASION_MATCH", missing: false};
+  }
+  const compatible = new Set(semanticList(SCENE_COMPATIBILITY[targetScene] || []));
+  if ([...occasions].some((occasion) => compatible.has(occasion))) {
+    return {score: 70, classification: "COMPATIBLE_OCCASION", missing: false};
+  }
+  return {score: 35, classification: "OCCASION_MISMATCH", missing: false};
+}
+
+function candidateEvidence(product = {}) {
+  return [
+    product.title,
+    product.category,
+    product.subcategory,
+    product.style,
+    product.style_tags,
+    product.aesthetic_tags,
+    product.silhouette_tags,
+    product.detail_tags,
+    product.material,
+    product.color,
+  ].flat(Infinity).filter(Boolean).join(" ").toLowerCase();
+}
+
+function inferredColorIntensity(product = {}, requirement = {}) {
+  const evidence = candidateEvidence(product, requirement);
+  if (!String(product.color || "").trim() &&
+      !/[黑白灰米杏卡其棕蓝红粉绿紫黄橙]|black|white|gray|grey|beige|brown|blue|red|pink|green|purple|yellow|orange/i.test(evidence)) {
+    return null;
+  }
+  if (/荧光|高饱和|亮色|撞色|玫红|明黄|neon|vivid/i.test(evidence)) return 0.88;
+  if (/黑|白|灰|米|杏|卡其|驼|棕|海军蓝|藏蓝|black|white|gray|grey|beige|khaki|brown|navy/i.test(evidence)) return 0.24;
+  if (/雾|莫兰迪|柔和|浅|muted|pastel/i.test(evidence)) return 0.38;
+  return 0.62;
+}
+
+function closenessScore(actual, target, missing = 45) {
+  const left = Number(actual);
+  const right = Number(target);
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return missing;
+  return roundScore(boundedScore(100 - Math.abs(left - right) * 100));
+}
+
+function colorFitAssessment(product = {}, target = null, requirement = {}) {
+  const targetIntensity = Number(target?.color_targets?.intensity ??
+    target?.dimensions?.color_intensity);
+  if (!Number.isFinite(targetIntensity)) {
+    return {score: 60, classification: "NO_COLOR_TARGET", missing: true};
+  }
+  const actual = inferredColorIntensity(product, requirement);
+  if (actual == null) {
+    return {score: 40, classification: "MISSING_COLOR_METADATA", missing: true};
+  }
+  return {
+    score: closenessScore(actual, targetIntensity),
+    classification: "COLOR_INTENSITY_DISTANCE",
+    missing: false,
+    actual,
+  };
+}
+
+function inferSilhouetteVector(product = {}, requirement = {}) {
+  const evidence = candidateEvidence(product, requirement);
+  const hasSignal = /剪裁|挺括|廓形|高腰|收腰|短款|修身|合身|直筒|锥形|宽松|阔腿|oversize|tailored|structured|fitted|cropped|straight|tapered|wide|relaxed/i
+    .test(evidence);
+  if (!hasSignal) return null;
+  return {
+    structure: /剪裁|挺括|廓形|西装|直线|tailored|structured|clean_line/i.test(evidence)
+      ? 0.8 : /宽松|慵懒|relaxed|oversize/i.test(evidence) ? 0.35 : 0.52,
+    waist_emphasis: /高腰|收腰|腰封|短款|修身|合身|high_waist|cropped|fitted/i.test(evidence)
+      ? 0.8 : 0.48,
+    volume: /宽松|阔腿|oversize|wide|relaxed/i.test(evidence)
+      ? 0.8 : /修身|合身|锥形|fitted|tapered/i.test(evidence) ? 0.35 : 0.52,
+    verticality: /高腰|直筒|锥形|修身|长线条|high_waist|straight|tapered|vertical/i.test(evidence)
+      ? 0.78 : 0.5,
+  };
+}
+
+function silhouetteFitAssessment(product = {}, target = null, requirement = {}) {
+  const desired = target?.silhouette_targets;
+  if (!desired || typeof desired !== "object") {
+    return {score: 60, classification: "NO_SILHOUETTE_TARGET", missing: true};
+  }
+  const actual = inferSilhouetteVector(product, requirement);
+  if (!actual) {
+    return {score: 45, classification: "MISSING_SILHOUETTE_METADATA", missing: true};
+  }
+  const fields = ["structure", "waist_emphasis", "volume", "verticality"];
+  return {
+    score: roundScore(fields.reduce((sum, key) =>
+      sum + closenessScore(actual[key], desired[key]), 0) / fields.length),
+    classification: "SILHOUETTE_VECTOR_DISTANCE",
+    missing: false,
+  };
+}
+
+function inferredFootwearVector(product = {}, requirement = {}) {
+  const evidence = candidateEvidence(product, requirement);
+  const sport = /运动|跑鞋|板鞋|球鞋|老爹鞋|德训鞋|赛车鞋|sneaker|trainer|running|sport|air\s*max|samba/i.test(evidence);
+  const formal = /正装|礼服|牛津|德比|尖头|细楦|formal|oxford|derby|pumps?|heel/i.test(evidence);
+  const refined = /尖头|杏仁头|浅口|芭蕾|玛丽珍|乐福|细楦|pointed|ballet|mary|loafer|oxford|derby/i.test(evidence);
+  const quality = qualityLevel(product, evidence);
+  return {
+    formality: formal ? 0.88 : /乐福|皮鞋|短靴|loafer|boots?/i.test(evidence) ? 0.68 : sport ? 0.24 : 0.48,
+    sportiness: sport ? 0.9 : 0.2,
+    toe_refinement: refined ? 0.84 : /厚底|大头|圆头/i.test(evidence) ? 0.35 : 0.52,
+    material_quality: quality,
+  };
+}
+
+function footwearFitAssessment(product = {}, target = null, requirement = {}) {
+  const category = semanticToken(product.category || requirement.category);
+  if (category !== "shoes") {
+    return {score: 70, classification: "NOT_FOOTWEAR", missing: false};
+  }
+  const desired = target?.footwear_targets;
+  if (!desired || typeof desired !== "object") {
+    return {score: 50, classification: "NO_FOOTWEAR_TARGET", missing: true};
+  }
+  const actual = inferredFootwearVector(product, requirement);
+  const fields = ["formality", "sportiness", "toe_refinement", "material_quality"];
+  return {
+    score: roundScore(fields.reduce((sum, key) =>
+      sum + closenessScore(actual[key], desired[key]), 0) / fields.length),
+    classification: "FOOTWEAR_VECTOR_DISTANCE",
+    missing: false,
+  };
+}
+
+function qualityLevel(product = {}, evidence = "") {
+  const tier = semanticToken(product.quality_tier);
+  if (QUALITY_TIER_VALUE[tier] != null) return QUALITY_TIER_VALUE[tier];
+  const text = `${evidence} ${product.material || ""}`;
+  if (/羊绒|真丝|桑蚕丝|精纺|头层皮|牛皮|高支|premium|luxury/i.test(text)) return 0.82;
+  if (/塑料|廉价|基础|普通|budget/i.test(text)) return 0.32;
+  return 0.45;
+}
+
+function qualityFitAssessment(product = {}, target = null, requirement = {}) {
+  const desired = Number(target?.quality_target ?? target?.dimensions?.quality);
+  if (!Number.isFinite(desired)) {
+    return {score: 55, classification: "NO_QUALITY_TARGET", missing: true};
+  }
+  const missing = !String(product.quality_tier || "").trim() &&
+    !String(product.material || "").trim();
+  if (missing) {
+    return {
+      score: 40,
+      classification: "MISSING_QUALITY_METADATA",
+      missing: true,
+    };
+  }
+  return {
+    score: closenessScore(qualityLevel(product, candidateEvidence(product, requirement)), desired),
+    classification: "QUALITY_TIER_DISTANCE",
+    missing: false,
+  };
+}
+
+function genderFitAssessment(product = {}, target = null, requirement = {}) {
+  const requested = semanticToken(target?.style_targets?.[0]?.gender_variant ||
+    requirement.gender);
+  const actual = semanticToken(product.original_gender || product.gender);
+  if (!requested || requested === "unisex" || requested === "unknown") {
+    return {score: 90, classification: "NEUTRAL_GENDER_TARGET", missing: !actual};
+  }
+  if (!actual || actual === "unknown") {
+    return {score: 45, classification: "MISSING_GENDER_METADATA", missing: true};
+  }
+  if (actual === requested) {
+    return {score: 100, classification: "EXACT_GENDER_MATCH", missing: false};
+  }
+  if (actual === "unisex") {
+    return {score: 75, classification: "UNISEX_COMPATIBLE", missing: false};
+  }
+  return {score: 0, classification: "GENDER_CONFLICT", missing: false};
+}
+
+function candidateAestheticTargetAssessment(product = {}, requirement = {}, target = null) {
+  const style = styleFitAssessment(product, target);
+  const occasion = occasionFitAssessment(product, target, requirement);
+  const color = colorFitAssessment(product, target, requirement);
+  const silhouette = silhouetteFitAssessment(product, target, requirement);
+  const footwear = footwearFitAssessment(product, target, requirement);
+  const quality = qualityFitAssessment(product, target, requirement);
+  const gender = genderFitAssessment(product, target, requirement);
+  const missingMetadata = [
+    ["style", style],
+    ["occasion", occasion],
+    ["color", color],
+    ["silhouette", silhouette],
+    ["footwear", footwear],
+    ["quality", quality],
+    ["gender", gender],
+  ].filter(([, assessment]) => assessment.missing)
+    .map(([name]) => name);
+  return Object.freeze({
+    style_fit: style.score,
+    occasion_fit: occasion.score,
+    color_fit: color.score,
+    silhouette_fit: silhouette.score,
+    footwear_fit: footwear.score,
+    quality_fit: quality.score,
+    gender_fit: gender.score,
+    style_classification: style.classification,
+    occasion_classification: occasion.classification,
+    metadata_missing: Object.freeze(missingMetadata),
+  });
+}
+
+function styleGateScore(targetAssessment, legacyStyleMatch) {
+  const missingStyleMetadata = Array.isArray(targetAssessment?.metadata_missing) &&
+    targetAssessment.metadata_missing.includes("style");
+  return boundedScore(missingStyleMetadata
+    ? legacyStyleMatch
+    : targetAssessment?.style_fit ?? legacyStyleMatch);
+}
+
+function calibratedProductScore({
+  assessment,
+  relevanceScore,
+  blueprintMatchScore,
+  aestheticScore,
+  visualQualityScore,
+  bodyStrategyScore,
+  brandQualityScore,
+  diversityScore = 100,
+  exactDuplicate = false,
+  product = {},
+} = {}) {
+  const components = {
+    style_fit: boundedScore(assessment?.style_fit),
+    occasion_fit: boundedScore(assessment?.occasion_fit),
+    silhouette_fit: boundedScore(assessment?.silhouette_fit),
+    color_fit: boundedScore(assessment?.color_fit),
+    footwear_fit: boundedScore(assessment?.footwear_fit),
+    quality_fit: boundedScore(assessment?.quality_fit),
+    gender_fit: boundedScore(assessment?.gender_fit),
+    relevance: boundedScore(relevanceScore),
+    blueprint: boundedScore(blueprintMatchScore),
+    aesthetic: boundedScore(aestheticScore),
+    visual: boundedScore(visualQualityScore),
+    body: boundedScore(bodyStrategyScore),
+  };
+  const contributions = Object.fromEntries(Object.entries(CALIBRATED_PRODUCT_WEIGHTS)
+    .map(([key, weight]) => [key, roundScore(components[key] * weight)]));
+  const coreScore = Object.values(contributions).reduce((sum, value) => sum + value, 0);
+  const coreAestheticFit = roundScore(
+    components.style_fit * 0.55 +
+    components.occasion_fit * 0.20 +
+    components.silhouette_fit * 0.10 +
+    components.footwear_fit * 0.10 +
+    components.color_fit * 0.05,
+  );
+  const brandAdjustment = coreAestheticFit >= 60
+    ? roundScore((boundedScore(brandQualityScore) - 50) * 0.015)
+    : 0;
+  const diversityPenalty = roundScore(
+    (100 - boundedScore(diversityScore)) * 0.0125,
+  );
+  const duplicatePenalty = exactDuplicate ? 5 : 0;
+  const finalScore = roundScore(boundedScore(
+    coreScore + brandAdjustment - diversityPenalty - duplicatePenalty,
+  ));
+  const reasons = [
+    assessment?.style_classification || "NO_STYLE_ASSESSMENT",
+    assessment?.occasion_classification || "NO_OCCASION_ASSESSMENT",
+  ];
+  if (brandAdjustment !== 0) reasons.push("BRAND_TIE_BREAKER");
+  if (diversityPenalty > 0) reasons.push("DIVERSITY_TIE_BREAKER");
+  if (duplicatePenalty > 0) reasons.push("REPEATED_CANDIDATE_PENALTY");
+  const trace = Object.freeze({
+    version: RERANKER_CALIBRATION_VERSION,
+    candidate_id: String(product.product_id || product.id || ""),
+    title: String(product.title || ""),
+    style_fit: components.style_fit,
+    occasion_fit: components.occasion_fit,
+    color_fit: components.color_fit,
+    silhouette_fit: components.silhouette_fit,
+    footwear_fit: components.footwear_fit,
+    quality_fit: components.quality_fit,
+    brand_score: boundedScore(brandQualityScore),
+    diversity_score: boundedScore(diversityScore),
+    gender_fit: components.gender_fit,
+    metadata_missing: assessment?.metadata_missing || Object.freeze([]),
+    raw_component_scores: Object.freeze({
+      ...components,
+      weights: CALIBRATED_PRODUCT_WEIGHTS,
+      contributions: Object.freeze(contributions),
+      core_score: roundScore(coreScore),
+      core_aesthetic_fit: coreAestheticFit,
+      brand_adjustment: brandAdjustment,
+      diversity_penalty: diversityPenalty,
+      duplicate_penalty: duplicatePenalty,
+    }),
+    final_score: finalScore,
+    ranking_reason: reasons.join(" | "),
+  });
+  return Object.freeze({finalScore, trace});
+}
+
 function compositeProductScore({
   matchScore,
   styleMatchScore = matchScore,
@@ -1060,29 +1601,56 @@ function compositeProductScore({
   visualQualityScore = aestheticScore,
   bodyStrategyScore = matchScore,
   brandQualityScore,
-  weatherMatchScore = 70,
+  occasionFitScore = 60,
+  silhouetteFitScore = 60,
+  colorFitScore = 60,
+  footwearFitScore = 70,
+  qualityFitScore = 55,
+  genderFitScore = 90,
   diversityScore = 100,
 }) {
-  const weighted = boundedScore(blueprintMatchScore) * 0.4 +
-    boundedScore(styleMatchScore) * 0.2 +
-    boundedScore(aestheticScore) * 0.15 +
-    boundedScore(visualQualityScore) * 0.1 +
-    boundedScore(brandQualityScore) * 0.1 +
-    boundedScore(weatherMatchScore) * 0.05;
-  const diversityPenalty = (100 - boundedScore(diversityScore)) * 0.05;
-  return roundScore(weighted - diversityPenalty);
+  return calibratedProductScore({
+    assessment: {
+      style_fit: styleMatchScore,
+      occasion_fit: occasionFitScore,
+      silhouette_fit: silhouetteFitScore,
+      color_fit: colorFitScore,
+      footwear_fit: footwearFitScore,
+      quality_fit: qualityFitScore,
+      gender_fit: genderFitScore,
+      style_classification: "EXPLICIT_COMPONENT_SCORE",
+      occasion_classification: "EXPLICIT_COMPONENT_SCORE",
+      metadata_missing: Object.freeze([]),
+    },
+    relevanceScore: matchScore,
+    blueprintMatchScore,
+    aestheticScore,
+    visualQualityScore,
+    bodyStrategyScore,
+    brandQualityScore,
+    diversityScore,
+  }).finalScore;
 }
 
 function ruleFallback(groups, selectionLimit, context = {}) {
   const styleProfile = contextStyleProfile(context);
   const styleSemantics = contextStyleSemantics(context);
+  const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
+  const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
   const outfitBlueprint = contextOutfitBlueprint(context);
+  const aestheticTarget = contextAestheticTarget(
+    context,
+    (Array.isArray(groups) ? groups : []).map((group) => group?.requirement),
+  );
   return groups.flatMap((group) => group.candidates.slice(0, selectionLimit).map((product) => {
     const blueprintMatch = blueprintMatchAssessment(
       product,
       group.requirement,
       outfitBlueprint,
     );
+    if (!blueprintMatchPassesHardGate(blueprintMatch, intentPriorityScore)) {
+      return null;
+    }
     const matchScore = budgetAdjustedMatchScore(product);
     const aestheticScore = boundedScore(
       product.catalog_aesthetic_score ?? matchScore,
@@ -1098,24 +1666,38 @@ function ruleFallback(groups, selectionLimit, context = {}) {
     const bodyStrategyScore = boundedScore(
       product.body_strategy_match_score ?? product.fit_score ?? 60,
     );
-    const styleMatch = boundedScore(product.style_match_score ?? styleMatchScore({
+    const targetAssessment = product.aesthetic_target_assessment ||
+      candidateAestheticTargetAssessment(
+        product,
+        group.requirement,
+        aestheticTarget,
+      );
+    const legacyStyleMatch = product.style_match_score ?? styleMatchScore({
       evidence: productStyleEvidence(product, group.requirement),
       relevanceScore: matchScore,
       styleProfile,
       styleSemantics,
-    }));
+    });
+    const styleMatch = aestheticTarget
+      ? styleGateScore(targetAssessment, legacyStyleMatch)
+      : boundedScore(legacyStyleMatch);
+    if (shouldRejectForStyle({
+      intentPriorityScore,
+      styleMatch,
+      enforce: enforceStyleThreshold,
+    })) return null;
     const weatherMatch = boundedScore(product.weather_match_score ?? 70);
     const diversity = 100;
-    const finalScore = compositeProductScore({
-      matchScore,
+    const calibrated = calibratedProductScore({
+      assessment: targetAssessment,
+      relevanceScore: matchScore,
       blueprintMatchScore: blueprintMatch.score,
-      styleMatchScore: styleMatch,
       aestheticScore,
       visualQualityScore,
       bodyStrategyScore,
-      brandQualityScore,
-      weatherMatchScore: weatherMatch,
+      brandQualityScore: brandQualityScore,
       diversityScore: diversity,
+      product,
     });
     return {
       ...product,
@@ -1123,6 +1705,14 @@ function ruleFallback(groups, selectionLimit, context = {}) {
       blueprint_match_score: blueprintMatch.score,
       matched_elements: blueprintMatch.matched_elements,
       conflict_elements: blueprintMatch.conflict_elements,
+      aesthetic_target_assessment: targetAssessment,
+      style_fit_score: targetAssessment.style_fit,
+      occasion_fit_score: targetAssessment.occasion_fit,
+      color_fit_score: targetAssessment.color_fit,
+      silhouette_fit_score: targetAssessment.silhouette_fit,
+      footwear_fit_score: targetAssessment.footwear_fit,
+      quality_fit_score: targetAssessment.quality_fit,
+      gender_fit_score: targetAssessment.gender_fit,
       style_match_score: styleMatch,
       weather_match_score: weatherMatch,
       aesthetic_score: aestheticScore,
@@ -1130,8 +1720,10 @@ function ruleFallback(groups, selectionLimit, context = {}) {
       body_strategy_match_score: bodyStrategyScore,
       brand_quality_score: brandQualityScore,
       diversity_score: diversity,
-      final_score: finalScore,
-      ai_match_score: finalScore,
+      final_score: calibrated.finalScore,
+      ai_match_score: calibrated.finalScore,
+      reranker_score_trace: calibrated.trace,
+      ranking_reason: calibrated.trace.ranking_reason,
       recommendation_reason: appendBudgetNote(
         userFacingChineseText(
           product.recommendation_reason,
@@ -1142,7 +1734,7 @@ function ruleFallback(groups, selectionLimit, context = {}) {
       ),
       ai_rerank_fallback: true,
     };
-  }));
+  }).filter(Boolean));
 }
 
 function applyLabels(products) {
@@ -1167,36 +1759,46 @@ function applyLabels(products) {
 }
 
 function normalizeGroups(groups, selectionLimit, context = {}) {
-  const limit = Math.min(positiveInteger(selectionLimit, DEFAULT_SELECTION_LIMIT), 4);
+  const limit = Math.min(
+    positiveInteger(selectionLimit, DEFAULT_SELECTION_LIMIT),
+    MAX_SELECTION_LIMIT,
+  );
   const styleProfile = contextStyleProfile(context);
   const styleSemantics = contextStyleSemantics(context);
   const outfitBlueprint = contextOutfitBlueprint(context);
+  const aestheticTarget = contextAestheticTarget(
+    context,
+    (Array.isArray(groups) ? groups : []).map((group) => group?.requirement),
+  );
+  const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
+  const enforceStyleThreshold = hasActionableStyleConstraints(styleProfile);
   return (Array.isArray(groups) ? groups : []).map((group) => {
     const requirement = compactObject(group?.requirement || {});
     const assessedCandidates = Array.isArray(group?.candidates)
       ? group.candidates
-        .map((product) => {
+        .filter((product) => semanticCategoryMatch(product, requirement))
+        .flatMap((product) => {
           const assessment = blueprintMatchAssessment(
             product,
             requirement,
             outfitBlueprint,
           );
-          const qualityWarning = productQualityBlock(product, requirement);
-          return {
+          return blueprintMatchPassesHardGate(
+            assessment,
+            intentPriorityScore,
+          ) ? [{
             ...product,
             blueprint_match_score: assessment.score,
-            blueprint_ranking_allowed:
-              product.blueprint_ranking_allowed !== false,
             matched_elements: assessment.matched_elements,
             conflict_elements: assessment.conflict_elements,
-            style_gate_ranking_allowed:
-              product.style_gate_ranking_allowed !== false,
-            style_gate_conflicts: Array.isArray(product.style_gate_conflicts)
-              ? product.style_gate_conflicts : [],
-            product_quality_warning: qualityWarning,
-            semantic_category_match: semanticCategoryMatch(product, requirement),
-          };
+          }] : [];
         })
+        .filter((product) => evaluateStyleGate(
+          product,
+          styleProfile,
+          intentPriorityScore,
+        ).allowed)
+        .filter((product) => !productQualityBlock(product, requirement))
         .map((product) => {
           const assessed = {
             ...product,
@@ -1204,22 +1806,38 @@ function normalizeGroups(groups, selectionLimit, context = {}) {
             ...brandQualityAssessment(product),
           };
           const normalized = {...assessed, ...visualAssessmentDefaults(assessed)};
+          const targetAssessment = candidateAestheticTargetAssessment(
+            normalized,
+            requirement,
+            aestheticTarget,
+          );
+          const legacyStyleMatch = styleMatchScore({
+            evidence: productStyleEvidence(normalized, requirement),
+            relevanceScore: normalized.relevance_score,
+            styleProfile,
+            styleSemantics,
+          });
           return {
             ...normalized,
-            style_match_score: styleMatchScore({
-              evidence: productStyleEvidence(normalized, requirement),
-              relevanceScore: normalized.relevance_score,
-              styleProfile,
-              styleSemantics,
-            }),
+            aesthetic_target_assessment: targetAssessment,
+            style_fit_score: targetAssessment.style_fit,
+            occasion_fit_score: targetAssessment.occasion_fit,
+            color_fit_score: targetAssessment.color_fit,
+            silhouette_fit_score: targetAssessment.silhouette_fit,
+            footwear_fit_score: targetAssessment.footwear_fit,
+            quality_fit_score: targetAssessment.quality_fit,
+            gender_fit_score: targetAssessment.gender_fit,
+            style_match_score: aestheticTarget
+              ? styleGateScore(targetAssessment, legacyStyleMatch)
+              : legacyStyleMatch,
           };
         })
-        .map((product) => ({
-          ...product,
-          style_ranking_below_threshold:
-            product.style_ranking_below_threshold === true,
-          aesthetic_quality_warning: isAestheticJunk(product),
+        .filter((product) => !shouldRejectForStyle({
+          intentPriorityScore,
+          styleMatch: product.style_match_score,
+          enforce: enforceStyleThreshold,
         }))
+        .filter((product) => !isAestheticJunk(product))
       : [];
     const requiredMinimum = Math.min(4, assessedCandidates.length);
     const highQualityCount = assessedCandidates.filter((product) =>
@@ -1227,7 +1845,11 @@ function normalizeGroups(groups, selectionLimit, context = {}) {
     const brandFallback = highQualityCount < requiredMinimum;
     const candidates = assessedCandidates
       .map((product) => ({...product, brand_fallback: brandFallback}))
-      .sort((left, right) => candidateQualityPrior(right) - candidateQualityPrior(left) ||
+      .sort((left, right) => candidateQualityPrior(
+        right,
+        requirement,
+        aestheticTarget,
+      ) - candidateQualityPrior(left, requirement, aestheticTarget) ||
         String(left.product_id).localeCompare(String(right.product_id)))
       .slice(0, DEFAULT_VISUAL_CANDIDATES_PER_GROUP);
     return {
@@ -1261,17 +1883,19 @@ function remainingBudgetMs(deadlineAt) {
   return Math.max(1, remaining);
 }
 
-function candidateQualityPrior(product) {
-  return compositeProductScore({
-    matchScore: product.relevance_score,
-    blueprintMatchScore: product.blueprint_match_score ?? product.style_match_score,
-    styleMatchScore: product.style_match_score ?? product.relevance_score,
+function candidateQualityPrior(product, requirement = {}, target = null) {
+  const assessment = product.aesthetic_target_assessment ||
+    candidateAestheticTargetAssessment(product, requirement, target);
+  return calibratedProductScore({
+    assessment,
+    relevanceScore: product.relevance_score,
+    blueprintMatchScore: product.blueprint_match_score ?? assessment.style_fit,
     bodyStrategyScore: product.body_strategy_match_score ?? product.fit_score ?? 60,
     aestheticScore: product.aesthetic_score ?? product.catalog_aesthetic_score,
     visualQualityScore: product.commerce_visual_score ?? product.visual_quality_score,
     brandQualityScore: product.brand_quality_score,
-    weatherMatchScore: product.weather_match_score ?? 70,
-  });
+    product,
+  }).finalScore;
 }
 
 function budgetAdjustedMatchScore(product) {
@@ -1429,6 +2053,17 @@ function catalogAestheticAssessment(product, requirement = {}) {
     scoreValue += 7;
   }
 
+  const dressPreference = femaleDressPreference(requirement);
+  if (requirement.category === "dress" && dressPreference.applies) {
+    if (DRESS_DESIGN_DETAIL_PATTERN.test(title)) {
+      scoreValue += 18;
+      flags.push("feminine_dress_design_detail");
+    } else if (BASIC_DRESS_PATTERN.test(title)) {
+      scoreValue -= 35;
+      flags.push("generic_basic_dress");
+    }
+  }
+
   const minimumPrice = {
     top: 35,
     bottom: 45,
@@ -1451,6 +2086,24 @@ function catalogAestheticAssessment(product, requirement = {}) {
     aesthetic_score: aestheticScore,
     aesthetic_quality_flags: flags,
   };
+}
+
+function femaleDressPreference(requirement = {}) {
+  const gender = String(requirement.gender || "").toLowerCase();
+  const evidence = [
+    requirement.style,
+    requirement.scene,
+    requirement.item_name,
+    requirement.product_type,
+    requirement.style_role,
+    requirement.design_elements,
+    requirement.preferred_attributes,
+  ].flat().filter(Boolean).join(" ");
+  const explicitlyNeutral = /中性|男女同款|男女通用|无性别|unisex|neutral/i.test(evidence);
+  return Object.freeze({
+    applies: gender === "female" && !explicitlyNeutral &&
+      FEMININE_DRESS_SCENE_PATTERN.test(evidence),
+  });
 }
 
 function hasExplicitBrand(product) {
@@ -1592,7 +2245,9 @@ function cloneProducts(products) {
 }
 
 module.exports = {
+  CALIBRATED_PRODUCT_WEIGHTS,
   ProductAestheticReranker,
+  RERANKER_CALIBRATION_VERSION,
   applyVisualAssessments,
   applyDiversityScores,
   applyLabels,
@@ -1600,6 +2255,8 @@ module.exports = {
   buildMessages,
   buildVisualBatch,
   buildVisualQualityMessages,
+  calibratedProductScore,
+  candidateAestheticTargetAssessment,
   catalogAestheticAssessment,
   compositeProductScore,
   ruleFallback,

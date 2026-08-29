@@ -1,7 +1,9 @@
 const crypto = require("crypto");
+const {normalizeProductCategory} = require("./product_relevance");
 
 const RAW_TAOBAO_PRODUCT_SCHEMA_VERSION = "raw_taobao_product_v1";
 const RAW_TAOBAO_FIXTURE_SCHEMA_VERSION = "raw_taobao_product_probe_v1";
+const ENRICHMENT_EXTRACTOR_VERSION = "candidate_enrichment_v1";
 
 function buildRawTaobaoProduct(item, {query = "", observedAt = new Date().toISOString()} = {}) {
   const source = objectValue(item);
@@ -252,10 +254,285 @@ function deepFreeze(value) {
   return value;
 }
 
+function enrichTaobaoCandidate(rawProduct, {visionObservation = null} = {}) {
+  const raw = objectValue(rawProduct);
+  const observedAt = raw.observed_at || new Date().toISOString();
+  const title = String(raw.text?.title || "").trim();
+  const categoryText = [
+    raw.category?.category_name,
+    raw.category?.level_one_category_name,
+    title,
+  ].filter(Boolean).join(" ");
+  const normalizedCategory = normalizeProductCategory(categoryText) || "unknown";
+  const subcategory = inferSubcategory(title, normalizedCategory);
+  const gender = inferGender(title, categoryText);
+  const style = inferTokens(title, STYLE_PATTERNS);
+  const occasion = inferTokens(title, OCCASION_PATTERNS);
+  const color = inferTokens(title, COLOR_PATTERNS);
+  const silhouette = inferTokens(title, SILHOUETTE_PATTERNS);
+  const fit = inferTokens(title, FIT_PATTERNS);
+  const footwear = normalizedCategory === "shoes"
+    ? inferTokens(title, FOOTWEAR_PATTERNS)
+    : [];
+  const material = inferTokens(title, MATERIAL_PATTERNS);
+  const bodyFit = inferBodyFit(title);
+  const vision = normalizeVisionObservation(visionObservation, observedAt);
+  const quality = inferQuality(raw, title, vision);
+  const rawRef = deepFreeze({
+    source: raw.source || "taobao",
+    item_id: raw.identity?.item_id || null,
+    observed_at: observedAt,
+    schema_version: raw.schema_version || RAW_TAOBAO_PRODUCT_SCHEMA_VERSION,
+  });
+  return deepFreeze({
+    schema_version: "enriched_candidate_v1",
+    raw_product_ref: rawRef,
+    normalized_category: evidenceValue(
+      normalizedCategory,
+      normalizedCategory === "unknown" ? "unknown" : "title_nlp",
+      normalizedCategory === "unknown" ? 0 : 0.9,
+      normalizedCategory === "unknown" ? [] : [categoryText],
+      observedAt,
+    ),
+    subcategory: evidenceValue(
+      subcategory || "unknown",
+      subcategory ? "title_nlp" : "unknown",
+      subcategory ? 0.86 : 0,
+      subcategory ? [title] : [],
+      observedAt,
+    ),
+    gender_evidence: evidenceValue(
+      gender.value,
+      gender.source,
+      gender.confidence,
+      gender.evidence,
+      observedAt,
+    ),
+    style_evidence: tokenEvidence(style, observedAt),
+    occasion_evidence: tokenEvidence(occasion, observedAt),
+    color_evidence: vision.color || tokenEvidence(color, observedAt),
+    silhouette_evidence: vision.silhouette || tokenEvidence(silhouette, observedAt),
+    fit_evidence: vision.fit || tokenEvidence(fit, observedAt),
+    footwear_evidence: vision.footwear || tokenEvidence(footwear, observedAt),
+    material_evidence: tokenEvidence(material, observedAt),
+    body_fit_evidence: evidenceValue(
+      bodyFit.value,
+      bodyFit.value.length ? "inference" : "unknown",
+      bodyFit.value.length ? 0.68 : 0,
+      bodyFit.evidence,
+      observedAt,
+    ),
+    visual_quality_evidence: vision.quality || evidenceValue(
+      "unknown",
+      "unknown",
+      0,
+      [],
+      observedAt,
+    ),
+    quality_evidence: quality,
+  });
+}
+
+function attachEnrichmentToCandidate(candidate, rawProduct, enrichedCandidate) {
+  return {
+    ...candidate,
+    raw_product_ref: enrichedCandidate.raw_product_ref,
+    sales_evidence: rawProduct.sales_evidence,
+    candidate_enrichment: enrichedCandidate,
+  };
+}
+
+function evidenceValue(value, source, confidence, evidence, observedAt) {
+  return deepFreeze({
+    value,
+    source,
+    confidence,
+    evidence: Array.isArray(evidence) ? [...evidence] : [],
+    observed_at: observedAt,
+    extractor_version: ENRICHMENT_EXTRACTOR_VERSION,
+  });
+}
+
+function tokenEvidence(tokens, observedAt) {
+  const values = Array.isArray(tokens) ? tokens : [];
+  return evidenceValue(
+    values,
+    values.length ? "explicit_text_evidence" : "unknown",
+    values.length ? 0.82 : 0,
+    values,
+    observedAt,
+  );
+}
+
+function inferTokens(text, patterns) {
+  return patterns.filter((entry) => entry.pattern.test(text)).map((entry) => entry.value);
+}
+
+function inferGender(title, categoryName) {
+  const text = `${title || ""} ${categoryName || ""}`;
+  const female = text.match(/女(?:士|款|装|鞋)?|少女|妈妈|裙/u);
+  const male = text.match(/男(?:士|款|装|鞋)?|绅士/u);
+  if (female && !male) {
+    return {
+      value: "female",
+      source: "explicit_text_evidence",
+      confidence: 0.96,
+      evidence: [female[0]],
+    };
+  }
+  if (male && !female) {
+    return {
+      value: "male",
+      source: "explicit_text_evidence",
+      confidence: 0.96,
+      evidence: [male[0]],
+    };
+  }
+  return {value: "unknown", source: "unknown", confidence: 0, evidence: []};
+}
+
+function inferSubcategory(title, category) {
+  const rules = category === "shoes" ? FOOTWEAR_PATTERNS : SUBCATEGORY_PATTERNS;
+  return inferTokens(title, rules)[0] || "";
+}
+
+function inferBodyFit(title) {
+  const values = [];
+  const evidence = [];
+  for (const entry of BODY_FIT_PATTERNS) {
+    const match = title.match(entry.pattern);
+    if (match) {
+      values.push(entry.value);
+      evidence.push(match[0]);
+    }
+  }
+  return {value: values, evidence};
+}
+
+function normalizeVisionObservation(observation, observedAt) {
+  if (!observation || typeof observation !== "object") return {};
+  const build = (key) => {
+    const candidate = observation[key];
+    if (!candidate || candidate.value == null) return null;
+    const confidence = Number(candidate.confidence);
+    return evidenceValue(
+      candidate.value,
+      "vision",
+      Number.isFinite(confidence) ? Math.max(0, Math.min(confidence, 1)) : 0,
+      Array.isArray(candidate.evidence) ? candidate.evidence.map(String) : [],
+      observedAt,
+    );
+  };
+  return Object.fromEntries([
+    ["color", build("color")],
+    ["silhouette", build("silhouette")],
+    ["fit", build("fit")],
+    ["footwear", build("footwear")],
+    ["quality", build("quality")],
+  ].filter(([, value]) => value));
+}
+
+function inferQuality(raw, title, vision) {
+  const signals = [];
+  if (raw.commerce?.brand_name) signals.push("api:brand_name");
+  if (raw.commerce?.shop_title) signals.push("api:shop_title");
+  const detail = title.match(/立体剪裁|精纺|真皮|羊毛|丝绸|刺绣|提花/u);
+  if (detail) signals.push(`title:${detail[0]}`);
+  if (vision.quality?.value && vision.quality.value !== "unknown") {
+    signals.push("vision:quality");
+  }
+  return evidenceValue(
+    signals.length ? "evidence_available" : "unknown",
+    signals.some((signal) => signal.startsWith("vision")) ? "mixed" : "api_and_text",
+    signals.length ? Math.min(0.5 + signals.length * 0.1, 0.8) : 0,
+    signals,
+    raw.observed_at,
+  );
+}
+
+const SUBCATEGORY_PATTERNS = [
+  {value: "skirt", pattern: /半身裙|短裙|百褶裙|A字裙/iu},
+  {value: "dress", pattern: /连衣裙|裙装/iu},
+  {value: "trousers", pattern: /裤|牛仔裤|西装裤/iu},
+  {value: "shirt", pattern: /衬衫/iu},
+  {value: "knitwear", pattern: /针织|毛衣/iu},
+  {value: "t_shirt", pattern: /T恤|短袖/iu},
+];
+const STYLE_PATTERNS = [
+  {value: "sweet", pattern: /甜美|甜妹|蝴蝶结|荷叶边/iu},
+  {value: "elegant", pattern: /优雅|法式|精致/iu},
+  {value: "minimal", pattern: /极简|简约|基础款/iu},
+  {value: "cityboy", pattern: /cityboy|城市男孩/iu},
+  {value: "sporty", pattern: /运动|跑步|训练/iu},
+  {value: "street", pattern: /街头|潮牌|嘻哈/iu},
+  {value: "business_casual", pattern: /商务休闲|通勤/iu},
+];
+const OCCASION_PATTERNS = [
+  {value: "date", pattern: /约会/iu},
+  {value: "work", pattern: /通勤|商务|职场/iu},
+  {value: "party", pattern: /派对|宴会|晚宴/iu},
+  {value: "daily", pattern: /日常|休闲/iu},
+  {value: "sport", pattern: /运动|跑步|训练/iu},
+];
+const COLOR_PATTERNS = [
+  {value: "black", pattern: /黑色|黑款|雅黑/iu},
+  {value: "white", pattern: /白色|奶油白|米白/iu},
+  {value: "beige", pattern: /米色|卡其|燕麦/iu},
+  {value: "pink", pattern: /粉色|粉红/iu},
+  {value: "red", pattern: /红色|酒红/iu},
+  {value: "blue", pattern: /蓝色|藏蓝/iu},
+  {value: "green", pattern: /绿色|薄荷绿/iu},
+  {value: "gray", pattern: /灰色|炭灰/iu},
+  {value: "brown", pattern: /棕色|咖色/iu},
+];
+const SILHOUETTE_PATTERNS = [
+  {value: "cropped", pattern: /短款|露腰/iu},
+  {value: "longline", pattern: /长款|长版/iu},
+  {value: "a_line", pattern: /A字|伞裙/iu},
+  {value: "wide_leg", pattern: /阔腿|宽腿/iu},
+  {value: "straight", pattern: /直筒/iu},
+  {value: "fitted", pattern: /修身|贴身/iu},
+  {value: "oversized", pattern: /宽松|廓形|oversize/iu},
+];
+const FIT_PATTERNS = [
+  {value: "slim", pattern: /修身|紧身|贴身/iu},
+  {value: "regular", pattern: /常规版|合身/iu},
+  {value: "relaxed", pattern: /宽松|落肩/iu},
+];
+const FOOTWEAR_PATTERNS = [
+  {value: "mary_jane", pattern: /玛丽珍/iu},
+  {value: "ballet_flat", pattern: /芭蕾鞋|舞鞋/iu},
+  {value: "loafer", pattern: /乐福鞋/iu},
+  {value: "pump", pattern: /尖头鞋|单鞋/iu},
+  {value: "heel", pattern: /高跟|低跟|粗跟/iu},
+  {value: "sneaker", pattern: /运动鞋|板鞋|德训鞋|跑鞋|训练鞋/iu},
+  {value: "boot", pattern: /靴|短靴|长靴/iu},
+  {value: "oxford", pattern: /牛津鞋/iu},
+];
+const MATERIAL_PATTERNS = [
+  {value: "cotton_mention", pattern: /棉|纯棉/iu},
+  {value: "wool_mention", pattern: /羊毛|羊绒/iu},
+  {value: "leather_mention", pattern: /真皮|牛皮|羊皮/iu},
+  {value: "knit_mention", pattern: /针织/iu},
+  {value: "denim_mention", pattern: /牛仔/iu},
+  {value: "silk_mention", pattern: /真丝|丝绸/iu},
+  {value: "polyester_mention", pattern: /聚酯|涤纶/iu},
+];
+const BODY_FIT_PATTERNS = [
+  {value: "high_rise_proportion", pattern: /高腰/iu},
+  {value: "waist_definition", pattern: /收腰|束腰/iu},
+  {value: "vertical_line", pattern: /直筒|纵向/iu},
+  {value: "cropped_proportion", pattern: /短款/iu},
+  {value: "relaxed_volume", pattern: /阔腿|宽松|廓形/iu},
+];
+
 module.exports = {
+  ENRICHMENT_EXTRACTOR_VERSION,
   RAW_TAOBAO_FIXTURE_SCHEMA_VERSION,
   RAW_TAOBAO_PRODUCT_SCHEMA_VERSION,
+  attachEnrichmentToCandidate,
   buildRawAvailabilityMatrix,
   buildRawTaobaoProduct,
   createSanitizedRawFixture,
+  enrichTaobaoCandidate,
 };

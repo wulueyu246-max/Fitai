@@ -102,6 +102,22 @@ const {
   resolveStyleExpression,
 } = require("./recommendation_context");
 const {
+  createDecisionContext,
+  enrichDecisionContext,
+  validateDecisionContext,
+} = require("./decision_context");
+const {interpretUserIntent} = require("./user_intent_brain");
+const {buildBodyFitProfile} = require("./body_fit_intelligence");
+const {generateLookConceptPortfolio} = require("./look_concept_generator");
+const {
+  MockMarketSignalProvider,
+  generateMarketFashionContext,
+} = require("./market_fashion_brain");
+const {
+  NewDecisionPipelineError,
+  executeNewDecisionPipeline,
+} = require("./new_decision_pipeline");
+const {
   StyleInterpretationCache,
   StyleProfileInvalidError,
   assertValidStyleInterpretation,
@@ -142,6 +158,7 @@ require("dotenv").config({
 });
 
 const fashionBrain = FashionBrain.load();
+const marketSignalProvider = new MockMarketSignalProvider();
 
 function readPositiveInteger(value, fallback) {
   const parsed = Number(value);
@@ -370,6 +387,10 @@ const config = Object.freeze({
   apiKey: aiConfig.apiKey,
   aiTimeoutMs: resolveAiTimeoutMs(process.env.AI_TIMEOUT_MS),
   phasedOutfitEnabled: true,
+  newDecisionPipelineEnabled: readBoolean(
+    process.env.NEW_DECISION_PIPELINE,
+    false,
+  ),
   intentTimeoutMs: resolveIntentTimeoutMs(process.env.AI_INTENT_TIMEOUT_MS),
   blueprintTimeoutMs: resolveBlueprintTimeoutMs(
     process.env.AI_BLUEPRINT_TIMEOUT_MS,
@@ -1067,6 +1088,59 @@ function normalizeOutfitStructuredContext(value, {
   });
 }
 
+function preferredItemBudgetFromRequest(rawUserInput, itemBudget) {
+  const match = String(rawUserInput || "").match(
+    /(?:预算|不超过|以内)\s*[¥￥]?\s*(\d+(?:\.\d+)?)/u,
+  );
+  return match ? Number(match[1]) : itemBudgetCeiling(itemBudget);
+}
+
+function decisionContextStringList(value) {
+  const values = Array.isArray(value) ? value : [];
+  return [...new Set(values
+    .filter((item) => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean))].slice(0, 24);
+}
+
+function explicitClauses(rawUserInput, pattern) {
+  return String(rawUserInput || "")
+    .split(/[，。；,;\n]+/u)
+    .map((value) => value.trim())
+    .filter((value) => value && pattern.test(value));
+}
+
+function explicitStyleFromInput(rawUserInput, providedStyle) {
+  const explicit = typeof providedStyle === "string" ? providedStyle.trim() : "";
+  if (explicit) return explicit;
+  const raw = String(rawUserInput || "").trim();
+  if (!raw) return "";
+  const canonical = raw.match(
+    /(?:想要|想穿|喜欢|偏好|风格(?:是|为)?)[：:\s]*([A-Za-z][A-Za-z0-9_-]*(?:\s*\+\s*[A-Za-z][A-Za-z0-9_-]*)?)/iu,
+  );
+  if (canonical?.[1]) return canonical[1].trim().toLowerCase();
+  if (/^[A-Za-z][A-Za-z0-9_+\-\s]*$/u.test(raw)) return raw.toLowerCase();
+  return /(?:风格|穿搭|造型|风)(?:$|[，。；,;\s])/u.test(raw) ? raw : "";
+}
+
+function normalizeStructuredBodyProfile(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const result = {};
+  for (const key of [
+    "shoulder", "shoulder_width", "shoulder_relation", "waist",
+    "waist_position", "hip", "hip_relation", "body_type", "body_shape",
+    "frame", "chest", "inseam", "leg_length", "leg_length_relation",
+    "leg_ratio", "torso_length", "torso_relation", "upper_body_length",
+    "waistline_position", "body_frame",
+  ]) {
+    const item = value[key];
+    if ((typeof item === "string" && item.trim()) || Number.isFinite(item)) {
+      result[key] = typeof item === "string" ? item.trim() : item;
+    }
+  }
+  return result;
+}
+
 function validateOutfitRequest(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new RequestValidationError("请求体必须是 JSON 对象");
@@ -1083,6 +1157,18 @@ function validateOutfitRequest(body) {
     throw new RequestValidationError("request 与 user_input 必须完全一致");
   }
   const request = requestValue || userInputValue;
+  const suppliedRawUserInput = typeof (body.raw_user_input ?? body.rawUserInput) ===
+      "string"
+    ? String(body.raw_user_input ?? body.rawUserInput).trim() : "";
+  if (
+    suppliedRawUserInput &&
+    request &&
+    suppliedRawUserInput !== request &&
+    !request.startsWith(suppliedRawUserInput)
+  ) {
+    throw new RequestValidationError("raw_user_input 必须与 request 的用户原文一致");
+  }
+  const rawUserInput = suppliedRawUserInput || request;
   const contextSource = body.context && typeof body.context === "object" &&
     !Array.isArray(body.context) ? body.context : {};
   const gender = resolveAuthoritativeGender(
@@ -1119,6 +1205,10 @@ function validateOutfitRequest(body) {
 
   if (request.length > 2000) {
     throw new RequestValidationError("request 不能超过 2000 个字符");
+  }
+
+  if (rawUserInput.length > 2000) {
+    throw new RequestValidationError("raw_user_input 不能超过 2000 个字符");
   }
 
   if (!images || typeof images !== "object" || Array.isArray(images)) {
@@ -1158,13 +1248,155 @@ function validateOutfitRequest(body) {
     scene,
     request,
     user_input: request,
+    rawUserInput,
     gender,
     authoritative_gender: gender,
     itemBudget,
     outfitBudget,
+    explicitStyle: explicitStyleFromInput(
+      rawUserInput,
+      body.explicit_style ?? body.explicitStyle,
+    ),
+    explicitRequirements: decisionContextStringList(
+      body.explicit_requirements ?? body.explicitRequirements,
+    ).concat(explicitClauses(
+      rawUserInput,
+      /(?:必须|务必|一定要|需要|要有|不能少)/u,
+    )).filter((value, index, values) => values.indexOf(value) === index)
+      .slice(0, 24),
+    explicitAvoid: decisionContextStringList(
+      body.explicit_avoid ?? body.explicitAvoid,
+    ).concat(explicitClauses(
+      rawUserInput,
+      /(?:不要|不想|不穿|不喜欢|不接受|避免|拒绝)/u,
+    )).filter((value, index, values) => values.indexOf(value) === index),
+    explicitPreferences: decisionContextStringList(
+      body.explicit_preferences ?? body.explicitPreferences,
+    ).concat(explicitClauses(
+      rawUserInput,
+      /(?:想要|想穿|喜欢|偏好)/u,
+    )).filter((value, index, values) =>
+      !/(?:不要|不想|不穿|不喜欢|不接受|避免|拒绝)/u.test(value) &&
+      values.indexOf(value) === index),
+    structuredBodyProfile: normalizeStructuredBodyProfile({
+      ...structuredContext.body_profile,
+      ...(body.body_profile ?? body.bodyProfile ?? {}),
+    }),
     images: Object.freeze(normalizedImages),
     context: structuredContext,
   });
+}
+
+function attachUserIntentBrainToContext(context) {
+  if (!validateDecisionContext(context)) {
+    const error = new Error("UserIntentBrain requires a valid DecisionContext");
+    error.code = "USER_INTENT_BRAIN_CONTEXT_INVALID";
+    throw error;
+  }
+  return enrichDecisionContext(context, {
+    userIntent: interpretUserIntent(context),
+    userIntentSource: "system",
+    userIntentConfidence: 1,
+  });
+}
+
+function attachBodyFitIntelligenceToContext(context) {
+  if (!validateDecisionContext(context)) {
+    const error = new Error("BodyFitIntelligence requires a valid DecisionContext");
+    error.code = "BODY_FIT_INTELLIGENCE_CONTEXT_INVALID";
+    throw error;
+  }
+  return enrichDecisionContext(context, {
+    bodyFitProfile: buildBodyFitProfile(context),
+    bodyFitSource: "system",
+    bodyFitConfidence: 1,
+  });
+}
+
+function attachLookConceptsToContext(context) {
+  if (!validateDecisionContext(context)) {
+    const error = new Error("LookConceptGenerator requires a valid DecisionContext");
+    error.code = "LOOK_CONCEPT_CONTEXT_INVALID";
+    throw error;
+  }
+  const portfolio = generateLookConceptPortfolio(context);
+  return enrichDecisionContext(context, {
+    concepts: portfolio.concepts,
+    conceptSource: "ai_inference",
+    conceptDiversity: portfolio.concept_diversity,
+    conceptValidation: portfolio.validation,
+    styleTargets: portfolio.style_targets,
+    styleTargetSource: "system",
+  });
+}
+
+function attachMarketFashionBrainToContext(context, {
+  provider = marketSignalProvider,
+  scope,
+  now,
+} = {}) {
+  if (!validateDecisionContext(context)) {
+    const error = new Error("MarketFashionBrain requires a valid DecisionContext");
+    error.code = "MARKET_FASHION_CONTEXT_INVALID";
+    throw error;
+  }
+  const market = generateMarketFashionContext(context, {provider, scope, now});
+  return enrichDecisionContext(context, {
+    marketFashion: market,
+    marketSource: "market",
+    marketConfidence: market.confidence,
+  });
+}
+
+function createOutfitDecisionContext(outfitRequest, {
+  provider = productProvider?.name || "unknown",
+  timestamp,
+} = {}) {
+  const context = createDecisionContext({
+    requestId: outfitRequest.requestId,
+    decisionContextId: outfitRequest.requestId,
+    rawUserInput: outfitRequest.rawUserInput,
+    timestamp,
+    stage: "outfit_request",
+    userTruth: {
+      gender: outfitRequest.authoritative_gender || outfitRequest.gender,
+      scene: outfitRequest.scene,
+      budget: {
+        item: outfitRequest.itemBudget,
+        outfit: outfitRequest.outfitBudget,
+        preferred_item: preferredItemBudgetFromRequest(
+          outfitRequest.rawUserInput,
+          outfitRequest.itemBudget,
+        ),
+      },
+      explicitStyle: outfitRequest.explicitStyle,
+      explicitRequirements: outfitRequest.explicitRequirements,
+      explicitAvoid: outfitRequest.explicitAvoid,
+      explicitPreferences: outfitRequest.explicitPreferences,
+    },
+    body: {
+      height: {value: outfitRequest.height, source: "user", confidence: 1},
+      weight: {value: outfitRequest.weight, source: "user", confidence: 1},
+      structuredMeasurements: outfitRequest.structuredBodyProfile,
+      source: "user",
+      confidence: 1,
+    },
+    market: {status: "NOT_CONNECTED", signals: [], confidence: 0},
+    recommendationContext: {
+      locale: "zh-CN",
+      currency: "CNY",
+      provider,
+      ...(timestamp ? {timestamp} : {}),
+      version: "decision_context.v1",
+    },
+  });
+  return attachMarketFashionBrainToContext(
+    attachLookConceptsToContext(
+      attachBodyFitIntelligenceToContext(
+        attachUserIntentBrainToContext(context),
+      ),
+    ),
+  );
 }
 
 function extractAiText(response) {
@@ -4823,6 +5055,7 @@ app.get("/health", (req, res) => {
     product_provider: productProvider.name,
     product_provider_status: productProvider.status || productProvider.name,
     product_provider_configured: Boolean(productProvider.configured),
+    new_decision_pipeline_enabled: config.newDecisionPipelineEnabled,
     product_ai_reranker: productAestheticReranker.getStats(),
     product_visual_verifier: visualProductVerifier.getStats(),
   });
@@ -6977,6 +7210,7 @@ app.post(
   let aiRequestStartedAt;
   let fallbackStyleInterpretation;
   let styleCacheContext;
+  let newDecisionPipelineFallback = null;
   const requestStartedAt = Date.now();
   const deferProducts = req.get("x-defer-products") === "true";
 
@@ -6985,6 +7219,38 @@ app.post(
       ...validateOutfitRequest(req.body),
       requestId: res.locals.requestId,
     };
+    if (config.newDecisionPipelineEnabled) {
+      outfitRequest.decisionContext = createOutfitDecisionContext(outfitRequest);
+      try {
+        const responsePayload = await executeNewDecisionPipeline({
+          decisionContext: outfitRequest.decisionContext,
+          productProvider,
+          logger: console,
+        });
+        setServerTiming(res, {total: Date.now() - requestStartedAt});
+        return res.json(responsePayload);
+      } catch (error) {
+        if (!(error instanceof NewDecisionPipelineError) ||
+            error.fallbackAllowed !== true) {
+          throw error;
+        }
+        newDecisionPipelineFallback = Object.freeze({
+          mode: "LEGACY_FALLBACK_ONLY",
+          fallback_used: true,
+          fallback_reason: error.code,
+          fallback_stage: error.stage,
+          silent_fallback: false,
+          legacy_blueprint_calls: 1,
+        });
+        console.warn("new_decision_pipeline_fallback", {
+          request_id: outfitRequest.requestId,
+          fallback_reason: error.code,
+          fallback_stage: error.stage,
+          legacy_blueprint_allowed: true,
+          silent_fallback: false,
+        });
+      }
+    }
     if (config.shoppingAgentV1Enabled) {
       const shoppingAgentStartedAt = Date.now();
       const routed = await dispatchOutfitProductionPath({
@@ -7014,6 +7280,8 @@ app.post(
       });
       return res.json({
         ...routed.payload,
+        ...(newDecisionPipelineFallback
+          ? {decision_pipeline: newDecisionPipelineFallback} : {}),
         analysisMode: "shopping_agent_v1",
       });
     }
@@ -7082,6 +7350,8 @@ app.post(
       setServerTiming(res, {total: Date.now() - requestStartedAt});
       return res.json({
         ...responsePayload,
+        ...(newDecisionPipelineFallback
+          ? {decision_pipeline: newDecisionPipelineFallback} : {}),
         fallbackReason: config.forceMockAi
           ? "AI_FORCE_MOCK"
           : "AI_NOT_CONFIGURED",
@@ -7105,6 +7375,8 @@ app.post(
       setServerTiming(res, {total: Date.now() - requestStartedAt});
       return res.json({
         ...responsePayload,
+        ...(newDecisionPipelineFallback
+          ? {decision_pipeline: newDecisionPipelineFallback} : {}),
         fallbackReason: "AI_CAPACITY_REACHED",
       });
     }
@@ -7610,6 +7882,8 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
 
     return res.json({
       ...responsePayload,
+      ...(newDecisionPipelineFallback
+        ? {decision_pipeline: newDecisionPipelineFallback} : {}),
       analysisMode: analysis.analysisMode || "ai",
     });
   } catch (error) {
@@ -7714,6 +7988,8 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       });
       return res.json({
         ...responsePayload,
+        ...(newDecisionPipelineFallback
+          ? {decision_pipeline: newDecisionPipelineFallback} : {}),
         analysisMode: "rule_fallback",
         fallbackReason: "AI_TIMEOUT",
       });
@@ -7731,6 +8007,8 @@ Socks, hosiery, and skin exposure are styling tools only when they improve this 
       });
       return res.json({
         ...responsePayload,
+        ...(newDecisionPipelineFallback
+          ? {decision_pipeline: newDecisionPipelineFallback} : {}),
         fallbackReason,
       });
     }
@@ -7934,6 +8212,8 @@ module.exports = {
   productClickStore,
   fashionBrain,
   config,
+  createOutfitDecisionContext,
+  executeNewDecisionPipeline,
   createBasicFallbackOutfitAnalysis,
   generateSemanticFallbackInterpretation,
   hasConcreteSemanticFallback,

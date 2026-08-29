@@ -8,11 +8,13 @@ const {
 } = require("./taobao_client");
 const {
   SUPPORTED_PRODUCT_CATEGORIES,
+  authoritativeProductGender,
   buildTaobaoSearchPlan,
   categoryPriority,
   normalizeGender,
   normalizeProductCategory,
   normalizeProductRequirement,
+  normalizeSearchSubcategory,
   productQualityBlock,
   rankProducts,
   sortProductsByCategoryPriority,
@@ -47,10 +49,20 @@ const {
   scoreAndSortProducts,
 } = require("./product_aesthetic_match");
 const {
+  ProductAestheticReranker,
+} = require("./product_aesthetic_reranker");
+const {
   DEFAULT_MAX_CANDIDATES_PER_SLOT,
 } = require("./visual_product_verification");
 const {
+  candidateHardGate,
+  composeOutfitCandidates,
+} = require("./outfit_aesthetic_strategy");
+const {isProductionRuntime} = require("./decision_context");
+const {
+  attachEnrichmentToCandidate,
   buildRawTaobaoProduct,
+  enrichTaobaoCandidate,
 } = require("./taobao_candidate_enrichment");
 
 const PRODUCT_CATEGORIES = SUPPORTED_PRODUCT_CATEGORIES;
@@ -60,16 +72,676 @@ const TAOBAO_STAGE_BUDGET_MS = 15_000;
 const PRODUCT_RERANK_BUDGET_MS = 20_000;
 const PRODUCT_VISUAL_VERIFICATION_BUDGET_MS = 20_000;
 const MAX_VISUAL_CANDIDATES_PER_SLOT = 12;
+const DEFAULT_RELEVANCE_POOL_PER_REQUIREMENT = 8;
+const DEFAULT_STRATEGY_CANDIDATE_BREADTH = 6;
+const DEFAULT_STRATEGY_BEAM_WIDTH = 72;
 const DEFAULT_RECOMMENDATION_CACHE_TTL_MS = 7 * 60 * 1000;
 const DEFAULT_RECOMMENDATION_CACHE_ENTRIES = 150;
 
 class ProductProviderError extends Error {
-  constructor(message, {status = 502, code = "PRODUCT_PROVIDER_FAILED", cause} = {}) {
+  constructor(message, {
+    status = 502,
+    code = "PRODUCT_PROVIDER_FAILED",
+    cause,
+    details,
+  } = {}) {
     super(message, {cause});
     this.name = "ProductProviderError";
     this.status = status;
     this.code = code;
+    if (details != null) this.details = details;
   }
+}
+
+function postProcessOutfitCandidates({
+  requirements = [],
+  products = [],
+  context = {},
+  provider = "unknown",
+  logger = console,
+  strategy = composeOutfitCandidates,
+} = {}) {
+  const safeRequirements = Array.isArray(requirements) ? requirements : [];
+  const safeProducts = Array.isArray(products) ? products : [];
+  const expectedSelections = expectedOutfitSelections(safeRequirements);
+  if (expectedSelections.length === 0) {
+    logger.info?.("outfit_aesthetic_strategy_skipped", {
+      request_id: context.requestId || undefined,
+      provider,
+      reason: "NO_COMPOSABLE_LOOK",
+      candidate_count: safeProducts.length,
+    });
+    return Object.freeze({
+      applied: false,
+      products: safeProducts,
+      looks: Object.freeze([]),
+      version: null,
+    });
+  }
+
+  let composition;
+  try {
+    composition = strategy({
+      requirements: safeRequirements,
+      products: safeProducts,
+      context,
+      topPerRequirement: DEFAULT_STRATEGY_CANDIDATE_BREADTH,
+      beamWidth: DEFAULT_STRATEGY_BEAM_WIDTH,
+    });
+  } catch (error) {
+    logger.error?.("outfit_aesthetic_strategy_failed", {
+      request_id: context.requestId || undefined,
+      provider,
+      error_code: safeProviderCode(error),
+    });
+    throw new ProductProviderError("整套穿搭联合选择失败", {
+      status: 502,
+      code: "OUTFIT_AESTHETIC_STRATEGY_FAILED",
+      cause: error,
+    });
+  }
+
+  const selectedProducts = Array.isArray(composition?.products)
+    ? composition.products.map(annotateOutfitStrategySelection)
+    : [];
+  const selectedKeys = new Set(selectedProducts.map(outfitSelectionKey));
+  const missingSelections = expectedSelections.filter((selection) =>
+    !selectedKeys.has(selection.key));
+  if (composition?.applied !== true || selectedProducts.length === 0 ||
+      missingSelections.length > 0) {
+    logger.error?.("outfit_aesthetic_strategy_incomplete", {
+      request_id: context.requestId || undefined,
+      provider,
+      expected_selection_count: expectedSelections.length,
+      selected_count: selectedProducts.length,
+      missing: missingSelections.map(({lookId, slot}) => ({
+        look_id: lookId,
+        slot,
+      })),
+    });
+    throw new ProductProviderError("整套穿搭联合选择未覆盖全部需求槽位", {
+      status: 422,
+      code: "OUTFIT_AESTHETIC_STRATEGY_INCOMPLETE",
+      details: {
+        missing: missingSelections.map(({lookId, slot}) => ({
+          look_id: lookId,
+          slot,
+        })),
+      },
+    });
+  }
+
+  const result = Object.freeze({
+    ...composition,
+    products: Object.freeze(selectedProducts),
+  });
+  logger.info?.("outfit_aesthetic_strategy_summary", {
+    request_id: context.requestId || undefined,
+    provider,
+    version: result.version,
+    look_count: result.looks.length,
+    selected_count: result.products.length,
+    looks: result.looks.map((look) => ({
+      look_id: look.look_id,
+      final_score: look.final_score,
+      duplicate_penalty: look.duplicate_penalty,
+      selected_candidate_ids: look.selected_candidate_ids,
+      candidate_breadth: look.candidate_breadth,
+    })),
+  });
+  return result;
+}
+
+async function runSharedCandidatePipeline({
+  requirements = [],
+  groups = [],
+  context = {},
+  provider = "unknown",
+  logger = console,
+  environment = process.env,
+  reranker = null,
+  outfitPostProcessor = postProcessOutfitCandidates,
+  rerankTimeoutMs = PRODUCT_RERANK_BUDGET_MS,
+  deadlineAt = 0,
+} = {}) {
+  const safeRequirements = (Array.isArray(requirements) ? requirements : [])
+    .map((requirement) => normalizeProductRequirement(
+      {...context, ...requirement},
+      context,
+    ));
+  const requirementsByKey = new Map(safeRequirements.map((requirement) => [
+    requirementPipelineKey(requirement),
+    requirement,
+  ]));
+  const rawGroups = (Array.isArray(groups) ? groups : []).map((group) => {
+    const normalized = normalizeProductRequirement(
+      {...context, ...(group?.requirement || {})},
+      context,
+    );
+    const requirement = requirementsByKey.get(requirementPipelineKey(normalized)) ||
+      normalized;
+    return {
+      requirement,
+      candidates: (Array.isArray(group?.candidates) ? group.candidates : [])
+        .map((product) => preserveCandidateContract(product, requirement)),
+    };
+  });
+  const rawUserInput =
+    context.decision_context?.raw_user_input ||
+    context.recommendation_context?.decision_context?.raw_user_input || null;
+  const includeRawUserInput = !isProductionRuntime(environment);
+  const trace = {
+    request_id: context.requestId || context.request_id || null,
+    decision_context_id:
+      context.decision_context?.decision_context_id ||
+      context.recommendation_context?.decision_context_id ||
+      context.decision_context_id || null,
+    ...(includeRawUserInput ? {raw_user_input: rawUserInput} : {}),
+    provider,
+    raw_candidates: rawGroups.flatMap((group) => group.candidates.map((product) =>
+      candidateTraceRecord(product, group.requirement, "RAW"))),
+    relevance_pass: [],
+    gate_pass: [],
+    gate_reject: [],
+    reranker_keep: [],
+    strategy_selected: [],
+    relevance_executed: true,
+    reranker_executed: false,
+    strategy_executed: false,
+    reranker_status: "NOT_RUN",
+    query_plans: safeRequirements.map((requirement) => Object.freeze({
+      look_id: requirement.look_id,
+      concept_id: requirement.concept_id,
+      slot: outfitRequirementSlot(requirement),
+      query_plan_version: requirement.query_plan_version || null,
+      commerce_queries: Object.freeze(requirementSearchKeywords(requirement)),
+      commerce_negatives: Object.freeze([
+        ...(requirement.commerce_query_plan?.commerce_negatives || []),
+      ]),
+    })),
+  };
+
+  const relevanceGroups = rawGroups.map((group) => {
+    const keyword = requirementSearchKeywords(group.requirement).join(" ") ||
+      group.requirement.item_name || "";
+    const candidates = rankProducts(
+      group.candidates,
+      group.requirement,
+      keyword,
+      {minimumScore: 35},
+    ).slice(0, DEFAULT_RELEVANCE_POOL_PER_REQUIREMENT).map((product) =>
+      preserveCandidateContract(product, group.requirement));
+    trace.relevance_pass.push(...candidates.map((product) =>
+      candidateTraceRecord(product, group.requirement, "RELEVANCE_PASS")));
+    return {requirement: group.requirement, candidates};
+  });
+
+  const gateGroups = relevanceGroups.map((group) => {
+    const candidates = [];
+    for (const product of group.candidates) {
+      const gate = sharedCandidateGate(product, group.requirement, context);
+      if (!gate.allowed) {
+        trace.gate_reject.push(candidateTraceRecord(
+          product,
+          group.requirement,
+          "GATE_REJECT",
+          gate.reason,
+        ));
+        continue;
+      }
+      const candidate = preserveCandidateContract({
+        ...gate.product,
+        candidate_gate_result: "PASS",
+        candidate_gate_reason: "PASS",
+      }, group.requirement);
+      candidates.push(candidate);
+      trace.gate_pass.push(candidateTraceRecord(
+        candidate,
+        group.requirement,
+        "GATE_PASS",
+      ));
+    }
+    return {requirement: group.requirement, candidates};
+  });
+
+  const gateCandidatesFlat = gateGroups.flatMap((group) => group.candidates);
+  if (gateCandidatesFlat.length === 0) {
+    emitCandidatePipelineTrace(logger, trace);
+    return Object.freeze({
+      applied: false,
+      products: Object.freeze([]),
+      looks: Object.freeze([]),
+      version: null,
+      trace: freezeCandidatePipelineTrace(trace),
+    });
+  }
+
+  const activeReranker = reranker || new ProductAestheticReranker({
+    client: null,
+    visualEvaluationEnabled: false,
+    logger,
+  });
+  trace.reranker_executed = true;
+  let reranked;
+  try {
+    const timeoutMs = deadlineAt > 0
+      ? Math.max(1, Math.min(rerankTimeoutMs, deadlineAt - Date.now()))
+      : rerankTimeoutMs;
+    reranked = await withTimeBudget(activeReranker.rerank({
+      groups: gateGroups,
+      context,
+      requestId: trace.request_id || "",
+      selectionLimit: DEFAULT_STRATEGY_CANDIDATE_BREADTH,
+    }), timeoutMs, "AI_RERANK_TIMEOUT");
+    trace.reranker_status = reranked.some((product) =>
+      product?.ai_rerank_fallback === true) ? "FALLBACK" : "SUCCESS";
+  } catch (error) {
+    trace.reranker_status = "FAILED_FALLBACK";
+    logger.warn?.("candidate_pipeline_reranker_failed", {
+      request_id: trace.request_id || undefined,
+      provider,
+      error_code: safeProviderCode(error),
+    });
+    reranked = gateGroups.flatMap((group) => markRerankFallback(
+      group.candidates.slice(0, DEFAULT_STRATEGY_CANDIDATE_BREADTH),
+    ));
+  }
+  const sourceCandidates = new Map(gateCandidatesFlat.map((product) => [
+    candidatePipelineKey(product),
+    product,
+  ]));
+  const rerankerProducts = limitProductsPerRequirement(
+    (Array.isArray(reranked) ? reranked : [])
+    .map((product) => restoreCandidateContract(product, sourceCandidates))
+      .filter(Boolean),
+    safeRequirements,
+    DEFAULT_STRATEGY_CANDIDATE_BREADTH,
+  );
+  trace.reranker_keep.push(...rerankerProducts.map((product) =>
+    candidateTraceRecord(product, findRequirementForProduct(
+      safeRequirements,
+      product,
+    ), "RERANKER_KEEP")));
+  if (rerankerProducts.length === 0) {
+    emitCandidatePipelineTrace(logger, trace);
+    throw new ProductProviderError("商品审美复选后没有可用商品", {
+      status: 422,
+      code: "PRODUCT_RERANKER_EMPTY",
+      details: {trace},
+    });
+  }
+
+  let composition;
+  try {
+    composition = outfitPostProcessor({
+      requirements: safeRequirements,
+      products: rerankerProducts,
+      context,
+      provider,
+      logger,
+    });
+  } catch (error) {
+    emitCandidatePipelineTrace(logger, trace);
+    throw error;
+  }
+  trace.strategy_executed = composition?.applied === true;
+  const selectedProducts = (Array.isArray(composition?.products)
+    ? composition.products : []).map((product) =>
+    restoreCandidateContract(product, sourceCandidates) || product);
+  trace.strategy_selected.push(...selectedProducts.map((product) =>
+    candidateTraceRecord(product, findRequirementForProduct(
+      safeRequirements,
+      product,
+    ), "STRATEGY_SELECTED")));
+  emitCandidatePipelineTrace(logger, trace);
+  return Object.freeze({
+    ...composition,
+    products: Object.freeze(selectedProducts),
+    trace: freezeCandidatePipelineTrace(trace),
+  });
+}
+
+function limitProductsPerRequirement(products, requirements, limit) {
+  const counts = new Map();
+  return products.filter((product) => {
+    const requirement = findRequirementForProduct(requirements, product);
+    const key = requirementPipelineKey(requirement || product);
+    const count = counts.get(key) || 0;
+    if (count >= limit) return false;
+    counts.set(key, count + 1);
+    return true;
+  });
+}
+
+function sharedCandidateGate(product, requirement, context) {
+  const gateRequirement = {
+    ...requirement,
+    category: outfitRequirementSlot(requirement),
+  };
+  const hardGate = candidateHardGate(product, gateRequirement, context);
+  if (!hardGate.allowed) return hardGate;
+  const qualityBlock = productQualityBlock(product, requirement);
+  if (qualityBlock) {
+    return {allowed: false, reason: `QUALITY_${qualityBlock.blocked_category}`};
+  }
+  const purchaseSpecification = compilePurchaseSpecification(requirement, context);
+  const productSlot = outfitRequirementSlot(product);
+  const purchaseGateProduct = productSlot !== requirement.category
+    ? {...product, category: requirement.category}
+    : product;
+  // The legacy Purchase Specification taxonomy represents hosiery as an
+  // accessory. The shared slot gate above already validates the true `socks`
+  // slot, so do not turn that taxonomy bridge into a false category conflict.
+  if (productSlot !== "socks" &&
+      gateCandidates([purchaseGateProduct], purchaseSpecification).length === 0) {
+    return {allowed: false, reason: "PURCHASE_SPECIFICATION_CONFLICT"};
+  }
+  const outfitBlueprint = context.outfit_blueprint || context.outfitBlueprint ||
+    context.recommendation_context?.outfit_blueprint || {};
+  const styleProfile = context.style_profile || context.styleProfile ||
+    context.recommendation_context?.style_profile || {};
+  const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
+  const blueprint = blueprintMatchAssessment(product, requirement, outfitBlueprint);
+  if (!blueprintMatchPassesHardGate(blueprint, intentPriorityScore)) {
+    return {allowed: false, reason: "BLUEPRINT_HARD_GATE_CONFLICT"};
+  }
+  const body = bodyStrategyMatchAssessment(
+    product,
+    requirement,
+    outfitBlueprint,
+    context,
+  );
+  if (!context.body_fit_soft_only && body.configured && body.score < 40) {
+    return {allowed: false, reason: "BODY_STRATEGY_CONFLICT"};
+  }
+  const marketSoftMatchScore = marketSoftSignalAssessment(product, requirement);
+  const styleGate = evaluateStyleGate(product, styleProfile, intentPriorityScore);
+  if (!styleGate.allowed) return {allowed: false, reason: "STYLE_GATE_CONFLICT"};
+  return {
+    allowed: true,
+    reason: "PASS",
+    product: {
+      ...product,
+      blueprint_match_score: blueprint.score,
+      body_strategy_match_score: body.score,
+      body_strategy_configured: body.configured,
+      market_soft_match_score: marketSoftMatchScore,
+      market_soft_signal_applied:
+        Array.isArray(requirement.market_soft_signals) &&
+        requirement.market_soft_signals.length > 0,
+      matched_elements: product.matched_elements || blueprint.matched_elements,
+      conflict_elements: product.conflict_elements || blueprint.conflict_elements,
+    },
+  };
+}
+
+function marketSoftSignalAssessment(product, requirement = {}) {
+  const signals = (Array.isArray(requirement.market_soft_signals)
+    ? requirement.market_soft_signals : [])
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean);
+  if (signals.length === 0) return 60;
+  const evidence = [
+    product?.title,
+    product?.name,
+    product?.style,
+    product?.style_tags,
+    product?.aesthetic_tags,
+    product?.silhouette_tags,
+    product?.detail_tags,
+    product?.occasion_tags,
+    product?.color,
+    product?.material,
+  ].flat(Infinity).filter(Boolean).join(" ").toLowerCase()
+    .replace(/[\s-]+/gu, "_");
+  const matches = signals.filter((signal) => {
+    const normalized = signal.replace(/[\s-]+/gu, "_");
+    return evidence.includes(normalized) ||
+      normalized.split("_").filter((token) => token.length > 2)
+        .some((token) => evidence.includes(token));
+  }).length;
+  return Math.max(40, Math.min(100, Math.round(
+    52 + (matches / signals.length) * 48,
+  )));
+}
+
+function preserveCandidateContract(product, requirement = {}) {
+  const originalGender = authoritativeProductGender(product);
+  const requestedGender = normalizeGender(
+    requirement.gender || product?.requested_gender || "unisex",
+  );
+  const originalCategory = product?.original_category || product?.category || "";
+  const lookId = String(
+    requirement?.look_id || requirement?.lookId || product?.look_id || "",
+  );
+  const conceptId = String(
+    requirement?.concept_id || requirement?.conceptId ||
+      product?.concept_id || "",
+  );
+  const slotKey = String(
+    requirement?.slot_key || requirement?.slotKey || product?.slot_key || "",
+  );
+  const candidateId = String(
+    product?.candidate_id || product?.product_id || product?.id || "",
+  );
+  return {
+    ...product,
+    ...(lookId ? {look_id: lookId} : {}),
+    ...(conceptId ? {concept_id: conceptId} : {}),
+    ...(slotKey ? {slot_key: slotKey} : {}),
+    ...(candidateId ? {candidate_id: candidateId} : {}),
+    original_gender: originalGender,
+    gender: originalGender,
+    requested_gender: requestedGender,
+    original_category: originalCategory,
+    style_tags: Object.freeze([...(product?.style_tags || product?.tags || [])]),
+    occasion_tags: Object.freeze([
+      ...(product?.occasion_tags || product?.occasions ||
+        (product?.occasion ? [product.occasion] : [])),
+    ]),
+    source: String(product?.source || "unknown"),
+  };
+}
+
+function restoreCandidateContract(product, sourceCandidates) {
+  const source = sourceCandidates.get(candidatePipelineKey(product));
+  if (!source) return null;
+  return preserveCandidateContract({...product,
+    original_gender: source.original_gender,
+    gender: source.original_gender,
+    requested_gender: source.requested_gender,
+    original_category: source.original_category,
+    source: source.source,
+    style_tags: source.style_tags,
+    occasion_tags: source.occasion_tags,
+  }, {gender: source.requested_gender});
+}
+
+function candidateTraceRecord(product, requirement = {}, stage, reason = "") {
+  return Object.freeze({
+    stage,
+    reason: reason || undefined,
+    look_id: String(product?.look_id || requirement?.look_id || ""),
+    slot: outfitRequirementSlot(product) || outfitRequirementSlot(requirement),
+    candidate_id: String(
+      product?.candidate_id || product?.product_id || product?.id || "",
+    ),
+    original_gender: authoritativeProductGender(product),
+    requested_gender: normalizeGender(
+      requirement?.gender || product?.requested_gender || "unisex",
+    ),
+    category: String(product?.category || ""),
+    style_tags: Object.freeze([...(product?.style_tags || product?.tags || [])]),
+    occasion_tags: Object.freeze([
+      ...(product?.occasion_tags || product?.occasions ||
+        (product?.occasion ? [product.occasion] : [])),
+    ]),
+    source: String(product?.source || "unknown"),
+    search_keyword: String(product?.search_keyword || ""),
+    commerce_queries: Object.freeze(requirementSearchKeywords(requirement)),
+  });
+}
+
+function requirementPipelineKey(requirement = {}) {
+  return `${String(requirement.look_id || requirement.lookId || "")}:` +
+    `${outfitRequirementSlot(requirement)}`;
+}
+
+function candidatePipelineKey(product = {}) {
+  return `${String(product.look_id || product.lookId || "")}:` +
+    `${outfitRequirementSlot(product)}:` +
+    `${String(product.candidate_id || product.product_id || product.id || "")}`;
+}
+
+function findRequirementForProduct(requirements, product) {
+  return requirements.find((requirement) =>
+    requirementPipelineKey(requirement) ===
+      `${String(product?.look_id || product?.lookId || "")}:` +
+      `${outfitRequirementSlot(product)}`) || {};
+}
+
+function freezeCandidatePipelineTrace(trace) {
+  return Object.freeze({...trace,
+    raw_candidates: Object.freeze([...trace.raw_candidates]),
+    relevance_pass: Object.freeze([...trace.relevance_pass]),
+    gate_pass: Object.freeze([...trace.gate_pass]),
+    gate_reject: Object.freeze([...trace.gate_reject]),
+    reranker_keep: Object.freeze([...trace.reranker_keep]),
+    strategy_selected: Object.freeze([...trace.strategy_selected]),
+    query_plans: Object.freeze([...(trace.query_plans || [])]),
+  });
+}
+
+function emitCandidatePipelineTrace(logger, trace) {
+  logger.info?.("product_candidate_pipeline_trace", freezeCandidatePipelineTrace(trace));
+}
+
+function expectedOutfitSelections(requirements) {
+  const grouped = new Map();
+  for (const requirement of requirements) {
+    const lookId = String(requirement?.look_id || requirement?.lookId || "").trim();
+    const slot = outfitRequirementSlot(requirement);
+    if (!lookId || !slot) continue;
+    const group = grouped.get(lookId) || new Map();
+    group.set(slot, {lookId, slot, key: `${lookId}:${slot}`});
+    grouped.set(lookId, group);
+  }
+  return [...grouped.values()].flatMap((group) => {
+    const slots = new Set(group.keys());
+    const dressBased = slots.has("dress") && slots.has("shoes");
+    const separates = slots.has("bottom") && slots.has("shoes") &&
+      (slots.has("top") || slots.has("outerwear"));
+    const invalid = slots.has("dress") &&
+      (slots.has("top") || slots.has("bottom"));
+    return dressBased || separates || invalid ? [...group.values()] : [];
+  });
+}
+
+function annotateOutfitStrategySelection(product) {
+  const candidateId = String(
+    product?.candidate_id || product?.product_id || product?.id || "",
+  ).trim();
+  return {
+    ...product,
+    outfit_selected_candidate_id: candidateId,
+    outfit_strategy_breakdown: Object.freeze({
+      style_coherence: product?.outfit_style_coherence_score ?? null,
+      occasion_formality_fit: product?.outfit_occasion_formality_score ?? null,
+      silhouette_coherence: product?.outfit_silhouette_score ?? null,
+      body_proportion: product?.outfit_body_proportion_score ?? null,
+      color_harmony: product?.outfit_color_harmony_score ?? null,
+      footwear_compatibility: product?.outfit_footwear_compatibility_score ?? null,
+      femininity_expression: product?.outfit_femininity_expression_score ?? null,
+      brand_quality_value_coherence:
+        product?.outfit_brand_quality_value_score ?? null,
+      legwear_compatibility: product?.outfit_legwear_compatibility_score ?? null,
+      market_alignment: product?.outfit_market_alignment_score ?? null,
+    }),
+  };
+}
+
+function outfitSelectionKey(product) {
+  const lookId = String(product?.look_id || product?.lookId || "").trim();
+  return `${lookId}:${outfitRequirementSlot(product)}`;
+}
+
+function outfitRequirementSlot(value = {}) {
+  const rawCategory = String(value?.category || value || "").trim().toLowerCase();
+  const subcategory = String(
+    value?.search_subcategory || value?.searchSubcategory ||
+      value?.subcategory || "",
+  ).trim().toLowerCase();
+  if (rawCategory === "socks" || subcategory === "socks") return "socks";
+  if (rawCategory === "skirt") return "bottom";
+  return normalizeProductCategory(rawCategory);
+}
+
+function mockCandidateForRequirement(product, requirement) {
+  const slot = outfitRequirementSlot(requirement);
+  const subcategory = mockRequirementSubcategory(requirement);
+  return preserveCandidateContract({
+    ...product,
+    look_id: String(requirement.look_id || requirement.lookId || ""),
+    category: slot,
+    slot,
+    ...(subcategory ? {
+      subcategory,
+      search_subcategory: subcategory,
+    } : {}),
+  }, requirement);
+}
+
+function mockCandidateMatchesRequirement(product, requirement) {
+  const slot = outfitRequirementSlot(requirement);
+  const requiredSubcategory = mockRequirementSubcategory(requirement);
+  const evidence = [
+    product?.title,
+    product?.name,
+    product?.category,
+    ...(Array.isArray(product?.tags) ? product.tags : []),
+  ].filter(Boolean).join(" ");
+  const explicitCandidateSubcategory = String(
+    product?.search_subcategory || product?.subcategory || "",
+  ).trim().toLowerCase();
+  const candidateSubcategory = explicitCandidateSubcategory === "skirt"
+    ? "skirt"
+    : normalizeSearchSubcategory(
+      explicitCandidateSubcategory,
+    evidence,
+    product?.category || "",
+    );
+  if (slot === "socks") {
+    return candidateSubcategory === "socks" ||
+      outfitRequirementSlot(product) === "socks";
+  }
+  if (slot === "bag") return candidateSubcategory === "bag";
+  if (slot === "accessory") {
+    if (requiredSubcategory) return candidateSubcategory === requiredSubcategory;
+    return outfitRequirementSlot(product) === "accessory" &&
+      !["bag", "socks"].includes(candidateSubcategory);
+  }
+  if (slot === "bottom" && requiredSubcategory === "skirt") {
+    return candidateSubcategory === "skirt" || /裙|skirt/iu.test(evidence);
+  }
+  return outfitRequirementSlot(product) === slot;
+}
+
+function mockRequirementSubcategory(requirement) {
+  const explicit = String(
+    requirement?.search_subcategory || requirement?.searchSubcategory ||
+      requirement?.subcategory || "",
+  ).trim().toLowerCase();
+  if (explicit) return explicit;
+  const evidence = [
+    requirement?.item_name,
+    requirement?.itemName,
+    ...(Array.isArray(requirement?.search_keywords)
+      ? requirement.search_keywords : []),
+  ].filter(Boolean).join(" ");
+  if (outfitRequirementSlot(requirement) === "bottom" && /裙|skirt/iu.test(evidence)) {
+    return "skirt";
+  }
+  return "";
 }
 
 class ProductProvider {
@@ -85,17 +757,32 @@ class ProductProvider {
   }
 
   async searchShoppingAgentCandidates() {
-    throw new ProductProviderError("当前商品 Provider 不支持 Shopping Agent 真实候选召回", {
-      status: 503,
-      code: "SHOPPING_AGENT_SEARCH_UNAVAILABLE",
-    });
+    throw new ProductProviderError(
+      "当前商品 Provider 不支持 Shopping Agent 真实候选召回",
+      {status: 503, code: "SHOPPING_AGENT_SEARCH_UNAVAILABLE"},
+    );
   }
 }
 
 class MockProductProvider extends ProductProvider {
-  constructor({catalog = new ProductCatalog()} = {}) {
+  constructor({
+    catalog = new ProductCatalog(),
+    logger = console,
+    reranker = null,
+    outfitPostProcessor = postProcessOutfitCandidates,
+    candidatePipeline = runSharedCandidatePipeline,
+  } = {}) {
     super();
     this.catalog = catalog;
+    this.logger = logger;
+    this.reranker = reranker || new ProductAestheticReranker({
+      client: null,
+      visualEvaluationEnabled: false,
+      logger,
+    });
+    this.outfitPostProcessor = outfitPostProcessor;
+    this.candidatePipeline = candidatePipeline;
+    this.lastPipelineTrace = null;
     this.name = "mock";
     this.configured = false;
     this.status = "mock";
@@ -106,7 +793,47 @@ class MockProductProvider extends ProductProvider {
   }
 
   async recommendForQueries(queries, context = {}) {
-    return this.catalog.recommendForQueries(queries, context);
+    const values = Array.isArray(queries) ? queries : [];
+    const groups = await Promise.all(values.map(async (query) => {
+      const requirement = normalizeProductRequirement({...context, ...query}, context);
+      const catalogQuery = outfitRequirementSlot(requirement) === "socks"
+        ? {...query, category: "socks"}
+        : query;
+      const plannedQueries = requirementSearchKeywords(requirement);
+      const batches = typeof this.catalog.recommend === "function"
+        ? await Promise.all(plannedQueries.map(async (keyword) =>
+          (await this.catalog.recommend({
+            category: catalogQuery.category,
+            style: catalogQuery.style || context.style,
+            color: catalogQuery.color || context.color,
+            bodyType: context.bodyType,
+            scene: catalogQuery.scene || context.scene,
+            gender: catalogQuery.gender || context.gender,
+            fit: context.fit,
+            budget: context.item_budget || context.itemBudget || context.budget,
+            keyword,
+            limit: 12,
+          })).map((product) => ({...product, search_keyword: keyword}))))
+        : [await this.catalog.recommendForQueries([catalogQuery], context)];
+      const candidates = uniqueProducts(batches.flat());
+      return candidates
+        .filter((product) => mockCandidateMatchesRequirement(product, requirement))
+        .map((product) => mockCandidateForRequirement(product, requirement));
+    }));
+    const result = await this.candidatePipeline({
+      requirements: values,
+      groups: values.map((query, index) => ({
+        requirement: normalizeProductRequirement({...context, ...query}, context),
+        candidates: groups[index],
+      })),
+      context,
+      provider: "mock",
+      logger: this.logger,
+      reranker: this.reranker,
+      outfitPostProcessor: this.outfitPostProcessor,
+    });
+    this.lastPipelineTrace = result.trace;
+    return result.products;
   }
 }
 
@@ -156,6 +883,8 @@ class TaobaoProductProvider extends ProductProvider {
     pipelineBudgetMs = PRODUCT_PIPELINE_BUDGET_MS,
     taobaoStageBudgetMs = TAOBAO_STAGE_BUDGET_MS,
     rerankBudgetMs = PRODUCT_RERANK_BUDGET_MS,
+    outfitPostProcessor = postProcessOutfitCandidates,
+    candidatePipeline = runSharedCandidatePipeline,
     rawCapture = null,
     logger = console,
   }) {
@@ -165,7 +894,12 @@ class TaobaoProductProvider extends ProductProvider {
     this.siteId = placement.siteId;
     this.adzoneId = placement.adzoneId;
     this.sampleMaterialId = String(sampleMaterialId || DEFAULT_SAMPLE_MATERIAL_ID);
-    this.reranker = reranker;
+    this.legacyReranker = reranker;
+    this.reranker = reranker || new ProductAestheticReranker({
+      client: null,
+      visualEvaluationEnabled: false,
+      logger,
+    });
     this.visualVerifier = visualVerifier;
     this.visualVerificationBudgetMs = Math.min(
       positiveInteger(
@@ -178,8 +912,11 @@ class TaobaoProductProvider extends ProductProvider {
       positiveInteger(visualCandidateLimit, DEFAULT_MAX_CANDIDATES_PER_SLOT),
       MAX_VISUAL_CANDIDATES_PER_SLOT,
     );
-    this.logger = logger;
+    this.outfitPostProcessor = outfitPostProcessor;
+    this.candidatePipeline = candidatePipeline;
     this.rawCapture = typeof rawCapture === "function" ? rawCapture : null;
+    this.lastPipelineTrace = null;
+    this.logger = logger;
     this.recommendationCacheTtlMs = positiveInteger(
       recommendationCacheTtlMs,
       DEFAULT_RECOMMENDATION_CACHE_TTL_MS,
@@ -239,7 +976,9 @@ class TaobaoProductProvider extends ProductProvider {
         code: "INVALID_SHOPPING_AGENT_QUERY",
       });
     }
-    if (!normalizedCategory || !["top", "bottom", "shoes"].includes(normalizedCategory)) {
+    if (!normalizedCategory || !["top", "bottom", "shoes"].includes(
+      normalizedCategory,
+    )) {
       throw new ProductProviderError("Shopping Agent 仅支持 top、bottom、shoes", {
         status: 400,
         code: "INVALID_SHOPPING_AGENT_CATEGORY",
@@ -267,8 +1006,7 @@ class TaobaoProductProvider extends ProductProvider {
       zero_result_recall: metrics.zeroResultRecall === true ||
         (Number(metrics.taobaoCount || 0) === 0 && products.length === 0),
       recall_error_code: metrics.zeroResultRecall === true
-        ? "ZERO_RESULT_RECALL"
-        : null,
+        ? "ZERO_RESULT_RECALL" : null,
     };
   }
 
@@ -346,32 +1084,6 @@ class TaobaoProductProvider extends ProductProvider {
         cached,
         context.requestId || undefined,
       );
-      for (const requirement of values) {
-        const category = normalizeProductCategory(requirement.category);
-        const lookId = String(requirement.look_id || requirement.lookId || "");
-        const finalCount = cached.filter((product) =>
-          String(product.look_id || "") === lookId &&
-          product.category === category).length;
-        this.logger.info?.("product_slot_funnel", {
-          request_id: context.requestId || undefined,
-          look_id: lookId || undefined,
-          slot_key: requirement.slot_key || requirement.slotKey || undefined,
-          category,
-          raw_count: null,
-          valid_count: null,
-          candidate_gate_pass: null,
-          candidate_gate_unknown: null,
-          candidate_gate_fail: null,
-          ranked_count: null,
-          visual_candidate_count: null,
-          visual_pass: null,
-          visual_uncertain: null,
-          visual_fail: null,
-          final_count: finalCount,
-          first_zero_stage: null,
-          observability_source: "cache",
-        });
-      }
       return cloneProductArray(cached);
     }
     const inflight = this.inflightRecommendations.get(cacheKey);
@@ -398,18 +1110,12 @@ class TaobaoProductProvider extends ProductProvider {
   async #recommendForQueriesUncached(values, context) {
     const pipelineStartedAt = Date.now();
     const pipelineDeadline = pipelineStartedAt + this.pipelineBudgetMs;
+    const useNewDecisionPipeline = context.decision_pipeline ===
+      "new_decision_pipeline.v1";
     try {
       const groupOutcomes = await Promise.all(values.map(async (query) => {
         const requirement = normalizeProductRequirement({...context, ...query}, context);
-        const metrics = {
-          taobaoCount: 0,
-          semanticPassCount: 0,
-          funnel: {
-            look_id: requirement.look_id || undefined,
-            slot_key: requirement.slot_key || undefined,
-            category: requirement.category,
-          },
-        };
+        const metrics = {taobaoCount: 0, semanticPassCount: 0};
         try {
           const candidates = await withTimeBudget(
             this.#candidatePool({
@@ -418,6 +1124,7 @@ class TaobaoProductProvider extends ProductProvider {
               ...requirement,
               commerce_query_plan:
                 query.commerce_query_plan || requirement.commerce_query_plan,
+              deferCandidatePipeline: useNewDecisionPipeline,
               limit: 20,
             }, metrics),
             Math.max(1, Math.min(
@@ -431,7 +1138,8 @@ class TaobaoProductProvider extends ProductProvider {
             prefilterCount: candidates.length,
             candidates: candidates.slice(0, this.visualVerifier
               ? this.visualCandidateLimit
-              : 4),
+              : useNewDecisionPipeline
+                ? DEFAULT_RELEVANCE_POOL_PER_REQUIREMENT : 4),
             funnel: metrics.funnel,
             metrics,
             error: null,
@@ -458,7 +1166,8 @@ class TaobaoProductProvider extends ProductProvider {
           };
         }
       }));
-      let groups = groupOutcomes.map(({error: _error, metrics: _metrics, ...group}) => group);
+      let groups = groupOutcomes.map(({error: _error, metrics: _metrics, ...group}) =>
+        group);
       const taobaoMs = Date.now() - pipelineStartedAt;
       const taobaoCount = groupOutcomes.reduce(
         (total, group) => total + group.metrics.taobaoCount,
@@ -470,7 +1179,12 @@ class TaobaoProductProvider extends ProductProvider {
       );
       const ruleStartedAt = Date.now();
       let visualVerificationSummary = null;
-      if (this.visualVerifier && groups.some((group) => group.candidates.length > 0)) {
+      // The new decision pipeline owns Relevance -> Gate -> Reranker -> Strategy.
+      // Running the legacy visual verifier before that shared pipeline would make
+      // its fallback inspect gate state before the gate has produced one, which
+      // can erase an otherwise valid raw candidate pool.
+      if (!useNewDecisionPipeline && this.visualVerifier &&
+          groups.some((group) => group.candidates.length > 0)) {
         const verification = await this.visualVerifier.verifyGroups({
           groups,
           context,
@@ -483,62 +1197,159 @@ class TaobaoProductProvider extends ProductProvider {
         groups = verification.groups;
         visualVerificationSummary = verification.summary;
       }
-      const baseProducts = uniqueProducts(sortProductsByCategoryPriority(
-        groups.flatMap((group) => group.candidates.slice(0, 4)),
-      )).slice(0, values.length * 4);
-      const ruleRankMs = Date.now() - ruleStartedAt;
+      if (!useNewDecisionPipeline) {
+        const baseProducts = uniqueProducts(sortProductsByCategoryPriority(
+          groups.flatMap((group) => group.candidates.slice(0, 4)),
+        )).slice(0, values.length * 4);
+        const ruleRankMs = Date.now() - ruleStartedAt;
+        const searchErrors = groupOutcomes
+          .map((group) => group.error)
+          .filter(Boolean);
+        if (baseProducts.length === 0 && searchErrors.length > 0) {
+          throw searchErrors[0];
+        }
+
+        let legacyProducts = baseProducts;
+        let aiRerankSuccess = false;
+        const visualFallbackUsed = visualVerificationSummary?.fallback_used === true;
+        let fallbackUsed = baseProducts.length > 0;
+        const productAiStartedAt = Date.now();
+        if (this.legacyReranker && baseProducts.length > 0) {
+          try {
+            const reranked = await withTimeBudget(
+              this.legacyReranker.rerank({
+                groups,
+                context,
+                requestId: context.requestId || "",
+                selectionLimit: 4,
+              }),
+              Math.max(1, Math.min(
+                this.rerankBudgetMs,
+                pipelineDeadline - Date.now(),
+              )),
+              "AI_RERANK_TIMEOUT",
+            );
+            if (reranked.length > 0) {
+              legacyProducts = reranked;
+              const rerankFallbackUsed = reranked.some((product) =>
+                product.ai_rerank_fallback === true);
+              fallbackUsed = visualFallbackUsed || rerankFallbackUsed;
+              aiRerankSuccess = !rerankFallbackUsed;
+            } else {
+              legacyProducts = markRerankFallback(baseProducts);
+              fallbackUsed = true;
+            }
+          } catch (error) {
+            legacyProducts = markRerankFallback(baseProducts);
+            fallbackUsed = true;
+            this.logger.warn?.("AI 商品复选超时或失败，立即返回规则排序", {
+              requestId: context.requestId || undefined,
+              errorCode: safeProviderCode(error),
+            });
+          }
+        } else if (baseProducts.length > 0) {
+          legacyProducts = markRerankFallback(baseProducts);
+        }
+        const productAiMs = Date.now() - productAiStartedAt;
+        this.logger.info?.("AI最终选择", {
+          requestId: context.requestId || undefined,
+          provider: "taobao",
+          selectedCount: legacyProducts.length,
+          looks: summarizeProductsByLook(legacyProducts),
+        });
+        this.status = "taobao";
+        this.logger.info?.("product_pipeline_summary", {
+          request_id: context.requestId || undefined,
+          taobao_count: taobaoCount,
+          semantic_pass_count: semanticPassCount,
+          rule_rank_count: baseProducts.length,
+          ai_rerank_success: aiRerankSuccess,
+          fallback_used: fallbackUsed,
+          taobao_ms: taobaoMs,
+          rule_rank_ms: ruleRankMs,
+          ai_rerank_ms: productAiMs,
+          visual_candidate_count: visualVerificationSummary?.candidate_count || 0,
+          visual_call_count: visualVerificationSummary?.visual_call_count || 0,
+          visual_total_ms: visualVerificationSummary?.total_visual_ms || 0,
+          visual_fallback_used: visualFallbackUsed,
+          cache_hit: false,
+          total_ms: Date.now() - pipelineStartedAt,
+          result_status: legacyProducts.length > 0
+            ? (fallbackUsed ? "fallback_success" : "success") : "empty",
+        });
+        const finalProducts = uniqueProducts(legacyProducts)
+          .sort((left, right) =>
+            compareProductPurchaseAesthetic(left, right) ||
+            categoryPriority(right?.category) - categoryPriority(left?.category) ||
+            Number(right?.final_score || right?.relevance_score || 0) -
+              Number(left?.final_score || left?.relevance_score || 0))
+          .slice(0, values.length * 4);
+        for (const group of groups) {
+          const funnel = group.funnel || {};
+          const visual = group.visual_funnel || {};
+          const finalCount = finalProducts.filter((product) =>
+            String(product.look_id || "") ===
+              String(group.requirement?.look_id || "") &&
+            product.category === group.requirement?.category).length;
+          const firstZeroStage = funnel.first_zero_stage ||
+            (Number(funnel.ranked_count || 0) > 0 && group.candidates.length === 0
+              ? "visual_verification"
+              : Number(funnel.ranked_count || 0) > 0 && finalCount === 0
+                ? "final_selection" : null);
+          this.logger.info?.("product_slot_funnel", {
+            request_id: context.requestId || undefined,
+            look_id: group.requirement?.look_id || undefined,
+            slot_key: group.requirement?.slot_key || undefined,
+            category: group.requirement?.category,
+            raw_count: Number(funnel.raw_count || 0),
+            valid_count: Number(funnel.valid_count || 0),
+            candidate_gate_pass: Number(funnel.candidate_gate_pass || 0),
+            candidate_gate_unknown: Number(funnel.candidate_gate_unknown || 0),
+            candidate_gate_fail: Number(funnel.candidate_gate_fail || 0),
+            ranked_count: Number(funnel.ranked_count || 0),
+            visual_candidate_count: Number(visual.candidate_count || 0),
+            visual_pass: Number(visual.pass_count || 0),
+            visual_uncertain: Number(visual.uncertain_count || 0),
+            visual_fail: Number(visual.fail_count || 0),
+            final_count: finalCount,
+            first_zero_stage: firstZeroStage,
+          });
+        }
+        logProductBlueprintSummaries(
+          this.logger,
+          finalProducts,
+          context.requestId || undefined,
+        );
+        return finalProducts;
+      }
+      const rawProducts = uniqueProducts(groups.flatMap((group) =>
+        group.candidates));
       const searchErrors = groupOutcomes
         .map((group) => group.error)
         .filter(Boolean);
-      if (baseProducts.length === 0 && searchErrors.length > 0) {
+      if (rawProducts.length === 0 && searchErrors.length > 0) {
         throw searchErrors[0];
       }
-
-      let products = baseProducts;
-      let aiRerankSuccess = false;
+      const selectionStartedAt = Date.now();
       const visualFallbackUsed = visualVerificationSummary?.fallback_used === true;
-      let fallbackUsed = baseProducts.length > 0;
-      const productAiStartedAt = Date.now();
-      if (this.reranker && baseProducts.length > 0) {
-        try {
-          const reranked = await withTimeBudget(
-            this.reranker.rerank({
-              groups,
-              context,
-              requestId: context.requestId || "",
-              selectionLimit: 4,
-            }),
-            Math.max(1, Math.min(
-              this.rerankBudgetMs,
-              pipelineDeadline - Date.now(),
-            )),
-            "AI_RERANK_TIMEOUT",
-          );
-          if (reranked.length > 0) {
-            products = reranked;
-            const rerankFallbackUsed = reranked.some((product) =>
-              product.ai_rerank_fallback === true);
-            fallbackUsed = visualFallbackUsed || rerankFallbackUsed;
-            aiRerankSuccess = !rerankFallbackUsed;
-          } else {
-            products = markRerankFallback(baseProducts);
-            fallbackUsed = true;
-          }
-        } catch (error) {
-          products = markRerankFallback(baseProducts);
-          fallbackUsed = true;
-          this.logger.warn?.("AI 商品复选超时或失败，立即返回规则排序", {
-            requestId: context.requestId || undefined,
-            errorCode: safeProviderCode(error),
-          });
-        }
-      } else if (baseProducts.length > 0) {
-        products = markRerankFallback(baseProducts);
-      }
-      // Final owns no semantic eligibility decisions. Candidate qualification
-      // is already settled by Candidate Gate and Visual Verification; the
-      // remaining work is structural fallback, dedupe, ordering and capping.
-      const productAiMs = Date.now() - productAiStartedAt;
+      const pipelineResult = await this.candidatePipeline({
+        requirements: values,
+        groups,
+        context,
+        provider: "taobao",
+        logger: this.logger,
+        reranker: this.reranker,
+        outfitPostProcessor: this.outfitPostProcessor,
+        rerankTimeoutMs: this.rerankBudgetMs,
+        deadlineAt: pipelineDeadline,
+      });
+      this.lastPipelineTrace = pipelineResult.trace;
+      const products = pipelineResult.products;
+      const ruleRankMs = selectionStartedAt - ruleStartedAt;
+      const productAiMs = Date.now() - selectionStartedAt;
+      const aiRerankSuccess = pipelineResult.trace.reranker_status === "SUCCESS";
+      const fallbackUsed = visualFallbackUsed ||
+        pipelineResult.trace.reranker_status !== "SUCCESS";
       this.logger.info?.("AI最终选择", {
         requestId: context.requestId || undefined,
         provider: "taobao",
@@ -550,7 +1361,7 @@ class TaobaoProductProvider extends ProductProvider {
         request_id: context.requestId || undefined,
         taobao_count: taobaoCount,
         semantic_pass_count: semanticPassCount,
-        rule_rank_count: baseProducts.length,
+        rule_rank_count: pipelineResult.trace.relevance_pass.length,
         ai_rerank_success: aiRerankSuccess,
         fallback_used: fallbackUsed,
         taobao_ms: taobaoMs,
@@ -573,36 +1384,6 @@ class TaobaoProductProvider extends ProductProvider {
           Number(right?.final_score || right?.relevance_score || 0) -
             Number(left?.final_score || left?.relevance_score || 0))
         .slice(0, values.length * 4);
-      for (const group of groups) {
-        const funnel = group.funnel || {};
-        const visual = group.visual_funnel || {};
-        const finalCount = finalProducts.filter((product) =>
-          String(product.look_id || "") === String(group.requirement?.look_id || "") &&
-          product.category === group.requirement?.category).length;
-        const firstZeroStage = funnel.first_zero_stage ||
-          (Number(funnel.ranked_count || 0) > 0 && group.candidates.length === 0
-            ? "visual_verification"
-            : Number(funnel.ranked_count || 0) > 0 && finalCount === 0
-              ? "final_selection" : null);
-        this.logger.info?.("product_slot_funnel", {
-          request_id: context.requestId || undefined,
-          look_id: group.requirement?.look_id || undefined,
-          slot_key: group.requirement?.slot_key || undefined,
-          category: group.requirement?.category,
-          raw_count: Number(funnel.raw_count || 0),
-          valid_count: Number(funnel.valid_count || 0),
-          candidate_gate_pass: Number(funnel.candidate_gate_pass || 0),
-          candidate_gate_unknown: Number(funnel.candidate_gate_unknown || 0),
-          candidate_gate_fail: Number(funnel.candidate_gate_fail || 0),
-          ranked_count: Number(funnel.ranked_count || 0),
-          visual_candidate_count: Number(visual.candidate_count || 0),
-          visual_pass: Number(visual.pass_count || 0),
-          visual_uncertain: Number(visual.uncertain_count || 0),
-          visual_fail: Number(visual.fail_count || 0),
-          final_count: finalCount,
-          first_zero_stage: firstZeroStage,
-        });
-      }
       logProductBlueprintSummaries(
         this.logger,
         finalProducts,
@@ -750,7 +1531,7 @@ class TaobaoProductProvider extends ProductProvider {
         Math.ceil(24 / dynamicConceptQueries.length),
       ));
       const plannedBatches = await Promise.all(dynamicConceptQueries.map(
-        (searchKeyword, index) => this.#search({
+        (searchKeyword) => this.#search({
           ...filters,
           ...requirement,
           originalKeyword: searchPlan.original_keyword,
@@ -810,9 +1591,6 @@ class TaobaoProductProvider extends ProductProvider {
       }, metrics);
       if (products.length > 0) successfulQuery = searchPlan.exact;
     }
-    // A raw hit that fails the sole textual Candidate Gate is not a usable
-    // recall. Continue through the specification-owned fallback queries before
-    // declaring the slot empty.
     if (dynamicConceptQueries.length < 2 &&
         gateCandidates(products, purchaseSpecification).length === 0 &&
         searchPlan.fallbacks.length > 0) {
@@ -851,20 +1629,27 @@ class TaobaoProductProvider extends ProductProvider {
       fallback_reason: queryFallbackReason,
       candidate_count: products.length,
     });
-    const funnel = metrics?.funnel || (metrics ? (metrics.funnel = {}) : {});
-    funnel.query_fallback_level = queryFallbackLevel;
-    funnel.query_fallback_reason = queryFallbackReason;
-    funnel.executed_queries = executedQueries;
-    funnel.raw_count = Number(metrics?.taobaoCount || 0);
-    funnel.valid_count = products.length;
-    const gateAssessments = products.map((product) =>
-      evaluateCandidateAgainstSpecification(product, purchaseSpecification));
-    funnel.candidate_gate_pass = gateAssessments.filter((assessment) =>
-      assessment.state === "PASS").length;
-    funnel.candidate_gate_unknown = gateAssessments.filter((assessment) =>
-      assessment.state === "UNKNOWN").length;
-    funnel.candidate_gate_fail = gateAssessments.filter((assessment) =>
-      assessment.state === "FAIL").length;
+    if (metrics) {
+      metrics.funnel = metrics.funnel || {};
+      metrics.funnel.query_fallback_level = queryFallbackLevel;
+      metrics.funnel.query_fallback_reason = queryFallbackReason;
+      metrics.funnel.executed_queries = executedQueries;
+      metrics.funnel.raw_count = Number(metrics.taobaoCount || 0);
+      metrics.funnel.valid_count = products.length;
+      const gateAssessments = products.map((product) =>
+        evaluateCandidateAgainstSpecification(product, purchaseSpecification));
+      metrics.funnel.candidate_gate_pass = gateAssessments.filter((assessment) =>
+        assessment.state === "PASS").length;
+      metrics.funnel.candidate_gate_unknown = gateAssessments.filter((assessment) =>
+        assessment.state === "UNKNOWN").length;
+      metrics.funnel.candidate_gate_fail = gateAssessments.filter((assessment) =>
+        assessment.state === "FAIL").length;
+    }
+    if (filters.deferCandidatePipeline === true) {
+      return products
+        .map((product) => preserveCandidateContract(product, requirement))
+        .slice(0, candidateLimit);
+    }
     const gatedProducts = gateCandidates(products, purchaseSpecification);
     if (products.length > 0 && gatedProducts.length === 0) {
       this.logger.info?.("purchase_specification_no_match", {
@@ -956,23 +1741,31 @@ class TaobaoProductProvider extends ProductProvider {
         right.budget_preference_score - left.budget_preference_score ||
         right.relevance_score - left.relevance_score);
     if (gatedProducts.length > 0 && budgetAssessed.length === 0) {
-      const recovered = scoreAndSortProducts(gatedProducts, purchaseSpecification).slice(0, 1);
+      const recovered = scoreAndSortProducts(
+        gatedProducts,
+        purchaseSpecification,
+      ).slice(0, 1);
       this.logger.error?.("PRODUCT_PIPELINE_ILLEGAL_ZEROING", {
         request_id: filters.requestId || undefined,
         look_id: requirement.look_id || undefined,
         slot_key: requirement.slot_key || undefined,
         category: requirement.category,
         first_zero_stage: "ranking",
-        candidate_gate_pass: funnel.candidate_gate_pass,
-        candidate_gate_unknown: funnel.candidate_gate_unknown,
+        candidate_gate_pass: metrics?.funnel?.candidate_gate_pass,
+        candidate_gate_unknown: metrics?.funnel?.candidate_gate_unknown,
       });
       budgetAssessed = recovered;
     }
-    funnel.ranked_count = budgetAssessed.length;
-    funnel.first_zero_stage = funnel.raw_count === 0 ? "taobao_raw" :
-      funnel.valid_count === 0 ? "valid_mapping" :
-        gatedProducts.length === 0 ? "candidate_gate" :
-          budgetAssessed.length === 0 ? "ranking" : null;
+    if (metrics) {
+      metrics.funnel.ranked_count = budgetAssessed.length;
+      metrics.funnel.first_zero_stage = metrics.funnel.raw_count === 0
+        ? "taobao_raw"
+        : metrics.funnel.valid_count === 0
+          ? "valid_mapping"
+          : gatedProducts.length === 0
+            ? "candidate_gate"
+            : budgetAssessed.length === 0 ? "ranking" : null;
+    }
     this.logger.info?.("user_intent_priority", intentDebugSummary({
       styleProfile,
       finalStyleScore: budgetAssessed.length > 0
@@ -1166,7 +1959,6 @@ class AutoProductProvider extends ProductProvider {
       this.status = "mock";
       const fallbackQueries = (Array.isArray(queries) ? queries : []).map((query) => ({
         ...query,
-        category: mockCompatibleCategory(query?.category),
         keyword: query?.search_keywords?.[0] || query?.item_name || query?.keyword,
       }));
       return this.mock.recommendForQueries(fallbackQueries, context);
@@ -1174,8 +1966,8 @@ class AutoProductProvider extends ProductProvider {
   }
 
   async searchShoppingAgentCandidates(input = {}) {
-    // The Shopping Agent proof must use real Taobao evidence. It intentionally
-    // bypasses AutoProvider's mock fallback.
+    // Shopping Agent evidence must remain real Taobao data. Never route this
+    // diagnostic/search contract through AutoProvider's Mock fallback.
     const result = await this.taobao.searchShoppingAgentCandidates(input);
     this.health = true;
     this.status = "taobao";
@@ -1210,6 +2002,8 @@ function createProductProvider({
   client,
   reranker = null,
   visualVerifier = null,
+  outfitPostProcessor = postProcessOutfitCandidates,
+  candidatePipeline = runSharedCandidatePipeline,
   rawCapture = null,
 } = {}) {
   const mode = String(environment.PRODUCT_PROVIDER || "auto").trim().toLowerCase();
@@ -1249,7 +2043,13 @@ function createProductProvider({
         code: "PRODUCT_MOCK_DISABLED_IN_PRODUCTION",
       });
     }
-    return new MockProductProvider({catalog: productCatalog});
+    return new MockProductProvider({
+      catalog: productCatalog,
+      logger,
+      reranker,
+      outfitPostProcessor,
+      candidatePipeline,
+    });
   }
   if (!configured) {
     logger.warn?.("淘宝 Provider 未完整配置", {
@@ -1271,7 +2071,6 @@ function createProductProvider({
       sampleMaterialId: environment.TAOBAO_SAMPLE_MATERIAL_ID || DEFAULT_SAMPLE_MATERIAL_ID,
       reranker,
       visualVerifier,
-      rawCapture,
       visualVerificationBudgetMs: positiveInteger(
         environment.PRODUCT_VISUAL_VERIFICATION_TIMEOUT_MS,
         PRODUCT_VISUAL_VERIFICATION_BUDGET_MS,
@@ -1280,6 +2079,9 @@ function createProductProvider({
         environment.PRODUCT_VISUAL_MAX_CANDIDATES_PER_SLOT,
         visualVerifier?.maxCandidatesPerSlot || DEFAULT_MAX_CANDIDATES_PER_SLOT,
       ),
+      outfitPostProcessor,
+      candidatePipeline,
+      rawCapture,
       recommendationCacheTtlMs: positiveInteger(
         environment.PRODUCT_RECOMMENDATION_CACHE_TTL_MS,
         DEFAULT_RECOMMENDATION_CACHE_TTL_MS,
@@ -1298,7 +2100,13 @@ function createProductProvider({
   if (mode === "taobao") return taobao;
   return new AutoProductProvider({
     taobao,
-    mock: new MockProductProvider({catalog: productCatalog}),
+    mock: new MockProductProvider({
+      catalog: productCatalog,
+      logger,
+      reranker,
+      outfitPostProcessor,
+      candidatePipeline,
+    }),
     logger,
     allowMockFallback: allowMock,
   });
@@ -1397,23 +2205,28 @@ function extractTaobaoItems(payload) {
 
 function mapPayload(payload, filters, pid, origin, onDiagnostics, onRawProducts) {
   const rawItems = extractTaobaoItems(payload);
-  if (typeof onRawProducts === "function") {
-    const query = filters.searchKeyword || filters.keyword || buildSearchKeyword(filters);
-    const observedAt = new Date().toISOString();
-    const rawProducts = rawItems.map((item) => buildRawTaobaoProduct(item, {
-      query,
-      observedAt,
-    }));
-    onRawProducts({
-      query,
-      origin,
-      products: rawProducts,
-      responseSummary: safeTaobaoResponseShape(payload),
-    });
-  }
-  const mapped = rawItems.map((item) => {
+  const query = filters.searchKeyword || filters.keyword || buildSearchKeyword(filters);
+  const observedAt = new Date().toISOString();
+  const rawProducts = rawItems.map((item) => buildRawTaobaoProduct(item, {
+    query,
+    observedAt,
+  }));
+  onRawProducts?.({
+    query,
+    origin,
+    products: rawProducts,
+    responseSummary: safeTaobaoResponseShape(payload),
+  });
+  const mapped = rawItems.map((item, index) => {
     try {
-      return mapTaobaoProduct(item, {pid, fallbackCategory: filters.category, filters, origin});
+      const product = mapTaobaoProduct(item, {
+        pid,
+        fallbackCategory: filters.category,
+        filters,
+        origin,
+      });
+      const enriched = enrichTaobaoCandidate(rawProducts[index]);
+      return attachEnrichmentToCandidate(product, rawProducts[index], enriched);
     } catch (_) {
       return null;
     }
@@ -1422,29 +2235,31 @@ function mapPayload(payload, filters, pid, origin, onDiagnostics, onRawProducts)
   const qualityBlocks = usable
     .map((product) => productQualityBlock(product, filters))
     .filter(Boolean);
-  const products = filters.shoppingAgentRaw === true
-    ? usable.map((product) => ({
+  const qualitySafe = usable.filter((product) => !productQualityBlock(product, filters));
+  const products = filters.deferCandidatePipeline === true
+    ? usable.map((product) => preserveCandidateContract({
       ...product,
-      gender: normalizeGender(filters.gender),
       search_keyword: filters.searchKeyword || filters.keyword || "",
-      relevance_score: 0,
-    }))
+    }, filters))
     : filters.category
-    ? rankProducts(
-      usable,
-      filters,
-      filters.searchKeyword || filters.keyword,
-      {minimumScore: filters.minimumRelevanceScore},
-    )
-    : usable.map((product) => {
+      ? rankProducts(
+        qualitySafe,
+        filters,
+        filters.searchKeyword || filters.keyword,
+        {minimumScore: filters.minimumRelevanceScore},
+      )
+      : qualitySafe.map((product) => {
       const {_category_text: _, ...publicProduct} = product;
+      const originalGender = authoritativeProductGender(publicProduct);
       return {
         ...publicProduct,
-        gender: normalizeGender(filters.gender),
+        original_gender: originalGender,
+        gender: originalGender,
+        requested_gender: normalizeGender(filters.gender),
         search_keyword: filters.searchKeyword || filters.keyword || "",
         relevance_score: 0,
       };
-    });
+      });
   onDiagnostics?.({
     origin,
     ...safeTaobaoResponseShape(payload),
@@ -1459,7 +2274,7 @@ function mapPayload(payload, filters, pid, origin, onDiagnostics, onRawProducts)
     blocked_category: [...new Set(qualityBlocks.map((item) => item.blocked_category))],
     blocked_keyword: [...new Set(qualityBlocks.map((item) => item.blocked_keyword))],
     lowValueBlockedCount: qualityBlocks.length,
-    categoryMismatchCount: Math.max(usable.length - products.length, 0),
+    categoryMismatchCount: Math.max(qualitySafe.length - products.length, 0),
   });
   return products;
 }
@@ -1478,7 +2293,6 @@ function safeTaobaoResponseShape(payload) {
       ? Object.keys(resultList).sort().slice(0, 20)
       : [],
     totalResults: firstNumber(response.total_results, response.totalResults) ?? null,
-    requestId: firstText(response.request_id, response.requestId) || null,
   };
 }
 
@@ -1537,6 +2351,17 @@ function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}, origi
     item.pict_url,
   );
   const imageUrl = whiteImageUrl || primaryImageUrl;
+  const originalGender = authoritativeProductGender({
+    gender: firstText(
+      basic.gender,
+      basic.item_gender,
+      item.gender,
+      item.item_gender,
+    ),
+    title,
+    _category_text: `${rawCategory} ${title}`.trim(),
+    category,
+  });
   return compact({
     product_id: productId,
     source: "taobao",
@@ -1544,6 +2369,8 @@ function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}, origi
     _category_text: `${rawCategory} ${title}`.trim(),
     brand: brandName,
     category,
+    original_gender: originalGender,
+    gender: originalGender,
     price,
     image_url: imageUrl,
     image_quality_hint: inferImageQualityHint({
@@ -1909,6 +2736,8 @@ module.exports = {
   normalizeHttpsUrl,
   normalizePublicImageUrl,
   parseTaobaoPlacement,
+  postProcessOutfitCandidates,
+  runSharedCandidatePipeline,
   safeTaobaoResponseShape,
   signTaobaoRequest,
 };

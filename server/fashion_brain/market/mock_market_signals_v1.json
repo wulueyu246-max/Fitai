@@ -1,0 +1,44 @@
+[
+  {
+    "market_scope": {
+      "country": "CN",
+      "region": "national",
+      "demographic": "general",
+      "gender_expression": "any",
+      "age_band": "unspecified",
+      "platform": "mock_market_fixture"
+    },
+    "timestamp": "2026-08-20T00:00:00.000Z",
+    "valid_from": "2026-08-01T00:00:00.000Z",
+    "valid_until": "2026-12-31T23:59:59.000Z",
+    "confidence": 0.72,
+    "signals": {
+      "style_signals": [
+        {"value":"clean_fit","signal_type":"style","trend_state":"hot","popularity_score":88,"velocity_score":78,"freshness_score":92,"niche_score":24,"confidence":0.78,"source":"mock_market_fixture","source_timestamp":"2026-08-18T00:00:00.000Z","evidence_count":48},
+        {"value":"cityboy","signal_type":"style","trend_state":"stable","popularity_score":72,"velocity_score":48,"freshness_score":84,"niche_score":42,"confidence":0.74,"source":"mock_market_fixture","source_timestamp":"2026-08-15T00:00:00.000Z","evidence_count":36},
+        {"value":"refined_individuality","signal_type":"style","trend_state":"niche_rising","popularity_score":54,"velocity_score":76,"freshness_score":90,"niche_score":91,"confidence":0.7,"source":"mock_market_fixture","source_timestamp":"2026-08-19T00:00:00.000Z","evidence_count":21}
+      ],
+      "silhouette_signals": [
+        {"value":"relaxed_tailored_balance","signal_type":"silhouette","trend_state":"rising","popularity_score":76,"velocity_score":82,"freshness_score":91,"niche_score":38,"confidence":0.76,"source":"mock_market_fixture","source_timestamp":"2026-08-17T00:00:00.000Z","evidence_count":44},
+        {"value":"clean_vertical_line","signal_type":"silhouette","trend_state":"stable","popularity_score":70,"velocity_score":45,"freshness_score":80,"niche_score":32,"confidence":0.75,"source":"mock_market_fixture","source_timestamp":"2026-08-10T00:00:00.000Z","evidence_count":53}
+      ],
+      "category_signals": [
+        {"value":"lightweight_structured_outerwear","signal_type":"category","trend_state":"rising","popularity_score":74,"velocity_score":77,"freshness_score":88,"niche_score":31,"confidence":0.7,"source":"mock_market_fixture","source_timestamp":"2026-08-16T00:00:00.000Z","evidence_count":29}
+      ],
+      "color_signals": [
+        {"value":"soft_warm_neutrals","signal_type":"color","trend_state":"hot","popularity_score":86,"velocity_score":74,"freshness_score":90,"niche_score":22,"confidence":0.73,"source":"mock_market_fixture","source_timestamp":"2026-08-18T00:00:00.000Z","evidence_count":50},
+        {"value":"deep_oxblood_accent","signal_type":"color","trend_state":"niche_rising","popularity_score":58,"velocity_score":80,"freshness_score":93,"niche_score":86,"confidence":0.69,"source":"mock_market_fixture","source_timestamp":"2026-08-19T00:00:00.000Z","evidence_count":24}
+      ],
+      "footwear_signals": [
+        {"value":"slim_profile_loafer","signal_type":"footwear","trend_state":"rising","popularity_score":75,"velocity_score":79,"freshness_score":89,"niche_score":36,"confidence":0.74,"source":"mock_market_fixture","source_timestamp":"2026-08-16T00:00:00.000Z","evidence_count":39},
+        {"value":"retro_low_profile_trainer","signal_type":"footwear","trend_state":"stable","popularity_score":77,"velocity_score":50,"freshness_score":82,"niche_score":28,"confidence":0.72,"source":"mock_market_fixture","source_timestamp":"2026-08-12T00:00:00.000Z","evidence_count":46}
+      ],
+      "material_signals": [
+        {"value":"soft_suede_texture","signal_type":"material","trend_state":"rising","popularity_score":67,"velocity_score":73,"freshness_score":88,"niche_score":51,"confidence":0.68,"source":"mock_market_fixture","source_timestamp":"2026-08-15T00:00:00.000Z","evidence_count":26}
+      ],
+      "layering_signals": [
+        {"value":"tonal_light_layering","signal_type":"layering","trend_state":"stable","popularity_score":69,"velocity_score":44,"freshness_score":81,"niche_score":37,"confidence":0.71,"source":"mock_market_fixture","source_timestamp":"2026-08-11T00:00:00.000Z","evidence_count":35}
+      ]
+    }
+  }
+]

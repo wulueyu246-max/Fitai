@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  CALIBRATED_PRODUCT_WEIGHTS,
   ProductAestheticReranker,
   applyDiversityScores,
   brandQualityAssessment,
@@ -78,7 +79,7 @@ test("validates candidate IDs and applies the weighted final score", () => {
   assert.equal(products.some((item) => item.product_id === "invented"), false);
 });
 
-test("Outfit Blueprint annotates ranking conflicts without becoming a second hard gate", () => {
+test("Outfit Blueprint is the highest product decision and rejects avoid items", () => {
   const groups = [{
     requirement: {
       category: "shoes",
@@ -109,16 +110,13 @@ test("Outfit Blueprint annotates ranking conflicts without becoming a second har
     selected_products: [selection("running"), selection("mary-jane")],
   }, groups, 4, context);
 
-  assert.deepEqual(products.map((item) => item.product_id), ["running", "mary-jane"]);
-  const accepted = products.find((item) => item.product_id === "mary-jane");
-  const conflicted = products.find((item) => item.product_id === "running");
-  assert.ok(accepted.blueprint_match_score >= 65);
-  assert.ok(accepted.matched_elements.length > 0);
-  assert.deepEqual(accepted.conflict_elements, []);
-  assert.ok(conflicted.conflict_elements.length > 0);
+  assert.deepEqual(products.map((item) => item.product_id), ["mary-jane"]);
+  assert.ok(products[0].blueprint_match_score >= 65);
+  assert.ok(products[0].matched_elements.length > 0);
+  assert.deepEqual(products[0].conflict_elements, []);
 });
 
-test("high-intent Blueprint remains ranking evidence for mature, classic, and unknown styles", () => {
+test("high-intent Blueprint hard gate controls mature, classic, and unknown styles", () => {
   const cases = [
     {
       name: "成熟女性",
@@ -175,44 +173,69 @@ test("high-intent Blueprint remains ranking evidence for mature, classic, and un
       },
     });
 
-    assert.deepEqual(products.map((item) => item.product_id), [
-      rejected.product_id,
-      accepted.product_id,
-    ]);
-    const acceptedProduct = products.find((item) => item.product_id === accepted.product_id);
-    const rejectedProduct = products.find((item) => item.product_id === rejected.product_id);
-    assert.ok(Number.isFinite(acceptedProduct.blueprint_match_score));
-    assert.ok(acceptedProduct.blueprint_match_score >= 50);
-    assert.ok(rejectedProduct.conflict_elements.length > 0);
+    assert.deepEqual(products.map((item) => item.product_id), [accepted.product_id]);
+    assert.ok(Number.isFinite(products[0].blueprint_match_score));
+    assert.ok(products[0].blueprint_match_score >= 50);
   }
 });
 
-test("final score uses Blueprint 40, style 20, quality 15, visual 10, brand 10, weather 5", () => {
+test("final score uses calibrated aesthetic target dimensions and weak brand diversity ties", () => {
+  assert.equal(
+    Math.round(Object.values(CALIBRATED_PRODUCT_WEIGHTS)
+      .reduce((sum, value) => sum + value, 0) * 100),
+    100,
+  );
   const score = compositeProductScore({
-    matchScore: 0,
-    bodyStrategyScore: 0,
-    blueprintMatchScore: 100,
-    styleMatchScore: 100,
-    aestheticScore: 100,
-    visualQualityScore: 100,
-    brandQualityScore: 100,
-    weatherMatchScore: 100,
-    diversityScore: 100,
-  });
-  const unchangedByRemovedSignals = compositeProductScore({
     matchScore: 100,
     bodyStrategyScore: 100,
     blueprintMatchScore: 100,
     styleMatchScore: 100,
+    occasionFitScore: 100,
+    silhouetteFitScore: 100,
+    colorFitScore: 100,
+    footwearFitScore: 100,
+    qualityFitScore: 100,
+    genderFitScore: 100,
     aestheticScore: 100,
     visualQualityScore: 100,
     brandQualityScore: 100,
-    weatherMatchScore: 100,
+    diversityScore: 100,
+  });
+  const exactLowBrand = compositeProductScore({
+    matchScore: 100,
+    bodyStrategyScore: 100,
+    blueprintMatchScore: 100,
+    styleMatchScore: 100,
+    occasionFitScore: 100,
+    silhouetteFitScore: 100,
+    colorFitScore: 100,
+    footwearFitScore: 100,
+    qualityFitScore: 100,
+    genderFitScore: 100,
+    aestheticScore: 100,
+    visualQualityScore: 100,
+    brandQualityScore: 25,
+    diversityScore: 100,
+  });
+  const mismatchHighBrand = compositeProductScore({
+    matchScore: 100,
+    bodyStrategyScore: 100,
+    blueprintMatchScore: 100,
+    styleMatchScore: 8,
+    occasionFitScore: 35,
+    silhouetteFitScore: 60,
+    colorFitScore: 60,
+    footwearFitScore: 60,
+    qualityFitScore: 100,
+    genderFitScore: 100,
+    aestheticScore: 100,
+    visualQualityScore: 100,
+    brandQualityScore: 100,
     diversityScore: 100,
   });
 
   assert.equal(score, 100);
-  assert.equal(unchangedByRemovedSignals, 100);
+  assert.ok(exactLowBrand > mismatchHighBrand);
 });
 
 test("ten identical male Clean Fit generations never repeat the same primary combination consecutively", async () => {
@@ -345,7 +368,45 @@ test("brand, image presentation and title quality directly affect aesthetic scor
   assert.ok(promotional.aesthetic_quality_flags.includes("low_end_marketing"));
 });
 
-test("legacy batch visual review annotates advertising without acting as a hard gate", async () => {
+test("female date dress scoring favors tailoring and design over a plain basic dress", () => {
+  const requirement = {
+    category: "dress", gender: "female", scene: "约会",
+    style: "高级甜美", item_name: "精致连衣裙",
+  };
+  const designed = catalogAestheticAssessment({
+    title: "女士方领收腰褶裥伞摆连衣裙", brand: "Studio Brand",
+    shop_name: "品牌官方旗舰店",
+    image_url: "https://img.alicdn.com/designed-dress.jpg",
+    image_quality_hint: "model_display", material: "提花面料", price: 399,
+  }, requirement);
+  const basic = catalogAestheticAssessment({
+    title: "女士纯色基础款连衣裙", brand: "Studio Brand",
+    shop_name: "品牌官方旗舰店",
+    image_url: "https://img.alicdn.com/basic-dress.jpg",
+    image_quality_hint: "model_display", material: "普通面料", price: 399,
+  }, requirement);
+
+  assert.ok(designed.aesthetic_score >= basic.aesthetic_score + 20);
+  assert.ok(designed.aesthetic_quality_flags.includes("feminine_dress_design_detail"));
+  assert.ok(basic.aesthetic_quality_flags.includes("generic_basic_dress"));
+});
+
+test("neutral dress intent does not receive the female scene-specific adjustment", () => {
+  const basic = catalogAestheticAssessment({
+    title: "纯色基础款连衣裙", brand: "Studio Brand",
+    shop_name: "品牌官方旗舰店",
+    image_url: "https://img.alicdn.com/neutral-dress.jpg",
+    image_quality_hint: "model_display", material: "棉", price: 399,
+  }, {
+    category: "dress", gender: "unisex", scene: "约会",
+    style: "中性利落", item_name: "连衣裙",
+  });
+
+  assert.equal(basic.aesthetic_quality_flags.includes("generic_basic_dress"), false);
+  assert.equal(basic.aesthetic_quality_flags.includes("feminine_dress_design_detail"), false);
+});
+
+test("batch visual review filters an image dominated by store advertising", async () => {
   let calls = 0;
   const advertised = product("ad-poster", "top", 96);
   advertised.title = "男士质感短袖衬衫";
@@ -388,7 +449,7 @@ test("legacy batch visual review annotates advertising without acting as a hard 
         const payload = JSON.parse(request.messages[1].content);
         assert.deepEqual(
           payload.product_groups[0].candidates.map((item) => item.product_id),
-          ["clean-model", "ad-poster"],
+          ["clean-model"],
         );
         return response([selection("clean-model", {
           body_strategy_match_score: 89,
@@ -413,10 +474,9 @@ test("legacy batch visual review annotates advertising without acting as a hard 
   });
 
   assert.equal(calls, 2);
-  assert.deepEqual(products.map((item) => item.product_id), ["clean-model", "ad-poster"]);
+  assert.deepEqual(products.map((item) => item.product_id), ["clean-model"]);
   assert.equal(products[0].commercial_ad_penalty, 5);
-  assert.ok(Number.isFinite(products[0].body_strategy_match_score));
-  assert.equal(products[1].commercial_ad_warning, true);
+  assert.equal(products[0].body_strategy_match_score, 89);
   assert.equal(reranker.getStats().visual_call_count, 1);
 });
 
@@ -552,7 +612,7 @@ test("product AI is capped at 20 seconds and timeout returns real fallback produ
   });
 
   assert.ok(observedTimeout > 0 && observedTimeout <= 20_000);
-  assert.equal(products.length, 4);
+  assert.equal(products.length, 5);
   assert.ok(products.every((item) => item.source === "taobao"));
   assert.ok(products.every((item) => item.ai_rerank_fallback === true));
 });
@@ -608,7 +668,7 @@ test("budget is a soft AI signal and over-budget selections explain the tradeoff
   assert.match(products[0].recommendation_reason, /略高于单品预算/);
 });
 
-test("AI reranker annotates low-value products without owning hard rejection", async () => {
+test("AI reranker excludes low-value products and records safe block diagnostics", async () => {
   const warnings = [];
   const safe = product("top-safe", "top", 85);
   safe.title = "男士短袖Polo";
@@ -622,7 +682,10 @@ test("AI reranker annotates low-value products without owning hard rejection", a
     client: {
       chat: {completions: {create: async (request) => {
         const payload = JSON.parse(request.messages[1].content);
-        assert.equal(payload.product_groups[0].candidates.length, 3);
+        assert.deepEqual(
+          payload.product_groups[0].candidates.map((item) => item.product_id),
+          ["top-safe"],
+        );
         return response([selection("top-safe")]);
       }}},
     },
@@ -643,13 +706,9 @@ test("AI reranker annotates low-value products without owning hard rejection", a
     context: {gender: "male"},
   });
 
-  assert.deepEqual(new Set(products.map((item) => item.product_id)), new Set([
-    "top-safe", "top-underwear", "top-promo",
-  ]));
-  assert.equal(Boolean(products.find((item) => item.product_id === "top-safe").product_quality_warning), false);
-  assert.equal(Boolean(products.find((item) => item.product_id === "top-underwear").product_quality_warning), true);
-  assert.equal(products.find((item) => item.product_id === "top-promo").aesthetic_quality_warning, true);
-  assert.equal(warnings.some(([message]) => message === "商品质量过滤"), false);
+  assert.deepEqual(products.map((item) => item.product_id), ["top-safe"]);
+  assert.equal(warnings[0][1].blocked_category[0], "underwear");
+  assert.equal(warnings[0][1].blocked_keyword[0], "内裤");
 });
 
 test("model prompt requires four to six selections for every sufficiently large group", () => {
@@ -688,7 +747,7 @@ test("under-selected groups use local fallback without another AI call", async (
   });
 
   assert.equal(calls, 1);
-  assert.equal(products.length, 4);
+  assert.equal(products.length, 5);
   assert.ok(products.every((product) => product.ai_rerank_fallback === true));
   assert.equal(reranker.getStats().call_count, 1);
   assert.equal(reranker.getStats().fallback_count, 1);
@@ -718,7 +777,7 @@ test("multiple incomplete groups fall back locally within one AI call", async ()
   });
 
   assert.deepEqual(repairedCategories, []);
-  assert.equal(products.length, 8);
+  assert.equal(products.length, 10);
   assert.ok(products.every((product) => product.ai_rerank_fallback === true));
   assert.equal(reranker.getStats().call_count, 1);
 });
