@@ -76,9 +76,15 @@ const TAOBAO_STAGE_BUDGET_MS = 15_000;
 const PRODUCT_RERANK_BUDGET_MS = 20_000;
 const PRODUCT_VISUAL_VERIFICATION_BUDGET_MS = 20_000;
 const MAX_VISUAL_CANDIDATES_PER_SLOT = 12;
-const DEFAULT_RELEVANCE_POOL_PER_REQUIREMENT = 8;
+const DEFAULT_RELEVANCE_POOL_PER_REQUIREMENT = 20;
 const DEFAULT_STRATEGY_CANDIDATE_BREADTH = 6;
 const DEFAULT_STRATEGY_BEAM_WIDTH = 72;
+const DEFAULT_GATE_PASS_TARGET_PER_CORE_SLOT = 4;
+const DEFAULT_MINIMUM_COMPLETE_LOOKS = 2;
+const DEFAULT_MAX_REFILL_ROUNDS = 2;
+const DEFAULT_REFILL_CONCURRENCY = 3;
+const DEFAULT_REFILL_QUERY_LIMIT = 8;
+const RERANKER_OUTER_GRACE_MS = 750;
 const DEFAULT_RECOMMENDATION_CACHE_TTL_MS = 7 * 60 * 1000;
 const DEFAULT_RECOMMENDATION_CACHE_ENTRIES = 150;
 
@@ -207,6 +213,10 @@ async function runSharedCandidatePipeline({
   outfitPostProcessor = postProcessOutfitCandidates,
   rerankTimeoutMs = PRODUCT_RERANK_BUDGET_MS,
   deadlineAt = 0,
+  refillCandidates = null,
+  gatePassTargetPerCoreSlot = DEFAULT_GATE_PASS_TARGET_PER_CORE_SLOT,
+  maxRefillRounds = DEFAULT_MAX_REFILL_ROUNDS,
+  minimumCompleteLooks = DEFAULT_MINIMUM_COMPLETE_LOOKS,
 } = {}) {
   const safeRequirements = (Array.isArray(requirements) ? requirements : [])
     .map((requirement) => normalizeProductRequirement(
@@ -254,6 +264,17 @@ async function runSharedCandidatePipeline({
     strategy_executed: false,
     reranker_status: "NOT_RUN",
     reranker_fallback_reasons: [],
+    reranker_timing: null,
+    refill_trigger_count: 0,
+    refill_slot_attempt_count: 0,
+    refill_network_query_count: 0,
+    refill_max_rounds_used: 0,
+    refill_rounds: [],
+    slot_outcomes: [],
+    requested_looks: [...new Set(safeRequirements.map((requirement) =>
+      String(requirement?.look_id || "")).filter(Boolean))].length,
+    quality_valid_looks: 0,
+    insufficient_quality_looks: [],
     query_plans: safeRequirements.map((requirement) => Object.freeze({
       look_id: requirement.look_id,
       concept_id: requirement.concept_id,
@@ -266,49 +287,81 @@ async function runSharedCandidatePipeline({
     })),
   };
 
-  const relevanceGroups = rawGroups.map((group) => {
-    const keyword = requirementSearchKeywords(group.requirement).join(" ") ||
-      group.requirement.item_name || "";
-    const candidates = rankProducts(
-      group.candidates,
-      group.requirement,
-      keyword,
-      {minimumScore: 35},
-    ).slice(0, DEFAULT_RELEVANCE_POOL_PER_REQUIREMENT).map((product) =>
-      preserveCandidateContract(product, group.requirement));
-    trace.relevance_pass.push(...candidates.map((product) =>
-      candidateTraceRecord(product, group.requirement, "RELEVANCE_PASS")));
-    return {requirement: group.requirement, candidates};
-  });
+  const processedGroups = rawGroups.map((group) => processCandidateGroup({
+    group,
+    context,
+    trace,
+    stagePrefix: "",
+  }));
+  let gateGroups = processedGroups.map(({requirement, gateCandidates}) => ({
+    requirement,
+    candidates: gateCandidates,
+  }));
+  const configuredGateTarget = Math.max(1, Math.min(
+    DEFAULT_STRATEGY_CANDIDATE_BREADTH,
+    positiveInteger(
+      gatePassTargetPerCoreSlot,
+      DEFAULT_GATE_PASS_TARGET_PER_CORE_SLOT,
+    ),
+  ));
+  const effectiveGateTarget = typeof refillCandidates === "function"
+    ? configuredGateTarget : 1;
 
-  const gateGroups = relevanceGroups.map((group) => {
-    const candidates = [];
-    for (const product of group.candidates) {
-      const gate = sharedCandidateGate(product, group.requirement, context);
-      if (!gate.allowed) {
-        trace.gate_reject.push(candidateTraceRecord(
-          gate.product || product,
-          group.requirement,
-          "GATE_REJECT",
-          gate.reason,
-        ));
-        continue;
-      }
-      const candidate = preserveCandidateContract({
-        ...gate.product,
-        candidate_gate_result: "PASS",
-        candidate_gate_state: "PASS",
-        candidate_gate_reason: "PASS",
-      }, group.requirement);
-      candidates.push(candidate);
-      trace.gate_pass.push(candidateTraceRecord(
-        candidate,
-        group.requirement,
-        "GATE_PASS",
-      ));
-    }
-    return {requirement: group.requirement, candidates};
+  const refillResult = await refillGateDeficientGroups({
+    groups: gateGroups,
+    context,
+    trace,
+    refillCandidates,
+    targetPerCoreSlot: effectiveGateTarget,
+    maxRounds: Math.min(
+      DEFAULT_MAX_REFILL_ROUNDS,
+      positiveInteger(maxRefillRounds, DEFAULT_MAX_REFILL_ROUNDS),
+    ),
   });
+  gateGroups = refillResult.groups;
+  trace.slot_outcomes = refillResult.slotOutcomes;
+
+  const hasComposableContract = expectedOutfitSelections(safeRequirements).length > 0;
+  const completeLookIds = hasComposableContract
+    ? completeLookIdsForGroups(
+      safeRequirements,
+      gateGroups,
+      effectiveGateTarget,
+    )
+    : new Set(safeRequirements.map((requirement) => String(
+      requirement?.look_id || "",
+    )).filter(Boolean));
+  trace.quality_valid_looks = hasComposableContract
+    ? completeLookIds.size : trace.requested_looks;
+  trace.insufficient_quality_looks = hasComposableContract
+    ? [...new Set(safeRequirements
+      .map((requirement) => String(requirement?.look_id || ""))
+      .filter((lookId) => lookId && !completeLookIds.has(lookId)))]
+    : [];
+  if (hasComposableContract) {
+    const requiredCompleteLooks = Math.min(
+      trace.requested_looks || DEFAULT_MINIMUM_COMPLETE_LOOKS,
+      positiveInteger(minimumCompleteLooks, DEFAULT_MINIMUM_COMPLETE_LOOKS),
+    );
+    if (completeLookIds.size < requiredCompleteLooks) {
+      emitCandidatePipelineTrace(logger, trace);
+      throw new ProductProviderError("Gate 后没有足够候选组成高质量穿搭", {
+        status: 422,
+        code: "INSUFFICIENT_QUALITY_CANDIDATES",
+        details: {trace: freezeCandidatePipelineTrace(trace)},
+      });
+    }
+  }
+  const activeRequirements = hasComposableContract
+    ? safeRequirements.filter((requirement) => completeLookIds.has(String(
+      requirement?.look_id || "",
+    )))
+    : safeRequirements;
+  if (hasComposableContract) {
+    gateGroups = gateGroups.filter((group) => completeLookIds.has(String(
+      group?.requirement?.look_id || "",
+    )));
+  }
 
   const gateCandidatesFlat = gateGroups.flatMap((group) => group.candidates);
   if (gateCandidatesFlat.length === 0) {
@@ -333,22 +386,34 @@ async function runSharedCandidatePipeline({
     const timeoutMs = deadlineAt > 0
       ? Math.max(1, Math.min(rerankTimeoutMs, deadlineAt - Date.now()))
       : rerankTimeoutMs;
+    const outerTimeoutMs = deadlineAt > 0
+      ? Math.max(1, Math.min(
+        timeoutMs + RERANKER_OUTER_GRACE_MS,
+        deadlineAt - Date.now(),
+      ))
+      : timeoutMs + RERANKER_OUTER_GRACE_MS;
     reranked = await withTimeBudget(activeReranker.rerank({
       groups: gateGroups,
       context,
       requestId: trace.request_id || "",
       selectionLimit: DEFAULT_STRATEGY_CANDIDATE_BREADTH,
-    }), timeoutMs, "AI_RERANK_TIMEOUT");
+    }), outerTimeoutMs, "AI_RERANK_TIMEOUT");
     trace.reranker_status = reranked.some((product) =>
       product?.ai_rerank_fallback === true) ? "FALLBACK" : "SUCCESS";
     trace.reranker_fallback_reasons = [...new Set(
       reranked.map((product) => product?.ai_rerank_fallback_reason)
         .filter(Boolean),
     )];
+    trace.reranker_timing = activeReranker.getTraceForRequest?.(
+      trace.request_id || "",
+    ) || activeReranker.getStats?.().last_trace || null;
   } catch (error) {
     trace.reranker_status = "FAILED_FALLBACK";
     trace.reranker_fallback_reason = safeProviderCode(error);
     trace.reranker_fallback_reasons = [trace.reranker_fallback_reason];
+    trace.reranker_timing = activeReranker.getTraceForRequest?.(
+      trace.request_id || "",
+    ) || activeReranker.getStats?.().last_trace || null;
     logger.warn?.("candidate_pipeline_reranker_failed", {
       request_id: trace.request_id || undefined,
       provider,
@@ -367,12 +432,12 @@ async function runSharedCandidatePipeline({
     (Array.isArray(reranked) ? reranked : [])
     .map((product) => restoreCandidateContract(product, sourceCandidates))
       .filter(Boolean),
-    safeRequirements,
+    activeRequirements,
     DEFAULT_STRATEGY_CANDIDATE_BREADTH,
   );
   trace.reranker_keep.push(...rerankerProducts.map((product) =>
     candidateTraceRecord(product, findRequirementForProduct(
-      safeRequirements,
+      activeRequirements,
       product,
     ), "RERANKER_KEEP")));
   if (rerankerProducts.length === 0) {
@@ -387,7 +452,7 @@ async function runSharedCandidatePipeline({
   let composition;
   try {
     composition = outfitPostProcessor({
-      requirements: safeRequirements,
+      requirements: activeRequirements,
       products: rerankerProducts,
       context,
       provider,
@@ -403,7 +468,7 @@ async function runSharedCandidatePipeline({
     restoreCandidateContract(product, sourceCandidates) || product);
   trace.strategy_selected.push(...selectedProducts.map((product) =>
     candidateTraceRecord(product, findRequirementForProduct(
-      safeRequirements,
+      activeRequirements,
       product,
     ), "STRATEGY_SELECTED")));
   emitCandidatePipelineTrace(logger, trace);
@@ -412,6 +477,281 @@ async function runSharedCandidatePipeline({
     products: Object.freeze(selectedProducts),
     trace: freezeCandidatePipelineTrace(trace),
   });
+}
+
+function processCandidateGroup({group, context, trace, stagePrefix = ""}) {
+  const requirement = group?.requirement || {};
+  const keyword = requirementSearchKeywords(requirement).join(" ") ||
+    requirement.item_name || "";
+  const relevanceCandidates = rankProducts(
+    Array.isArray(group?.candidates) ? group.candidates : [],
+    requirement,
+    keyword,
+    {minimumScore: 35},
+  ).slice(0, DEFAULT_RELEVANCE_POOL_PER_REQUIREMENT).map((product) =>
+    preserveCandidateContract(product, requirement));
+  trace.relevance_pass.push(...relevanceCandidates.map((product) =>
+    candidateTraceRecord(
+      product,
+      requirement,
+      `${stagePrefix}RELEVANCE_PASS`,
+    )));
+  const gateCandidates = [];
+  for (const product of relevanceCandidates) {
+    const gate = sharedCandidateGate(product, requirement, context);
+    if (!gate.allowed) {
+      trace.gate_reject.push(candidateTraceRecord(
+        gate.product || product,
+        requirement,
+        `${stagePrefix}GATE_REJECT`,
+        gate.reason,
+      ));
+      continue;
+    }
+    const candidate = preserveCandidateContract({
+      ...gate.product,
+      candidate_gate_result: "PASS",
+      candidate_gate_state: "PASS",
+      candidate_gate_reason: "PASS",
+    }, requirement);
+    gateCandidates.push(candidate);
+    trace.gate_pass.push(candidateTraceRecord(
+      candidate,
+      requirement,
+      `${stagePrefix}GATE_PASS`,
+    ));
+  }
+  return {requirement, relevanceCandidates, gateCandidates};
+}
+
+async function refillGateDeficientGroups({
+  groups,
+  context,
+  trace,
+  refillCandidates,
+  targetPerCoreSlot,
+  maxRounds,
+} = {}) {
+  const working = (Array.isArray(groups) ? groups : []).map((group) => ({
+    requirement: group.requirement,
+    candidates: dedupeCandidates(group.candidates),
+  }));
+  const initialCounts = new Map(working.map((group) => [
+    requirementPipelineKey(group.requirement),
+    group.candidates.length,
+  ]));
+  const seenByGroup = new Map();
+  const triggeredKeys = new Set();
+  for (const record of trace.raw_candidates || []) {
+    const key = `${record.look_id}:${record.slot}`;
+    const seen = seenByGroup.get(key) || new Set();
+    if (record.underlying_product_key) {
+      seen.add(`identity:${record.underlying_product_key}`);
+    }
+    if (record.candidate_id) seen.add(`id:${record.candidate_id}`);
+    seenByGroup.set(key, seen);
+  }
+
+  if (typeof refillCandidates === "function") {
+    for (let round = 1; round <= maxRounds; round += 1) {
+      const deficient = working.map((group, index) => ({group, index}))
+        .filter(({group}) => group.candidates.length <
+          candidateTargetForRequirement(group.requirement, targetPerCoreSlot));
+      if (deficient.length === 0) break;
+      deficient.forEach(({group}) => triggeredKeys.add(
+        requirementPipelineKey(group.requirement),
+      ));
+      trace.refill_slot_attempt_count += deficient.length;
+      trace.refill_max_rounds_used = Math.max(trace.refill_max_rounds_used, round);
+      const settled = await mapSettledWithConcurrency(
+        deficient,
+        DEFAULT_REFILL_CONCURRENCY,
+        async ({group, index}) => ({
+          index,
+          response: await refillCandidates({
+            requirement: group.requirement,
+            round,
+            originalCount: initialCounts.get(
+              requirementPipelineKey(group.requirement),
+            ) || 0,
+            currentCount: group.candidates.length,
+          }),
+        }),
+      );
+      for (let resultIndex = 0; resultIndex < settled.length; resultIndex += 1) {
+        const settledResult = settled[resultIndex];
+        const deficientEntry = deficient[resultIndex];
+        const group = working[deficientEntry.index];
+        const requirement = group.requirement;
+        const groupKey = requirementPipelineKey(requirement);
+        const beforeCount = group.candidates.length;
+        if (settledResult.status === "rejected") {
+          const failedAttempt = settledResult.reason?.refillAttemptTrace || {};
+          const attemptedQueries = Array.isArray(failedAttempt.queries)
+            ? failedAttempt.queries : [];
+          trace.refill_network_query_count += Number(
+            failedAttempt.network_query_count || attemptedQueries.length || 0,
+          );
+          trace.refill_rounds.push(Object.freeze({
+            look_id: requirement.look_id || null,
+            slot: outfitRequirementSlot(requirement),
+            round,
+            refill_reason: "GATE_PASS_BELOW_TARGET",
+            original_count: initialCounts.get(groupKey) || 0,
+            before_count: beforeCount,
+            query: Object.freeze([...attemptedQueries]),
+            returned_count: 0,
+            unique_added: 0,
+            accepted_count: 0,
+            after_count: beforeCount,
+            status: "FAILED",
+            failure_reason: safeProviderCode(settledResult.reason),
+          }));
+          continue;
+        }
+        const response = settledResult.value?.response;
+        const returned = Array.isArray(response)
+          ? response
+          : Array.isArray(response?.candidates) ? response.candidates : [];
+        trace.refill_network_query_count += Array.isArray(response?.queries)
+          ? response.queries.length : 0;
+        const seen = seenByGroup.get(groupKey) || new Set();
+        const uniqueRaw = [];
+        for (const rawProduct of returned) {
+          const product = preserveCandidateContract(rawProduct, requirement);
+          const keys = candidateDedupeKeys(product);
+          if (keys.some((key) => seen.has(key))) continue;
+          keys.forEach((key) => seen.add(key));
+          uniqueRaw.push(product);
+        }
+        seenByGroup.set(groupKey, seen);
+        trace.raw_candidates.push(...uniqueRaw.map((product) =>
+          candidateTraceRecord(product, requirement, "REFILL_RAW")));
+        const processed = processCandidateGroup({
+          group: {requirement, candidates: uniqueRaw},
+          context,
+          trace,
+          stagePrefix: "REFILL_",
+        });
+        group.candidates = dedupeCandidates([
+          ...group.candidates,
+          ...processed.gateCandidates,
+        ]).slice(0, DEFAULT_RELEVANCE_POOL_PER_REQUIREMENT);
+        trace.refill_rounds.push(Object.freeze({
+          look_id: requirement.look_id || null,
+          slot: outfitRequirementSlot(requirement),
+          round,
+          refill_reason: "GATE_PASS_BELOW_TARGET",
+          original_count: initialCounts.get(groupKey) || 0,
+          before_count: beforeCount,
+          query: Object.freeze([...(response?.queries || [])]),
+          returned_count: Number(response?.returned_count ?? returned.length),
+          unique_added: uniqueRaw.length,
+          relevance_pass: processed.relevanceCandidates.length,
+          accepted_count: processed.gateCandidates.length,
+          after_count: group.candidates.length,
+          status: group.candidates.length >= candidateTargetForRequirement(
+            requirement,
+            targetPerCoreSlot,
+          ) ? "TARGET_REACHED" : "STILL_DEFICIENT",
+        }));
+      }
+    }
+  }
+
+  const slotOutcomes = working.map((group) => {
+    const key = requirementPipelineKey(group.requirement);
+    const target = candidateTargetForRequirement(
+      group.requirement,
+      targetPerCoreSlot,
+    );
+    const attempts = trace.refill_rounds.filter((entry) =>
+      `${entry.look_id || ""}:${entry.slot || ""}` === key);
+    return Object.freeze({
+      look_id: group.requirement.look_id || null,
+      slot: outfitRequirementSlot(group.requirement),
+      target_count: target,
+      initial_gate_pass: initialCounts.get(key) || 0,
+      final_gate_pass: group.candidates.length,
+      refill_round_count: attempts.length,
+      status: group.candidates.length >= target
+        ? "READY" : "INSUFFICIENT_QUALITY_CANDIDATES",
+    });
+  });
+  trace.refill_trigger_count = triggeredKeys.size;
+  return {groups: working, slotOutcomes};
+}
+
+function candidateTargetForRequirement(requirement, targetPerCoreSlot) {
+  return ["top", "bottom", "dress", "shoes", "outerwear"].includes(
+    outfitRequirementSlot(requirement),
+  ) ? targetPerCoreSlot : 1;
+}
+
+function candidateDedupeKeys(product = {}) {
+  const id = String(product?.candidate_id || product?.product_id || product?.id || "");
+  const identity = String(
+    product?.canonical_product_identity || canonicalProductIdentity(product) || "",
+  );
+  return [identity ? `identity:${identity}` : "", id ? `id:${id}` : ""]
+    .filter(Boolean);
+}
+
+function dedupeCandidates(products = []) {
+  const seen = new Set();
+  return (Array.isArray(products) ? products : []).filter((product) => {
+    const keys = candidateDedupeKeys(product);
+    if (keys.some((key) => seen.has(key))) return false;
+    keys.forEach((key) => seen.add(key));
+    return true;
+  });
+}
+
+function completeLookIdsForGroups(requirements, groups, targetPerCoreSlot) {
+  const counts = new Map((Array.isArray(groups) ? groups : []).map((group) => [
+    requirementPipelineKey(group.requirement),
+    group.candidates.length,
+  ]));
+  const expected = expectedOutfitSelections(requirements);
+  const byLook = new Map();
+  for (const selection of expected) {
+    const values = byLook.get(selection.lookId) || [];
+    values.push(selection);
+    byLook.set(selection.lookId, values);
+  }
+  return new Set([...byLook.entries()]
+    .filter(([, selections]) => selections.every((selection) =>
+      Number(counts.get(`${selection.lookId}:${selection.slot}`) || 0) >=
+        candidateTargetForRequirement(
+          {category: selection.slot},
+          targetPerCoreSlot,
+        )))
+    .map(([lookId]) => lookId));
+}
+
+async function mapSettledWithConcurrency(values, concurrency, mapper) {
+  const items = Array.isArray(values) ? values : [];
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({length: Math.min(
+    Math.max(1, positiveInteger(concurrency, 1)),
+    Math.max(1, items.length),
+  )}, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      try {
+        results[index] = {
+          status: "fulfilled",
+          value: await mapper(items[index], index),
+        };
+      } catch (reason) {
+        results[index] = {status: "rejected", reason};
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 function limitProductsPerRequirement(products, requirements, limit) {
@@ -692,6 +1032,11 @@ function freezeCandidatePipelineTrace(trace) {
     gate_reject: Object.freeze([...trace.gate_reject]),
     reranker_keep: Object.freeze([...trace.reranker_keep]),
     strategy_selected: Object.freeze([...trace.strategy_selected]),
+    refill_rounds: Object.freeze([...(trace.refill_rounds || [])]),
+    slot_outcomes: Object.freeze([...(trace.slot_outcomes || [])]),
+    insufficient_quality_looks: Object.freeze([
+      ...(trace.insufficient_quality_looks || []),
+    ]),
     query_plans: Object.freeze([...(trace.query_plans || [])]),
     reranker_fallback_reasons: Object.freeze([
       ...(trace.reranker_fallback_reasons || []),
@@ -1225,10 +1570,12 @@ class TaobaoProductProvider extends ProductProvider {
           return {
             requirement,
             prefilterCount: candidates.length,
-            candidates: candidates.slice(0, this.visualVerifier
-              ? this.visualCandidateLimit
-              : useNewDecisionPipeline
-                ? DEFAULT_RELEVANCE_POOL_PER_REQUIREMENT : 4),
+            // The new decision pipeline performs its shared Relevance/Gate pass
+            // after retrieval, so preserve the full bounded reserve even when a
+            // legacy visual verifier is configured on the provider instance.
+            candidates: candidates.slice(0, useNewDecisionPipeline
+              ? DEFAULT_RELEVANCE_POOL_PER_REQUIREMENT
+              : this.visualVerifier ? this.visualCandidateLimit : 4),
             funnel: metrics.funnel,
             metrics,
             error: null,
@@ -1421,6 +1768,7 @@ class TaobaoProductProvider extends ProductProvider {
       }
       const selectionStartedAt = Date.now();
       const visualFallbackUsed = visualVerificationSummary?.fallback_used === true;
+      const refillExecutionKeys = new Set();
       const pipelineResult = await this.candidatePipeline({
         requirements: values,
         groups,
@@ -1431,6 +1779,19 @@ class TaobaoProductProvider extends ProductProvider {
         outfitPostProcessor: this.outfitPostProcessor,
         rerankTimeoutMs: this.rerankBudgetMs,
         deadlineAt: pipelineDeadline,
+        refillCandidates: async ({requirement, round}) => withTimeBudget(
+          this.#refillCandidatePool({
+            requirement,
+            context,
+            round,
+            executed: refillExecutionKeys,
+          }),
+          Math.max(1, Math.min(
+            this.taobaoStageBudgetMs,
+            pipelineDeadline - Date.now(),
+          )),
+          "TAOBAO_REFILL_TIMEOUT",
+        ),
       });
       this.lastPipelineTrace = pipelineResult.trace;
       const products = pipelineResult.products;
@@ -1878,6 +2239,66 @@ class TaobaoProductProvider extends ProductProvider {
     return budgetAssessed.slice(0, candidateLimit);
   }
 
+  async #refillCandidatePool({requirement, context, round, executed}) {
+    const planned = buildCandidateRefillQueries(requirement, round)
+      .filter((entry) => {
+        const key = `${requirementPipelineKey(requirement)}:${entry.query}:` +
+          `${entry.page_no}`;
+        if (executed.has(key)) return false;
+        executed.add(key);
+        return true;
+      });
+    if (planned.length === 0) {
+      return {candidates: [], queries: [], returned_count: 0};
+    }
+    let batches;
+    try {
+      batches = await Promise.all(planned.map((entry) => this.#search({
+        ...context,
+        ...requirement,
+        requestId: context.requestId || context.request_id,
+        originalKeyword: requirementSearchKeywords(requirement)[0] || entry.query,
+        searchKeyword: entry.query,
+        fallbackLevel: entry.fallback_level,
+        pageNo: entry.page_no,
+        minimumRelevanceScore: 35,
+        limit: DEFAULT_REFILL_QUERY_LIMIT,
+      })));
+    } catch (error) {
+      const failure = error instanceof Error
+        ? error : new Error("Candidate refill retrieval failed");
+      failure.refillAttemptTrace = Object.freeze({
+        network_query_count: planned.length,
+        queries: Object.freeze(planned.map((entry) => Object.freeze({
+          query: entry.query,
+          query_type: entry.query_type,
+          page_no: entry.page_no,
+        }))),
+      });
+      throw failure;
+    }
+    const candidates = uniqueProducts(batches.flat());
+    const queries = planned.map((entry, index) => Object.freeze({
+      query: entry.query,
+      query_type: entry.query_type,
+      page_no: entry.page_no,
+      result_count: batches[index].length,
+    }));
+    this.logger.info?.("candidate_refill_retrieval", {
+      request_id: context.requestId || context.request_id || undefined,
+      look_id: requirement.look_id || undefined,
+      slot: outfitRequirementSlot(requirement),
+      round,
+      queries,
+      returned_count: candidates.length,
+    });
+    return {
+      candidates,
+      queries,
+      returned_count: candidates.length,
+    };
+  }
+
   async #search(filters, metrics = null) {
     let payload;
     try {
@@ -2043,6 +2464,10 @@ class AutoProductProvider extends ProductProvider {
       this.health = false;
       const first = Array.isArray(queries) ? queries[0] || {} : {};
       this.#logFallback(error, {...context, ...first});
+      if (error?.code === "INSUFFICIENT_QUALITY_CANDIDATES") {
+        this.status = "insufficient_quality_candidates";
+        throw asProductProviderError(error);
+      }
       if (!this.allowMockFallback) {
         this.status = "error";
         throw asProductProviderError(error);
@@ -2690,6 +3115,37 @@ function requirementSearchKeywords(requirement = {}) {
     requirement?.item_name,
     requirement?.itemName,
   ].map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 1);
+}
+
+function buildCandidateRefillQueries(requirement = {}, round = 1) {
+  const plan = requirement?.commerce_query_plan || {};
+  const candidates = Array.isArray(plan.query_candidates)
+    ? plan.query_candidates : [];
+  const q1 = candidates.find((entry) => entry?.query_id === "Q1") || candidates[0];
+  const q3 = plan.fallback_query || null;
+  const highRecall = String(
+    q1?.query || requirementSearchKeywords(requirement)[0] || "",
+  ).trim().slice(0, 80);
+  const broad = String(q3?.query || "").trim();
+  const q2 = candidates.find((entry) => entry?.query_id === "Q2") || candidates[1];
+  const signal = String(q2?.aesthetic_signal || "").trim();
+  const broadWithIntent = [...new Set([broad, signal].filter(Boolean))]
+    .join(" ").trim().slice(0, 80);
+  const values = Number(round) <= 1
+    ? [
+      {query: highRecall, query_type: "Q1_HIGH_RECALL_NEXT_PAGE", page_no: 2},
+    ]
+    : [
+      {
+        query: broadWithIntent || broad,
+        query_type: "Q3_BROADER_CATEGORY_WITH_CORE_INTENT_NEXT_PAGE",
+        page_no: 2,
+      },
+    ];
+  return values.filter((entry) => entry.query).map((entry) => ({
+    ...entry,
+    fallback_level: Number(round) + 2,
+  }));
 }
 
 function markRerankFallback(products, reason = "AI_RERANK_FALLBACK") {

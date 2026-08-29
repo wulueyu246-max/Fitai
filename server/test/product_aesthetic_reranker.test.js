@@ -419,12 +419,14 @@ test("batch visual review filters an image dominated by store advertising", asyn
         if (Array.isArray(request.messages[1].content)) {
           const images = request.messages[1].content.filter((part) =>
             part.type === "image_url");
-          assert.equal(images.length, 2);
+          assert.equal(images.length, 1);
           assert.ok(images.every((part) => part.image_url.detail === "auto"));
+          const metadata = request.messages[1].content.find((part) =>
+            part.type === "text" && /product_id=/u.test(part.text));
+          const candidateId = /product_id=([^;]+)/u.exec(metadata?.text || "")?.[1];
           return {
             choices: [{message: {content: JSON.stringify({
-              image_assessments: [
-                {
+              image_assessments: candidateId === "ad-poster" ? [{
                   requirement_index: 0,
                   product_id: "ad-poster",
                   visual_quality_score: 18,
@@ -432,8 +434,7 @@ test("batch visual review filters an image dominated by store advertising", asyn
                   commercial_ad_penalty: 92,
                   subject_coverage_score: 25,
                   reason: "50年老店和北京商城广告字占据主图",
-                },
-                {
+                }] : [{
                   requirement_index: 0,
                   product_id: "clean-model",
                   visual_quality_score: 90,
@@ -441,8 +442,7 @@ test("batch visual review filters an image dominated by store advertising", asyn
                   commercial_ad_penalty: 5,
                   subject_coverage_score: 88,
                   reason: "干净模特展示，服装主体清晰",
-                },
-              ],
+                }],
             })}}],
           };
         }
@@ -473,11 +473,457 @@ test("batch visual review filters an image dominated by store advertising", asyn
     },
   });
 
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
   assert.deepEqual(products.map((item) => item.product_id), ["clean-model"]);
   assert.equal(products[0].commercial_ad_penalty, 5);
   assert.equal(products[0].body_strategy_match_score, 89);
   assert.equal(reranker.getStats().visual_call_count, 1);
+});
+
+test("multi-Look AI batches remap local requirement indexes and complete without fallback", async () => {
+  let calls = 0;
+  const groups = ["look-1", "look-2", "look-3"].map((lookId, lookIndex) => {
+    const value = group("top", Array.from({length: 4}, (_unused, index) =>
+      `${lookId}-top-${index + 1}`));
+    value.requirement.look_id = lookId;
+    value.requirement.avoid_attributes = ["overly_corporate"];
+    value.candidates = value.candidates.map((item) => ({...item, look_id: lookId}));
+    value.requirement.slot_key = `slot-${lookIndex}`;
+    return value;
+  });
+  const reranker = new ProductAestheticReranker({
+    visualEvaluationEnabled: false,
+    client: {
+      chat: {completions: {create: async (request) => {
+        calls += 1;
+        const payload = JSON.parse(request.messages[1].content);
+        assert.equal(payload.product_groups.length, 1);
+        assert.deepEqual(
+          payload.product_groups[0].requirement.avoid_attributes,
+          ["overly_corporate"],
+        );
+        return response(payload.product_groups[0].candidates.map((item) =>
+          selection(item.product_id, {requirement_index: 0})));
+      }}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await reranker.rerank({groups, context: {gender: "male"}});
+  const stats = reranker.getStats();
+  assert.equal(calls, 3);
+  assert.equal(products.length, 12);
+  assert.equal(products.every((item) => item.ai_rerank_fallback === false), true);
+  assert.equal(stats.fallback_count, 0);
+  assert.equal(stats.last_trace.selection.batch_count, 3);
+  assert.deepEqual(
+    stats.last_trace.selection.batches.map((batch) => batch.global_group_indexes),
+    [[0], [1], [2]],
+  );
+  assert.equal(stats.last_trace.selection.batches.every((batch) =>
+    batch.prompt_bytes < 100_000), true);
+});
+
+test("one bad image is degraded without dragging down the other image or text batch", async () => {
+  const bad = product("bad-image", "top", 90);
+  const good = product("good-image", "top", 88);
+  const reranker = new ProductAestheticReranker({
+    client: {
+      chat: {completions: {create: async (request) => {
+        if (Array.isArray(request.messages[1].content)) {
+          const metadata = request.messages[1].content.find((part) =>
+            part.type === "text" && /product_id=/u.test(part.text));
+          const productId = /product_id=([^;]+)/u.exec(metadata?.text || "")?.[1];
+          if (productId === "bad-image") {
+            throw Object.assign(new Error("candidate image fetch failed"), {
+              code: "IMAGE_FETCH_FAILED",
+            });
+          }
+          return {
+            choices: [{message: {content: JSON.stringify({
+              image_assessments: [{
+                requirement_index: 0,
+                product_id: "good-image",
+                visual_quality_score: 88,
+                fashion_taste_score: 84,
+                commercial_ad_penalty: 4,
+                subject_coverage_score: 90,
+                reason: "商品主体清晰",
+              }],
+            })}}],
+          };
+        }
+        return response([
+          selection("bad-image", {requirement_index: 0}),
+          selection("good-image", {requirement_index: 0}),
+        ]);
+      }}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await reranker.rerank({
+    groups: [{
+      requirement: {category: "top", gender: "male", look_id: "look-1"},
+      candidates: [{...bad, look_id: "look-1"}, {...good, look_id: "look-1"}],
+    }],
+  });
+  const failed = products.find((item) => item.product_id === "bad-image");
+  const passed = products.find((item) => item.product_id === "good-image");
+  const trace = reranker.getStats().last_trace;
+  assert.equal(products.length, 2);
+  assert.equal(failed.visual_evaluation_status, "FAILED_DEGRADED");
+  assert.equal(failed.visual_quality_score <= 35, true);
+  assert.equal(passed.visual_quality_score, 88);
+  assert.equal(trace.visual.failed_image_count, 1);
+  assert.equal(trace.visual.evaluated_image_count, 1);
+  assert.equal(trace.fallback, false);
+});
+
+test("a true model timeout aborts the request and records an explicit fallback", async () => {
+  let aborted = false;
+  let transportTimeout = null;
+  const reranker = new ProductAestheticReranker({
+    visualEvaluationEnabled: false,
+    timeoutMs: 35,
+    client: {
+      chat: {completions: {create: async (_request, options) =>
+        new Promise((_resolve, reject) => {
+          transportTimeout = options.timeout;
+          options.signal.addEventListener("abort", () => {
+            aborted = true;
+            reject(Object.assign(new Error("aborted"), {code: "ABORTED"}));
+          }, {once: true});
+        })}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await reranker.rerank({
+    groups: [group("top", ["top-1", "top-2"])],
+  });
+  const stats = reranker.getStats();
+  assert.equal(aborted, true);
+  assert.equal(transportTimeout > 35, true);
+  assert.equal(products.every((item) => item.ai_rerank_fallback === true), true);
+  assert.equal(stats.last_fallback_reason, "AI_RERANK_SELECTION_BATCH_TIMEOUT");
+  assert.equal(stats.last_fallback_category, "TIMEOUT");
+  assert.equal(stats.last_trace.selection.failed_batch_count, 1);
+  assert.equal(
+    stats.last_trace.selection.batches[0].reason_code,
+    "AI_RERANK_SELECTION_BATCH_TIMEOUT",
+  );
+  assert.equal(
+    stats.last_trace.selection.batches[0].timeout_owner,
+    "LOCAL_ABORT_CONTROLLER",
+  );
+});
+
+test("a failed small batch falls back only for that Look with its real trace", async () => {
+  const groups = ["look-ok", "look-failed"].map((lookId) => {
+    const value = group("top", [`${lookId}-1`, `${lookId}-2`]);
+    value.requirement.look_id = lookId;
+    value.candidates = value.candidates.map((item) => ({...item, look_id: lookId}));
+    return value;
+  });
+  const reranker = new ProductAestheticReranker({
+    visualEvaluationEnabled: false,
+    client: {
+      chat: {completions: {create: async (request) => {
+        const payload = JSON.parse(request.messages[1].content);
+        const lookId = payload.product_groups[0].requirement.look_id;
+        if (lookId === "look-failed") {
+          throw Object.assign(new Error("upstream broken"), {code: "UPSTREAM_BROKEN"});
+        }
+        return response(payload.product_groups[0].candidates.map((item) =>
+          selection(item.product_id, {requirement_index: 0})));
+      }}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await reranker.rerank({groups});
+  const failedProducts = products.filter((item) => item.look_id === "look-failed");
+  const okProducts = products.filter((item) => item.look_id === "look-ok");
+  const trace = reranker.getStats().last_trace.selection;
+  assert.equal(products.length, 4);
+  assert.equal(okProducts.every((item) => item.ai_rerank_fallback === false), true);
+  assert.equal(failedProducts.every((item) => item.ai_rerank_fallback === true), true);
+  assert.equal(trace.failed_batch_count, 1);
+  assert.equal(trace.batches.find((batch) => batch.status === "FAILED").batch_index, 1);
+  assert.equal(
+    trace.batches.find((batch) => batch.status === "FAILED").reason_code,
+    "UPSTREAM_BROKEN",
+  );
+});
+
+test("visual deadline skips are distinct from bad-image failures", async () => {
+  const visualCalls = [];
+  const reranker = new ProductAestheticReranker({
+    timeoutMs: 500,
+    visualStageMs: 45,
+    visualImageTimeoutMs: 25,
+    visualConcurrency: 1,
+    client: {
+      chat: {completions: {create: async (request, options) => {
+        if (Array.isArray(request.messages[1].content)) {
+          const metadata = request.messages[1].content.find((part) =>
+            part.type === "text" && /product_id=/u.test(part.text));
+          const productId = /product_id=([^;]+)/u.exec(metadata?.text || "")?.[1];
+          visualCalls.push(productId);
+          if (productId === "bad-image") {
+            throw Object.assign(new Error("bad image payload"), {
+              code: "IMAGE_FETCH_FAILED",
+            });
+          }
+          return new Promise((_resolve, reject) => {
+            options.signal.addEventListener("abort", () => reject(
+              Object.assign(new Error("aborted"), {code: "ABORTED"}),
+            ), {once: true});
+          });
+        }
+        const payload = JSON.parse(request.messages[1].content);
+        return response(payload.product_groups[0].candidates.map((item) =>
+          selection(item.product_id, {requirement_index: 0})));
+      }}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+  const candidates = ["bad-image", "slow-image", "deadline-image"]
+    .map((id, index) => product(id, "top", 99 - index * 10));
+
+  const products = await reranker.rerank({
+    groups: [{
+      requirement: {category: "top", gender: "male", look_id: "look-1"},
+      candidates: candidates.map((item) => ({...item, look_id: "look-1"})),
+    }],
+    requestId: "visual-deadline",
+  });
+  const trace = reranker.getTraceForRequest("visual-deadline").visual;
+  assert.deepEqual(visualCalls, ["bad-image", "slow-image"]);
+  assert.equal(trace.failed_image_count, 2);
+  assert.equal(trace.bad_image_failure_count, 1);
+  assert.equal(trace.infrastructure_failure_count, 1);
+  assert.equal(trace.deadline_skipped_image_count, 1);
+  assert.equal(trace.images.find((item) =>
+    item.product_id === "deadline-image").status, "SKIPPED_DEADLINE");
+  assert.equal(products.find((item) =>
+    item.product_id === "deadline-image").visual_evaluation_status,
+  "SKIPPED_DEADLINE");
+  assert.equal(products.find((item) =>
+    item.product_id === "deadline-image").visual_quality_score > 35, true);
+  assert.equal(products.find((item) =>
+    item.product_id === "bad-image").visual_evaluation_status,
+  "FAILED_DEGRADED");
+  assert.equal(products.find((item) =>
+    item.product_id === "slow-image").visual_evaluation_status,
+  "FAILED_UNASSESSED");
+});
+
+test("queued selection batches keep ordered trace when the deadline expires", async () => {
+  let modelCalls = 0;
+  const groups = ["look-1", "look-2", "look-3"].map((lookId) => {
+    const value = group("top", [`${lookId}-1`, `${lookId}-2`]);
+    value.requirement.look_id = lookId;
+    value.candidates = value.candidates.map((item) => ({...item, look_id: lookId}));
+    return value;
+  });
+  const reranker = new ProductAestheticReranker({
+    visualEvaluationEnabled: false,
+    selectionConcurrency: 1,
+    timeoutMs: 35,
+    client: {
+      chat: {completions: {create: async (_request, options) => {
+        modelCalls += 1;
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener("abort", () => reject(
+            Object.assign(new Error("aborted"), {code: "ABORTED"}),
+          ), {once: true});
+        });
+      }}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+
+  await reranker.rerank({groups, requestId: "queued-deadline"});
+  const trace = reranker.getTraceForRequest("queued-deadline").selection;
+  assert.equal(modelCalls, 1);
+  assert.deepEqual(trace.batches.map((item) => item.batch_index), [0, 1, 2]);
+  assert.deepEqual(trace.batches.map((item) => item.look_ids[0]),
+    ["look-1", "look-2", "look-3"]);
+  assert.equal(trace.deadline_skipped_batch_count, 2);
+  assert.equal(trace.batches[1].status, "SKIPPED_DEADLINE");
+  assert.equal(trace.batches[2].status, "SKIPPED_DEADLINE");
+  assert.equal(trace.batches.every((item) => Number.isFinite(item.queue_wait_ms)), true);
+});
+
+test("a nonempty response with only invented products is an invalid batch", async () => {
+  const reranker = new ProductAestheticReranker({
+    visualEvaluationEnabled: false,
+    client: {
+      chat: {completions: {create: async () => response([
+        selection("invented", {requirement_index: 0}),
+      ])}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await reranker.rerank({
+    groups: [group("top", ["top-1", "top-2"])],
+    requestId: "invalid-nonempty",
+  });
+  const batch = reranker.getTraceForRequest("invalid-nonempty").selection.batches[0];
+  assert.equal(products.every((item) => item.ai_rerank_fallback === true), true);
+  assert.equal(batch.status, "FAILED");
+  assert.equal(batch.reason_code, "AI_RERANK_BATCH_INVALID_RESPONSE");
+  assert.equal(batch.category, "SCHEMA_OR_RESPONSE_VALIDATION");
+});
+
+test("request traces are current for cache hits, unconfigured calls, and concurrency", async () => {
+  const reranker = new ProductAestheticReranker({
+    visualEvaluationEnabled: false,
+    client: {
+      chat: {completions: {create: async (request) => {
+        const payload = JSON.parse(request.messages[1].content);
+        const productId = payload.product_groups[0].candidates[0].product_id;
+        if (productId.startsWith("slow")) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return response(payload.product_groups[0].candidates.map((item) =>
+          selection(item.product_id, {requirement_index: 0})));
+      }}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+  const cachedGroups = [group("top", ["cache-1", "cache-2"] )];
+  await reranker.rerank({groups: cachedGroups, requestId: "cache-source"});
+  await reranker.rerank({groups: cachedGroups, requestId: "cache-current"});
+  assert.equal(reranker.getTraceForRequest("cache-source").cached, false);
+  assert.equal(reranker.getTraceForRequest("cache-current").cached, true);
+  assert.equal(reranker.getTraceForRequest("cache-current").request_id, "cache-current");
+
+  await Promise.all([
+    reranker.rerank({
+      groups: [group("top", ["slow-1", "slow-2"])],
+      requestId: "concurrent-slow",
+    }),
+    reranker.rerank({
+      groups: [group("top", ["fast-1", "fast-2"])],
+      requestId: "concurrent-fast",
+    }),
+  ]);
+  assert.equal(reranker.getTraceForRequest("concurrent-slow").request_id,
+    "concurrent-slow");
+  assert.equal(reranker.getTraceForRequest("concurrent-fast").request_id,
+    "concurrent-fast");
+
+  const unconfigured = new ProductAestheticReranker({
+    logger: {info() {}, warn() {}},
+  });
+  await unconfigured.rerank({
+    groups: [group("top", ["top-1"])],
+    requestId: "not-configured",
+  });
+  const unconfiguredTrace = unconfigured.getTraceForRequest("not-configured");
+  assert.equal(unconfiguredTrace.request_id, "not-configured");
+  assert.equal(unconfiguredTrace.failure_reason, "AI_RERANK_NOT_CONFIGURED");
+});
+
+test("one canonical image assessment propagates to every candidate sharing it", async () => {
+  let visualCalls = 0;
+  const groups = ["look-a", "look-b"].map((lookId, index) => ({
+    requirement: {category: "top", gender: "male", look_id: lookId},
+    candidates: [{
+      ...product(`shared-${index + 1}`, "top", 90),
+      look_id: lookId,
+      image_url: `https://img.example.com/shared.jpg?variant=${index + 1}`,
+    }],
+  }));
+  const reranker = new ProductAestheticReranker({
+    client: {
+      chat: {completions: {create: async (request) => {
+        if (Array.isArray(request.messages[1].content)) {
+          visualCalls += 1;
+          return {choices: [{message: {content: JSON.stringify({
+            image_assessments: [{
+              requirement_index: 0,
+              product_id: "shared-1",
+              visual_quality_score: 91,
+              fashion_taste_score: 88,
+              commercial_ad_penalty: 3,
+              subject_coverage_score: 92,
+              reason: "同一商品图主体清晰",
+            }],
+          })}}]};
+        }
+        const payload = JSON.parse(request.messages[1].content);
+        return response([selection(payload.product_groups[0].candidates[0].product_id, {
+          requirement_index: 0,
+        })]);
+      }}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await reranker.rerank({groups, requestId: "shared-image"});
+  const trace = reranker.getTraceForRequest("shared-image").visual;
+  assert.equal(visualCalls, 1);
+  assert.equal(products.length, 2);
+  assert.equal(products.every((item) => item.visual_quality_score === 91), true);
+  assert.equal(trace.evaluated_image_count, 1);
+  assert.equal(trace.assessed_candidate_count, 2);
+  assert.equal(trace.shared_image_candidate_count, 1);
+  assert.equal(trace.skipped_image_count, 0);
+});
+
+test("selection failure retains the completed visual-stage trace", async () => {
+  const candidate = product("visual-ok", "top", 90);
+  const reranker = new ProductAestheticReranker({
+    client: {
+      chat: {completions: {create: async (request) => {
+        if (Array.isArray(request.messages[1].content)) {
+          return {choices: [{message: {content: JSON.stringify({
+            image_assessments: [{
+              requirement_index: 0,
+              product_id: "visual-ok",
+              visual_quality_score: 90,
+              fashion_taste_score: 88,
+              commercial_ad_penalty: 2,
+              subject_coverage_score: 91,
+              reason: "商品图清晰",
+            }],
+          })}}]};
+        }
+        throw Object.assign(new Error("selection unavailable"), {
+          code: "UPSTREAM_SELECTION_FAILED",
+        });
+      }}},
+    },
+    model: "test-model",
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await reranker.rerank({
+    groups: [{
+      requirement: {category: "top", gender: "male", look_id: "look-1"},
+      candidates: [{...candidate, look_id: "look-1"}],
+    }],
+    requestId: "selection-after-visual",
+  });
+  const trace = reranker.getTraceForRequest("selection-after-visual");
+  assert.equal(products[0].ai_rerank_fallback, true);
+  assert.equal(trace.visual.evaluated_image_count, 1);
+  assert.equal(trace.visual.images[0].status, "SUCCESS");
+  assert.equal(trace.selection.failed_batch_count, 1);
 });
 
 test("aesthetic quality scoring applies to every supported product category", () => {

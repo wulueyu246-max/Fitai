@@ -27,7 +27,14 @@ const DEFAULT_CACHE_ENTRIES = 100;
 const DEFAULT_VISUAL_CANDIDATES_PER_GROUP = 8;
 const MAX_CANDIDATES_PER_LOOK = 48;
 const MAX_PRODUCT_AI_MS = 20_000;
-const MAX_VISUAL_IMAGES_PER_REQUEST = 40;
+const MAX_VISUAL_IMAGES_PER_REQUEST = 6;
+const MAX_VISUAL_STAGE_MS = 6_000;
+const MAX_VISUAL_IMAGE_MS = 2_500;
+const MAX_SELECTION_BATCH_MS = 7_500;
+const DEFAULT_SELECTION_CONCURRENCY = 2;
+const DEFAULT_VISUAL_CONCURRENCY = 3;
+const MODEL_TRANSPORT_TIMEOUT_GRACE_MS = 1_000;
+const DEFAULT_REQUEST_TRACE_ENTRIES = 200;
 const HIGH_QUALITY_BRAND_SCORE = 65;
 const CALIBRATED_PRODUCT_WEIGHTS = Object.freeze({
   style_fit: 0.34,
@@ -107,6 +114,10 @@ class ProductAestheticReranker {
     cacheTtlMs = DEFAULT_CACHE_TTL_MS,
     maxCacheEntries = DEFAULT_CACHE_ENTRIES,
     visualEvaluationEnabled = true,
+    selectionConcurrency = DEFAULT_SELECTION_CONCURRENCY,
+    visualConcurrency = DEFAULT_VISUAL_CONCURRENCY,
+    visualStageMs = MAX_VISUAL_STAGE_MS,
+    visualImageTimeoutMs = MAX_VISUAL_IMAGE_MS,
     logger = console,
   } = {}) {
     this.client = client || null;
@@ -118,9 +129,26 @@ class ProductAestheticReranker {
     this.cacheTtlMs = positiveInteger(cacheTtlMs, DEFAULT_CACHE_TTL_MS);
     this.maxCacheEntries = positiveInteger(maxCacheEntries, DEFAULT_CACHE_ENTRIES);
     this.visualEvaluationEnabled = visualEvaluationEnabled !== false;
+    this.selectionConcurrency = Math.min(
+      positiveInteger(selectionConcurrency, DEFAULT_SELECTION_CONCURRENCY),
+      DEFAULT_SELECTION_CONCURRENCY,
+    );
+    this.visualConcurrency = Math.min(
+      positiveInteger(visualConcurrency, DEFAULT_VISUAL_CONCURRENCY),
+      DEFAULT_VISUAL_CONCURRENCY,
+    );
+    this.visualStageMs = Math.min(
+      positiveInteger(visualStageMs, MAX_VISUAL_STAGE_MS),
+      MAX_VISUAL_STAGE_MS,
+    );
+    this.visualImageTimeoutMs = Math.min(
+      positiveInteger(visualImageTimeoutMs, MAX_VISUAL_IMAGE_MS),
+      MAX_VISUAL_IMAGE_MS,
+    );
     this.logger = logger;
     this.cache = new Map();
     this.selectionHistory = new Map();
+    this.requestTraces = new Map();
     this.metrics = {
       callCount: 0,
       cacheHits: 0,
@@ -134,6 +162,10 @@ class ProductAestheticReranker {
       lastFallbackReason: null,
       lastFallbackCategory: null,
       fallbackReasons: new Map(),
+      modelRequestCount: 0,
+      selectionBatchCount: 0,
+      selectionBatchFallbackCount: 0,
+      lastTrace: null,
     };
   }
 
@@ -160,8 +192,17 @@ class ProductAestheticReranker {
       last_fallback_reason: this.metrics.lastFallbackReason,
       last_fallback_category: this.metrics.lastFallbackCategory,
       fallback_reasons: Object.fromEntries(this.metrics.fallbackReasons),
+      model_request_count: this.metrics.modelRequestCount,
+      selection_batch_count: this.metrics.selectionBatchCount,
+      selection_batch_fallback_count: this.metrics.selectionBatchFallbackCount,
+      last_trace: this.metrics.lastTrace,
       cache_entries: this.cache.size,
     };
+  }
+
+  getTraceForRequest(requestId) {
+    const key = String(requestId || "").trim();
+    return key ? this.requestTraces.get(key) || null : null;
   }
 
   async rerank({groups, context = {}, requestId = "", selectionLimit = DEFAULT_SELECTION_LIMIT}) {
@@ -203,7 +244,20 @@ class ProductAestheticReranker {
       (total, group) => total + group.candidates.length,
       0,
     );
-    if (candidateCount === 0) return [];
+    if (candidateCount === 0) {
+      this.#setTrace(requestId, Object.freeze({
+        request_id: requestId || null,
+        configured_timeout_ms: this.timeoutMs,
+        prefilter_candidate_count: prefilterCount,
+        normalized_candidate_count: 0,
+        group_count: normalizedGroups.length,
+        total_ms: 0,
+        cached: false,
+        fallback: false,
+        reason: "NO_ELIGIBLE_CANDIDATES",
+      }));
+      return [];
+    }
 
     const cacheKey = buildCacheKey(normalizedGroups, context);
     const finalize = (products) => this.#diversify(
@@ -227,6 +281,18 @@ class ProductAestheticReranker {
       const reasonCode = "AI_RERANK_NOT_CONFIGURED";
       this.#recordFallback(reasonCode, "ENVIRONMENT_CONFIGURATION");
       const products = fallback(reasonCode);
+      this.#setTrace(requestId, Object.freeze({
+        request_id: requestId || null,
+        configured_timeout_ms: this.timeoutMs,
+        prefilter_candidate_count: prefilterCount,
+        normalized_candidate_count: candidateCount,
+        group_count: normalizedGroups.length,
+        total_ms: 0,
+        cached: false,
+        fallback: true,
+        failure_reason: reasonCode,
+        failure_category: "ENVIRONMENT_CONFIGURATION",
+      }));
       this.#logResult({
         requestId,
         candidateCount,
@@ -246,6 +312,17 @@ class ProductAestheticReranker {
       this.metrics.cacheHits += 1;
       const cachedFallback = cached.some((product) => product.ai_rerank_fallback === true);
       const diversified = finalize(cached);
+      this.#setTrace(requestId, Object.freeze({
+        request_id: requestId || null,
+        configured_timeout_ms: this.timeoutMs,
+        prefilter_candidate_count: prefilterCount,
+        normalized_candidate_count: candidateCount,
+        group_count: normalizedGroups.length,
+        total_ms: 0,
+        cached: true,
+        fallback: cachedFallback,
+        failure_reason: cachedFallback ? "AI_RERANK_CACHED_FALLBACK" : null,
+      }));
       this.#logResult({
         requestId,
         candidateCount,
@@ -260,22 +337,42 @@ class ProductAestheticReranker {
     }
 
     const startedAt = Date.now();
+    let visualTrace = null;
     try {
       const deadlineAt = startedAt + this.timeoutMs;
-      workingGroups = await this.#assessVisuals(
+      const visualResult = await this.#assessVisuals(
         normalizedGroups,
         context,
         requestId,
+        Math.min(MAX_VISUAL_STAGE_MS, remainingBudgetMs(deadlineAt)),
+      );
+      workingGroups = visualResult.groups;
+      visualTrace = visualResult.trace;
+      const selectionPayload = await this.#select(
+        workingGroups,
+        context,
         remainingBudgetMs(deadlineAt),
       );
       let selected = validateSelection(
-        await this.#select(workingGroups, context, remainingBudgetMs(deadlineAt)),
+        selectionPayload,
         workingGroups,
         selectionLimit,
         context,
       );
       const incompleteGroups = groupsBelowMinimum(workingGroups, selected);
-      let usedFallback = false;
+      const failedSelectionBatches = Number(
+        selectionPayload?._reranker_batch_trace?.failed_batch_count || 0,
+      );
+      const failedBatchCategories = [...new Set(
+        (selectionPayload?._reranker_batch_trace?.batches || [])
+          .filter((batch) => batch.status !== "SUCCESS")
+          .map((batch) => batch.category)
+          .filter(Boolean),
+      )];
+      const partialFailureCategory = failedBatchCategories.length === 1
+        ? failedBatchCategories[0]
+        : failedBatchCategories.length > 1 ? "MULTIPLE" : "OTHER";
+      let usedFallback = failedSelectionBatches > 0;
       if (incompleteGroups.length > 0) {
         usedFallback = true;
         selected = replaceGroupProducts(
@@ -287,15 +384,33 @@ class ProductAestheticReranker {
       const durationMs = Date.now() - startedAt;
       if (usedFallback) this.metrics.fallbackCount += 1;
       if (usedFallback) {
+        const fallbackReason = failedSelectionBatches > 0
+          ? "AI_RERANK_PARTIAL_BATCH_FALLBACK"
+          : "AI_RERANK_INCOMPLETE_SELECTION";
         this.#recordFallback(
-          "AI_RERANK_INCOMPLETE_SELECTION",
-          "RESPONSE_VALIDATION",
+          fallbackReason,
+          failedSelectionBatches > 0
+            ? partialFailureCategory : "RESPONSE_VALIDATION",
         );
         selected = selected.map((product) => product.ai_rerank_fallback === true
           ? {...product,
-            ai_rerank_fallback_reason: "AI_RERANK_INCOMPLETE_SELECTION"}
+            ai_rerank_fallback_reason: fallbackReason}
           : product);
       }
+      this.#setTrace(requestId, Object.freeze({
+        request_id: requestId || null,
+        configured_timeout_ms: this.timeoutMs,
+        prefilter_candidate_count: prefilterCount,
+        normalized_candidate_count: candidateCount,
+        group_count: normalizedGroups.length,
+        visual: Object.freeze({...visualResult.trace}),
+        selection: Object.freeze({
+          ...(selectionPayload?._reranker_batch_trace || {}),
+        }),
+        total_ms: durationMs,
+        cached: false,
+        fallback: usedFallback,
+      }));
       this.#writeCache(cacheKey, selected);
       const diversified = finalize(selected);
       this.#logResult({
@@ -307,8 +422,15 @@ class ProductAestheticReranker {
         durationMs,
         cached: false,
         fallback: usedFallback,
-        errorCode: usedFallback ? "AI_RERANK_INCOMPLETE_SELECTION" : undefined,
-        errorCategory: usedFallback ? "RESPONSE_VALIDATION" : undefined,
+        errorCode: usedFallback
+          ? (failedSelectionBatches > 0
+            ? "AI_RERANK_PARTIAL_BATCH_FALLBACK"
+            : "AI_RERANK_INCOMPLETE_SELECTION")
+          : undefined,
+        errorCategory: usedFallback
+          ? (failedSelectionBatches > 0
+            ? partialFailureCategory : "RESPONSE_VALIDATION")
+          : undefined,
       });
       return cloneProducts(diversified);
     } catch (error) {
@@ -318,6 +440,20 @@ class ProductAestheticReranker {
       const reasonCode = diagnosis.reasonCode;
       this.#recordFallback(reasonCode, diagnosis.category);
       const products = fallback(reasonCode);
+      this.#setTrace(requestId, Object.freeze({
+        request_id: requestId || null,
+        configured_timeout_ms: this.timeoutMs,
+        prefilter_candidate_count: prefilterCount,
+        normalized_candidate_count: candidateCount,
+        group_count: normalizedGroups.length,
+        visual: visualTrace ? Object.freeze({...visualTrace}) : null,
+        selection: error?.rerankerSelectionTrace || null,
+        total_ms: durationMs,
+        cached: false,
+        fallback: true,
+        failure_reason: reasonCode,
+        failure_category: diagnosis.category,
+      }));
       this.#logResult({
         requestId,
         prefilterCount,
@@ -344,24 +480,144 @@ class ProductAestheticReranker {
     );
   }
 
+  #setTrace(requestId, trace) {
+    this.metrics.lastTrace = trace;
+    const key = String(requestId || "").trim();
+    if (!key) return;
+    this.requestTraces.delete(key);
+    this.requestTraces.set(key, trace);
+    while (this.requestTraces.size > DEFAULT_REQUEST_TRACE_ENTRIES) {
+      this.requestTraces.delete(this.requestTraces.keys().next().value);
+    }
+  }
+
   async #select(groups, context, timeoutMs = this.timeoutMs) {
     const startedAt = Date.now();
+    const deadlineAt = startedAt + Math.max(1, Math.min(timeoutMs, this.timeoutMs));
+    const batches = buildSelectionBatches(groups);
     this.metrics.callCount += 1;
+    this.metrics.selectionBatchCount += batches.length;
     try {
-      const response = await this.client.chat.completions.create(
-        {
-          model: this.model,
-          response_format: {type: "json_object"},
-          enable_thinking: false,
-          temperature: 0.2,
-          messages: buildMessages(groups, context),
-        },
-        {
-          timeout: Math.max(1, Math.min(timeoutMs, this.timeoutMs)),
-          maxRetries: 0,
+      const settled = await mapSettledWithConcurrency(
+        batches,
+        this.selectionConcurrency,
+        async (batch, batchIndex) => {
+          const modelStartedAt = Date.now();
+          const baseTrace = {
+            batch_index: batchIndex,
+            look_ids: batch.lookIds,
+            global_group_indexes: batch.globalGroupIndexes,
+            group_count: batch.groups.length,
+            candidate_count: batch.candidateCount,
+            queue_wait_ms: Date.now() - startedAt,
+            prompt_bytes: null,
+            prompt_build_ms: null,
+            timeout_ms: null,
+          };
+          try {
+            const promptStartedAt = Date.now();
+            const messages = buildMessages(batch.groups, context);
+            baseTrace.prompt_build_ms = Date.now() - promptStartedAt;
+            baseTrace.prompt_bytes = Buffer.byteLength(
+              JSON.stringify(messages),
+              "utf8",
+            );
+            const remaining = deadlineAt - Date.now();
+            if (remaining <= 0) {
+              const error = new Error("AI reranker batch skipped after deadline");
+              error.code = "AI_RERANK_SELECTION_DEADLINE_SKIPPED";
+              throw error;
+            }
+            const requestTimeoutMs = Math.max(1, Math.min(
+              MAX_SELECTION_BATCH_MS,
+              remaining,
+            ));
+            baseTrace.timeout_ms = requestTimeoutMs;
+            this.metrics.modelRequestCount += 1;
+            const response = await abortableModelRequest(
+              this.client,
+              {
+                model: this.model,
+                response_format: {type: "json_object"},
+                enable_thinking: false,
+                temperature: 0.2,
+                messages,
+              },
+              requestTimeoutMs,
+              "AI_RERANK_SELECTION_BATCH_TIMEOUT",
+            );
+            const modelRequestMs = Date.now() - modelStartedAt;
+            const parseStartedAt = Date.now();
+            const parsed = parseJsonResponse(extractText(response));
+            const remapped = remapBatchSelectionPayload(parsed, batch);
+            const responseParseMs = Date.now() - parseStartedAt;
+            return {
+              payload: remapped,
+              trace: {
+                ...baseTrace,
+                model_request_ms: modelRequestMs,
+                response_parse_ms: responseParseMs,
+                ...(remapped._batch_validation || {}),
+                status: "SUCCESS",
+              },
+            };
+          } catch (error) {
+            const reasonCode = safeErrorCode(error);
+            error.rerankerBatchTrace = {
+              ...baseTrace,
+              model_request_ms: Date.now() - modelStartedAt,
+              response_parse_ms: null,
+              status: reasonCode === "AI_RERANK_SELECTION_DEADLINE_SKIPPED"
+                ? "SKIPPED_DEADLINE" : "FAILED",
+              reason_code: reasonCode,
+              category: classifyRerankerFailure(error).category,
+              timeout_owner: error?.timeout_owner || null,
+            };
+            throw error;
+          }
         },
       );
-      return parseJsonResponse(extractText(response));
+      const successful = settled.filter((entry) => entry.status === "fulfilled");
+      const failed = settled.filter((entry) => entry.status === "rejected");
+      const batchTraces = settled.map((entry, batchIndex) =>
+        entry.status === "fulfilled" ? entry.value.trace
+          : entry.reason?.rerankerBatchTrace || ({
+            batch_index: batchIndex,
+            look_ids: batches[batchIndex]?.lookIds || [],
+            global_group_indexes: batches[batchIndex]?.globalGroupIndexes || [],
+            status: "FAILED",
+            reason_code: safeErrorCode(entry.reason),
+            category: classifyRerankerFailure(entry.reason).category,
+          }));
+      const deadlineSkippedBatchCount = batchTraces.filter((entry) =>
+        entry.status === "SKIPPED_DEADLINE").length;
+      this.metrics.selectionBatchFallbackCount += failed.length;
+      if (successful.length === 0) {
+        const error = failed[0]?.reason || Object.assign(
+          new Error("All AI reranker batches failed"),
+          {code: "AI_RERANK_ALL_BATCHES_FAILED"},
+        );
+        error.rerankerSelectionTrace = {
+          batch_count: batches.length,
+          successful_batch_count: 0,
+          failed_batch_count: failed.length,
+          deadline_skipped_batch_count: deadlineSkippedBatchCount,
+          batches: batchTraces,
+        };
+        throw error;
+      }
+      return {
+        selected_products: successful.flatMap((entry) =>
+          Array.isArray(entry.value?.payload?.selected_products)
+            ? entry.value.payload.selected_products : []),
+        _reranker_batch_trace: {
+          batch_count: batches.length,
+          successful_batch_count: successful.length,
+          failed_batch_count: failed.length,
+          deadline_skipped_batch_count: deadlineSkippedBatchCount,
+          batches: batchTraces,
+        },
+      };
     } finally {
       const durationMs = Date.now() - startedAt;
       this.metrics.totalDurationMs += durationMs;
@@ -370,47 +626,179 @@ class ProductAestheticReranker {
   }
 
   async #assessVisuals(groups, context, requestId, timeoutMs = this.timeoutMs) {
-    if (!this.visualEvaluationEnabled) return groups;
+    const inputImageCount = countCandidateImages(groups);
+    if (!this.visualEvaluationEnabled) {
+      return {
+        groups,
+        trace: {
+          enabled: false,
+          input_image_count: inputImageCount,
+          evaluated_image_count: 0,
+          failed_image_count: 0,
+          image_download_ms: null,
+          image_transport: "NOT_USED",
+          reason: "VISUAL_EVALUATION_DISABLED",
+          total_ms: 0,
+        },
+      };
+    }
     const batch = buildVisualBatch(groups);
-    if (batch.length === 0) return groups;
+    if (batch.length === 0) {
+      return {
+        groups,
+        trace: {
+          enabled: true,
+          input_image_count: inputImageCount,
+          evaluated_image_count: 0,
+          failed_image_count: 0,
+          image_download_ms: null,
+          image_transport: "REMOTE_MODEL_URL",
+          reason: "NO_VALID_UNIQUE_HTTPS_IMAGE",
+          total_ms: 0,
+        },
+      };
+    }
     const startedAt = Date.now();
+    const deadlineAt = startedAt + Math.max(1, Math.min(
+      timeoutMs,
+      this.visualStageMs,
+    ));
     this.metrics.visualCallCount += 1;
     try {
-      const response = await this.client.chat.completions.create(
-        {
-          model: this.model,
-          response_format: {type: "json_object"},
-          enable_thinking: false,
-          temperature: 0,
-          messages: buildVisualQualityMessages(groups, context, batch),
-        },
-        {
-          timeout: Math.max(1, Math.min(timeoutMs, this.timeoutMs)),
-          maxRetries: 0,
+      const settled = await mapSettledWithConcurrency(
+        batch,
+        this.visualConcurrency,
+        async (entry) => {
+          const imageStartedAt = Date.now();
+          try {
+            const messages = buildVisualQualityMessages(groups, context, [entry]);
+            const remaining = deadlineAt - Date.now();
+            if (remaining < this.visualImageTimeoutMs) {
+              const error = new Error("AI visual evaluation skipped after deadline");
+              error.code = "AI_VISUAL_DEADLINE_SKIPPED";
+              throw error;
+            }
+            const requestTimeoutMs = this.visualImageTimeoutMs;
+            this.metrics.modelRequestCount += 1;
+            const response = await abortableModelRequest(
+              this.client,
+              {
+                model: this.model,
+                response_format: {type: "json_object"},
+                enable_thinking: false,
+                temperature: 0,
+                messages,
+              },
+              requestTimeoutMs,
+              "AI_VISUAL_IMAGE_TIMEOUT",
+            );
+            const payload = validateSingleVisualPayload(
+              parseJsonResponse(extractText(response)),
+              entry,
+            );
+            return {
+              payload,
+              trace: visualEntryTrace(entry, {
+                status: "SUCCESS",
+                durationMs: Date.now() - imageStartedAt,
+              }),
+            };
+          } catch (error) {
+            const reasonCode = safeErrorCode(error);
+            error.visualEntryTrace = visualEntryTrace(entry, {
+              status: reasonCode === "AI_VISUAL_DEADLINE_SKIPPED"
+                ? "SKIPPED_DEADLINE" : "FAILED",
+              durationMs: Date.now() - imageStartedAt,
+              reasonCode,
+              timeoutOwner: error?.timeout_owner || null,
+            });
+            throw error;
+          }
         },
       );
-      const assessed = applyVisualAssessments(
-        groups,
-        parseJsonResponse(extractText(response)),
+      const successful = settled.filter((entry) => entry.status === "fulfilled");
+      const rejected = settled.filter((entry) => entry.status === "rejected");
+      const deadlineSkipped = rejected.filter((entry) =>
+        safeErrorCode(entry.reason) === "AI_VISUAL_DEADLINE_SKIPPED");
+      const failed = rejected.filter((entry) =>
+        safeErrorCode(entry.reason) !== "AI_VISUAL_DEADLINE_SKIPPED");
+      const badImageFailures = failed.filter((entry) =>
+        isVisualProductEvidenceFailure(entry.reason));
+      const infrastructureFailures = failed.filter((entry) =>
+        !isVisualProductEvidenceFailure(entry.reason));
+      if (rejected.length > 0) this.metrics.visualFallbackCount += 1;
+      const imageAssessments = successful.flatMap((entry) =>
+        Array.isArray(entry.value?.payload?.image_assessments)
+          ? entry.value.payload.image_assessments
+          : Array.isArray(entry.value?.payload?.products)
+            ? entry.value.payload.products : []);
+      const visuallyAssessed = imageAssessments.length > 0
+        ? applyVisualAssessments(groups, {image_assessments: imageAssessments})
+        : groups;
+      const failedEntries = settled.map((entry, index) =>
+        entry.status === "rejected" &&
+        isVisualProductEvidenceFailure(entry.reason)
+          ? {entry: batch[index], reason: entry.reason} : null).filter(Boolean);
+      const infrastructureEntries = settled.map((entry, index) =>
+        entry.status === "rejected" &&
+        safeErrorCode(entry.reason) !== "AI_VISUAL_DEADLINE_SKIPPED" &&
+        !isVisualProductEvidenceFailure(entry.reason)
+          ? {entry: batch[index], reason: entry.reason} : null).filter(Boolean);
+      const skippedEntries = settled.map((entry, index) =>
+        entry.status === "rejected" &&
+        safeErrorCode(entry.reason) === "AI_VISUAL_DEADLINE_SKIPPED"
+          ? batch[index] : null).filter(Boolean);
+      const degraded = applyVisualFailurePenalties(visuallyAssessed, failedEntries);
+      const unassessed = applyVisualInfrastructureStatuses(
+        degraded,
+        infrastructureEntries,
       );
+      const assessed = applyVisualDeadlineStatuses(unassessed, skippedEntries);
+      const assessedCandidateCount = imageAssessments.length;
+      const coveredCandidateCount = batch.reduce((total, entry) =>
+        total + visualEntryTargets(entry).length, 0);
+      const durationMs = Date.now() - startedAt;
       this.logger.info?.("商品图片视觉质量评估完成", {
         requestId: requestId || undefined,
-        evaluatedCount: batch.length,
+        evaluatedCount: successful.length,
+        failedCount: failed.length,
+        deadlineSkippedCount: deadlineSkipped.length,
         retainedCount: assessed.reduce(
           (total, group) => total + group.candidates.length,
           0,
         ),
-        visualDurationMs: Date.now() - startedAt,
+        visualDurationMs: durationMs,
       });
-      return assessed;
-    } catch (error) {
-      this.metrics.visualFallbackCount += 1;
-      this.logger.warn?.("商品图片视觉质量评估回退", {
-        requestId: requestId || undefined,
-        evaluatedCount: batch.length,
-        errorCode: safeErrorCode(error),
-      });
-      return groups;
+      return {
+        groups: assessed,
+        trace: {
+          enabled: true,
+          input_image_count: inputImageCount,
+          unique_valid_image_count: batch.length,
+          evaluated_image_count: successful.length,
+          failed_image_count: failed.length,
+          bad_image_failure_count: badImageFailures.length,
+          infrastructure_failure_count: infrastructureFailures.length,
+          deadline_skipped_image_count: deadlineSkipped.length,
+          assessed_candidate_count: assessedCandidateCount,
+          shared_image_candidate_count: Math.max(
+            0,
+            coveredCandidateCount - batch.length,
+          ),
+          skipped_image_count: Math.max(0, inputImageCount - coveredCandidateCount),
+          failure_reasons: [...new Set(rejected.map((entry) =>
+            safeErrorCode(entry.reason)))],
+          images: Object.freeze(settled.map((entry, index) =>
+            entry.status === "fulfilled"
+              ? entry.value.trace
+              : entry.reason?.visualEntryTrace).filter(Boolean)),
+          image_download_ms: null,
+          image_transport: "REMOTE_MODEL_URL",
+          image_download_observability: "MODEL_PROVIDER_NOT_SEPARATELY_OBSERVABLE",
+          concurrency: this.visualConcurrency,
+          total_ms: durationMs,
+        },
+      };
     } finally {
       const durationMs = Date.now() - startedAt;
       this.metrics.visualTotalDurationMs += durationMs;
@@ -517,16 +905,16 @@ function buildMessages(groups, context) {
       "item_budget", "itemBudget", "outfit_budget", "outfitBudget",
       "color_preferences", "colorPreferences",
     ]),
-    outfit_plan: pickFields(context.outfit_plan || context.outfitPlan || {}, [
-      "style_semantics", "styleSemantics", "style_profile", "styleProfile", "styling_strategy", "stylingStrategy", "looks", "top", "bottom", "dress",
-      "outfit_blueprint", "outfitBlueprint", "shoes", "outerwear", "bag", "accessories", "summary",
-    ]),
+    outfit_plan: compactOutfitPlanForPrompt(
+      context.outfit_plan || context.outfitPlan || {},
+      groups,
+    ),
     product_groups: groups.map((group, index) => ({
       requirement_index: index,
       category_priority: categoryPriority(group.requirement.category),
       required_minimum: Math.min(4, group.candidates.length),
       maximum: Math.min(6, group.candidates.length),
-      requirement: compactObject(group.requirement),
+      requirement: compactRequirementForPrompt(group.requirement),
       candidates: group.candidates.map((product) => compactObject({
         product_id: product.product_id,
         look_id: product.look_id,
@@ -608,7 +996,7 @@ function buildMessages(groups, context) {
         "product_groups 中的 required_minimum 和 maximum 是该组的明确数量约束，selected_products 必须逐组满足。",
         "同组商品应兼顾审美首选、百搭、性价比、设计感和身材适配。",
         "三套 Look 之间必须主动保持多样性：同品类避免相同商品、同品牌、标题高度相似或相同图片，并呼应各自不同的 style_direction。",
-        "只返回严格 JSON：{\"selected_products\":[{\"product_id\":\"候选ID\",\"aesthetic_score\":0,\"fit_score\":0,\"outfit_coherence_score\":0,\"value_score\":0,\"reason\":\"\",\"concern\":\"\"}]}。",
+        "只返回严格 JSON：{\"selected_products\":[{\"requirement_index\":0,\"product_id\":\"候选ID\",\"aesthetic_score\":0,\"fit_score\":0,\"outfit_coherence_score\":0,\"value_score\":0,\"reason\":\"\",\"concern\":\"\"}]}。",
         "所有分数必须在 0 到 100 之间，输出顺序就是最终推荐顺序。",
       ].join("\n"),
     },
@@ -616,32 +1004,224 @@ function buildMessages(groups, context) {
   ];
 }
 
+function compactRequirementForPrompt(requirement = {}) {
+  return pickFields(requirement, [
+    "look_id", "lookId", "concept_id", "conceptId", "slot_key", "slotKey",
+    "category", "subcategory", "search_subcategory", "item_name", "gender",
+    "scene", "occasion", "style", "style_direction", "silhouette",
+    "fit", "color", "material", "footwear", "quality_tier",
+    "must_have", "must_avoid", "prefer", "avoid_items",
+    "required_attributes", "preferred_attributes", "avoid_attributes",
+    "negative_keywords", "source_elements", "style_role",
+    "item_budget", "outfit_budget", "budget_allocation",
+    "body_fit_preferences", "body_fit_soft_signals", "market_soft_signals",
+    "market_influence_cap", "aesthetic_target_profile", "decision_authority",
+  ]);
+}
+
+function compactOutfitPlanForPrompt(plan = {}, groups = []) {
+  const lookIds = new Set((Array.isArray(groups) ? groups : [])
+    .map((group) => String(
+      group?.requirement?.look_id || group?.requirement?.lookId || "",
+    ).trim())
+    .filter(Boolean));
+  const looks = (Array.isArray(plan?.looks) ? plan.looks : [])
+    .filter((look) => lookIds.size === 0 || lookIds.has(String(
+      look?.look_id || look?.lookId || "",
+    ).trim()))
+    .map((look) => ({
+      ...pickFields(look, [
+        "look_id", "lookId", "concept_id", "conceptId", "style",
+        "style_direction", "styling_goal", "proportion_strategy",
+        "scene", "formality", "color_direction", "quality_direction",
+      ]),
+      items: (Array.isArray(look?.items) ? look.items : []).map((item) =>
+        compactRequirementForPrompt(item)),
+    }));
+  return {
+    ...pickFields(plan, ["source", "summary"]),
+    looks,
+  };
+}
+
+function buildSelectionBatches(groups = []) {
+  const byLook = new Map();
+  (Array.isArray(groups) ? groups : []).forEach((group, globalIndex) => {
+    const lookId = String(
+      group?.requirement?.look_id || group?.requirement?.lookId || "default",
+    ).trim() || "default";
+    const batch = byLook.get(lookId) || [];
+    batch.push({group, globalIndex});
+    byLook.set(lookId, batch);
+  });
+  return [...byLook.entries()].map(([lookId, entries]) => ({
+    lookIds: [lookId],
+    groups: entries.map((entry) => entry.group),
+    globalGroupIndexes: entries.map((entry) => entry.globalIndex),
+    candidateCount: entries.reduce(
+      (total, entry) => total + (Array.isArray(entry.group?.candidates)
+        ? entry.group.candidates.length : 0),
+      0,
+    ),
+  }));
+}
+
+function remapBatchSelectionPayload(payload, batch) {
+  if (!Array.isArray(payload?.selected_products) ||
+      payload.selected_products.length === 0) {
+    const error = new Error("AI reranker batch response has no selections");
+    error.code = "AI_RERANK_BATCH_INVALID_RESPONSE";
+    throw error;
+  }
+  const accepted = [];
+  for (const item of payload.selected_products) {
+      const productId = String(item?.product_id || "").trim();
+      let localIndex = Number(item?.requirement_index);
+      if (!Number.isInteger(localIndex) || localIndex < 0 ||
+          localIndex >= batch.groups.length) {
+        const matchingIndexes = batch.groups.map((group, index) =>
+          group.candidates.some((candidate) =>
+            String(candidate?.product_id || "") === productId) ? index : -1)
+          .filter((index) => index >= 0);
+        localIndex = matchingIndexes.length === 1 ? matchingIndexes[0] : -1;
+      }
+      const candidateExists = localIndex >= 0 && batch.groups[localIndex]
+        ?.candidates?.some((candidate) =>
+          String(candidate?.product_id || "") === productId);
+      const scoresValid = [
+        item?.aesthetic_score ?? item?.ai_taste_score,
+        item?.fit_score,
+        item?.outfit_coherence_score,
+        item?.value_score,
+      ].every((value) => score(value) != null);
+      if (!productId || !candidateExists || !scoresValid) continue;
+      accepted.push({
+        ...item,
+        requirement_index: localIndex >= 0
+          ? batch.globalGroupIndexes[localIndex] : -1,
+      });
+  }
+  if (accepted.length === 0) {
+    const error = new Error("AI reranker batch returned no valid selections");
+    error.code = "AI_RERANK_BATCH_INVALID_RESPONSE";
+    throw error;
+  }
+  return {
+    ...payload,
+    selected_products: accepted,
+    _batch_validation: Object.freeze({
+      returned_selection_count: payload.selected_products.length,
+      accepted_selection_count: accepted.length,
+      rejected_selection_count: payload.selected_products.length - accepted.length,
+    }),
+  };
+}
+
+async function mapSettledWithConcurrency(values, concurrency, mapper) {
+  const items = Array.isArray(values) ? values : [];
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({length: Math.min(
+    Math.max(1, positiveInteger(concurrency, 1)),
+    Math.max(1, items.length),
+  )}, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      try {
+        results[index] = {
+          status: "fulfilled",
+          value: await mapper(items[index], index),
+        };
+      } catch (reason) {
+        results[index] = {status: "rejected", reason};
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+async function abortableModelRequest(client, payload, timeoutMs, timeoutCode) {
+  const budget = Math.max(1, Number(timeoutMs) || 1);
+  const controller = new AbortController();
+  let timer;
+  try {
+    return await Promise.race([
+      client.chat.completions.create(payload, {
+        timeout: budget + MODEL_TRANSPORT_TIMEOUT_GRACE_MS,
+        maxRetries: 0,
+        signal: controller.signal,
+      }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error("AI reranker model request timed out");
+          error.code = timeoutCode;
+          error.timeout_owner = "LOCAL_ABORT_CONTROLLER";
+          reject(error);
+          controller.abort(error);
+        }, budget);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function countCandidateImages(groups = []) {
+  return (Array.isArray(groups) ? groups : []).reduce(
+    (total, group) => total + (Array.isArray(group?.candidates)
+      ? group.candidates.filter((product) => String(
+        product?.image_url || "",
+      ).trim()).length : 0),
+    0,
+  );
+}
+
 function buildVisualBatch(groups) {
-  const categories = new Map();
+  const requirementBuckets = [];
+  const entriesByImage = new Map();
   (Array.isArray(groups) ? groups : []).forEach((group, requirementIndex) => {
     const category = String(group?.requirement?.category || "other");
-    const bucket = categories.get(category) || [];
+    const bucket = [];
     for (const product of Array.isArray(group?.candidates) ? group.candidates : []) {
       const productId = String(product?.product_id || "").trim();
       const imageUrl = String(product?.image_url || "").trim();
-      if (!productId || !/^https:\/\/[^\s]+$/i.test(imageUrl)) continue;
+      const imageIdentity = canonicalImageIdentity(imageUrl);
+      if (!productId || !imageIdentity) continue;
       if (bucket.some((entry) => entry.product_id === productId)) continue;
+      const target = Object.freeze({
+        requirement_index: requirementIndex,
+        product_id: productId,
+      });
+      const sharedEntry = entriesByImage.get(imageIdentity);
+      if (sharedEntry) {
+        if (!sharedEntry.targets.some((entry) =>
+          entry.requirement_index === requirementIndex &&
+          entry.product_id === productId)) {
+          sharedEntry.targets.push(target);
+        }
+        continue;
+      }
       if (bucket.length >= DEFAULT_VISUAL_CANDIDATES_PER_GROUP) break;
-      bucket.push({
+      const entry = {
         requirement_index: requirementIndex,
         category,
         product_id: productId,
         title: safeText(product.title, 120),
         image_url: imageUrl,
-      });
+        targets: [target],
+      };
+      entriesByImage.set(imageIdentity, entry);
+      bucket.push(entry);
     }
-    categories.set(category, bucket);
+    requirementBuckets.push(bucket);
   });
-  const buckets = [...categories.values()];
   const batch = [];
   for (let offset = 0; batch.length < MAX_VISUAL_IMAGES_PER_REQUEST; offset += 1) {
     let added = false;
-    for (const bucket of buckets) {
+    for (const bucket of requirementBuckets) {
       if (bucket[offset]) {
         batch.push(bucket[offset]);
         added = true;
@@ -651,6 +1231,159 @@ function buildVisualBatch(groups) {
     if (!added) break;
   }
   return batch;
+}
+
+function canonicalImageIdentity(value) {
+  const text = String(value || "").trim();
+  if (!/^https:\/\/[^\s]+$/i.test(text)) return "";
+  try {
+    const url = new URL(text);
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch (_) {
+    return "";
+  }
+}
+
+function validateSingleVisualPayload(payload, entry) {
+  const values = payload?.image_assessments || payload?.products;
+  const item = Array.isArray(values) && values.length === 1 ? values[0] : null;
+  const validScores = item && [
+    item.visual_quality_score,
+    item.fashion_taste_score,
+    item.commercial_ad_penalty,
+    item.subject_coverage_score,
+  ].every((value) => score(value) != null);
+  if (!item || String(item.product_id || "") !== String(entry.product_id) ||
+      Number(item.requirement_index) !== Number(entry.requirement_index) ||
+      !validScores) {
+    const error = new Error("AI visual response does not match requested candidate");
+    error.code = "AI_VISUAL_INVALID_RESPONSE";
+    throw error;
+  }
+  return {
+    image_assessments: visualEntryTargets(entry).map((target) => ({
+      ...item,
+      requirement_index: target.requirement_index,
+      product_id: target.product_id,
+    })),
+  };
+}
+
+function visualEntryTargets(entry = {}) {
+  const targets = Array.isArray(entry.targets) && entry.targets.length > 0
+    ? entry.targets : [{
+      requirement_index: entry.requirement_index,
+      product_id: entry.product_id,
+    }];
+  return targets.filter((target) =>
+    Number.isInteger(Number(target?.requirement_index)) &&
+    String(target?.product_id || "").trim());
+}
+
+function applyVisualFailurePenalties(groups, failures) {
+  const failedByCandidate = new Map((Array.isArray(failures) ? failures : [])
+    .flatMap(({entry, reason}) => visualEntryTargets(entry).map((target) => [
+      `${target.requirement_index}:${target.product_id}`,
+      safeErrorCode(reason),
+    ])));
+  if (failedByCandidate.size === 0) return groups;
+  return groups.map((group, requirementIndex) => ({
+    ...group,
+    candidates: group.candidates.map((product) => {
+      const failureReason = failedByCandidate.get(
+        `${requirementIndex}:${product.product_id}`,
+      );
+      if (!failureReason) return product;
+      const defaults = visualAssessmentDefaults(product);
+      const visualQuality = Math.min(defaults.visual_quality_score, 35);
+      const fashionTaste = Math.min(defaults.fashion_taste_score, 40);
+      const adPenalty = Math.max(defaults.commercial_ad_penalty, 35);
+      const subjectCoverage = Math.min(defaults.subject_coverage_score, 45);
+      return {
+        ...product,
+        visual_evaluation_status: "FAILED_DEGRADED",
+        visual_evaluation_failure_reason: failureReason,
+        visual_quality_score: visualQuality,
+        image_quality_score: visualQuality,
+        fashion_taste_score: fashionTaste,
+        commercial_ad_penalty: adPenalty,
+        subject_coverage_score: subjectCoverage,
+        commerce_visual_score: commerceVisualScore({
+          visualQuality,
+          fashionTaste,
+          adPenalty,
+          subjectCoverage,
+        }),
+        visual_quality_reason: "图片评估失败，已降低视觉证据置信度",
+      };
+    }),
+  }));
+}
+
+function isVisualProductEvidenceFailure(error) {
+  const code = safeErrorCode(error);
+  return /IMAGE_(?:FETCH_FAILED|DECODE_FAILED|INVALID|UNSUPPORTED)|BAD_IMAGE|UNSUPPORTED_MEDIA/u
+    .test(code);
+}
+
+function applyVisualInfrastructureStatuses(groups, failures) {
+  const unavailable = new Map((Array.isArray(failures) ? failures : [])
+    .flatMap(({entry, reason}) => visualEntryTargets(entry).map((target) => [
+      `${target.requirement_index}:${target.product_id}`,
+      safeErrorCode(reason),
+    ])));
+  if (unavailable.size === 0) return groups;
+  return groups.map((group, requirementIndex) => ({
+    ...group,
+    candidates: group.candidates.map((product) => {
+      const reason = unavailable.get(`${requirementIndex}:${product.product_id}`);
+      return reason ? {
+        ...product,
+        visual_evaluation_status: "FAILED_UNASSESSED",
+        visual_evaluation_failure_reason: reason,
+      } : product;
+    }),
+  }));
+}
+
+function applyVisualDeadlineStatuses(groups, entries) {
+  const skipped = new Set((Array.isArray(entries) ? entries : [])
+    .flatMap((entry) => visualEntryTargets(entry).map((target) =>
+      `${target.requirement_index}:${target.product_id}`)));
+  if (skipped.size === 0) return groups;
+  return groups.map((group, requirementIndex) => ({
+    ...group,
+    candidates: group.candidates.map((product) => skipped.has(
+      `${requirementIndex}:${product.product_id}`,
+    ) ? {
+        ...product,
+        visual_evaluation_status: "SKIPPED_DEADLINE",
+        visual_evaluation_failure_reason: "AI_VISUAL_DEADLINE_SKIPPED",
+      } : product),
+  }));
+}
+
+function visualEntryTrace(entry = {}, {
+  status,
+  durationMs = null,
+  reasonCode = null,
+  timeoutOwner = null,
+} = {}) {
+  const imageIdentity = canonicalImageIdentity(entry.image_url);
+  return Object.freeze({
+    requirement_index: entry.requirement_index,
+    product_id: entry.product_id,
+    candidate_ref_count: visualEntryTargets(entry).length,
+    image_hash: imageIdentity
+      ? crypto.createHash("sha256").update(imageIdentity).digest("hex").slice(0, 16)
+      : null,
+    status,
+    duration_ms: durationMs,
+    reason_code: reasonCode,
+    timeout_owner: timeoutOwner,
+  });
 }
 
 function buildVisualQualityMessages(groups, context, batch = buildVisualBatch(groups)) {
@@ -1041,8 +1774,12 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
 
 function groupsBelowMinimum(groups, products) {
   const selectedIds = new Set(products.map(productGroupKey));
-  return groups.filter((group) => group.candidates.length >= 4 &&
-    group.candidates.filter((product) => selectedIds.has(productGroupKey(product))).length < 4);
+  return groups.filter((group) => {
+    const required = Math.min(4, group.candidates.length);
+    const selected = group.candidates.filter((product) =>
+      selectedIds.has(productGroupKey(product))).length;
+    return required > 0 && selected < required;
+  });
 }
 
 function replaceGroupProducts(products, replacements, groups) {
@@ -2290,7 +3027,7 @@ function classifyRerankerFailure(error) {
   let category = "OTHER";
   if (/timeout|timed out|aborted|etimedout|deadline/u.test(evidence)) {
     category = "TIMEOUT";
-  } else if (/json|parse|syntax|schema|validation|response.*invalid/u.test(evidence)) {
+  } else if (/json|parse|syntax|schema|validation|invalid.*response|response.*invalid/u.test(evidence)) {
     category = "SCHEMA_OR_RESPONSE_VALIDATION";
   } else if (/image|vision|fetch.*image|unsupported.*media/u.test(evidence)) {
     category = "IMAGE_OR_VISION";

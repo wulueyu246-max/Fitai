@@ -14,6 +14,7 @@ const {
 const {composeOutfitCandidates} = require("../outfit_aesthetic_strategy");
 const {
   AutoProductProvider,
+  ProductProviderError,
   runSharedCandidatePipeline,
 } = require("../product_provider");
 
@@ -358,6 +359,138 @@ test("shared pipeline records acceptance evidence from gate through Strategy", a
     item.underlying_product_key.length === 24), true);
 });
 
+function slotCandidates(lookId, category, count, {gender = "female"} = {}) {
+  const label = category === "top" ? "设计感上衣"
+    : category === "bottom" ? "年轻休闲直筒裤" : "现代轻量休闲鞋";
+  return Array.from({length: count}, (_, index) => product(
+    `${gender === "female" ? "女" : "男"}款${label}${index + 1}`,
+    {
+      look_id: lookId,
+      product_id: `${lookId}-${category}-${index + 1}`,
+      category,
+      gender,
+      relevance_score: 80 - index,
+    },
+  ));
+}
+
+test("Gate-pass underflow triggers bounded refill and new candidates cross the same Gate", async () => {
+  const lookId = "refill-look";
+  const requirements = ["top", "bottom", "shoes"].map((category) =>
+    requirement(category, {look_id: lookId, gender: "female", scene: "nightlife"}));
+  const refillCalls = [];
+  let rerankerGroupCounts = null;
+  const result = await runSharedCandidatePipeline({
+    requirements,
+    groups: requirements.map((item) => ({
+      requirement: item,
+      candidates: slotCandidates(
+        lookId,
+        item.category,
+        item.category === "top" ? 1 : 4,
+      ),
+    })),
+    context: context({
+      gender: "female",
+      scene: "nightlife",
+      desired: ["年轻", "有设计感"],
+    }),
+    provider: "taobao",
+    logger: {info() {}, warn() {}},
+    refillCandidates: async ({requirement: item, round}) => {
+      refillCalls.push({slot: item.category, round});
+      return {
+        queries: [{query: "女 上衣 设计感", page_no: 2}],
+        candidates: [
+          product("女童设计感短袖", {
+            look_id: lookId,
+            product_id: "refill-child-top",
+            category: "top",
+            gender: "female",
+          }),
+          ...slotCandidates(lookId, "top", 3).map((item, index) => ({
+            ...item,
+            product_id: `refill-adult-top-${index + 1}`,
+            image_url: `https://img.example.com/refill-adult-top-${index + 1}.jpg`,
+          })),
+        ],
+      };
+    },
+    reranker: {
+      async rerank({groups}) {
+        rerankerGroupCounts = Object.fromEntries(groups.map((group) => [
+          group.requirement.category,
+          group.candidates.length,
+        ]));
+        return groups.flatMap((group) => group.candidates.map((item) => ({
+          ...item,
+          final_score: 80,
+          ai_match_score: 80,
+          ai_rerank_fallback: false,
+        })));
+      },
+    },
+  });
+  assert.deepEqual(refillCalls, [{slot: "top", round: 1}]);
+  assert.equal(rerankerGroupCounts.top, 4);
+  assert.equal(result.trace.refill_trigger_count, 1);
+  assert.equal(result.trace.refill_rounds[0].accepted_count, 3);
+  assert.equal(result.trace.refill_rounds[0].after_count, 4);
+  assert.equal(result.trace.gate_reject.some((entry) =>
+    entry.candidate_id === "refill-child-top"), true);
+  assert.equal(result.products.some((item) =>
+    item.product_id === "refill-child-top"), false);
+});
+
+test("refill exhaustion reports INSUFFICIENT_QUALITY_CANDIDATES without reviving rejects", async () => {
+  const requirements = [];
+  const groups = [];
+  for (const lookId of ["complete-look", "insufficient-look"]) {
+    for (const category of ["top", "bottom", "shoes"]) {
+      const item = requirement(category, {
+        look_id: lookId,
+        gender: "female",
+        scene: "nightlife",
+      });
+      requirements.push(item);
+      groups.push({
+        requirement: item,
+        candidates: lookId === "insufficient-look" && category === "top"
+          ? [] : slotCandidates(lookId, category, 4),
+      });
+    }
+  }
+  await assert.rejects(() => runSharedCandidatePipeline({
+    requirements,
+    groups,
+    context: context({gender: "female", scene: "nightlife"}),
+    provider: "taobao",
+    logger: {info() {}, warn() {}},
+    refillCandidates: async ({requirement: item}) => ({
+      candidates: item.look_id === "insufficient-look" && item.category === "top"
+        ? [product("男童工作装上衣", {
+          look_id: item.look_id,
+          product_id: "rejected-refill-child",
+          category: "top",
+          gender: "male",
+        })] : [],
+    }),
+    reranker: {async rerank() { throw new Error("must not reach reranker"); }},
+  }), (error) => {
+    assert.equal(error.code, "INSUFFICIENT_QUALITY_CANDIDATES");
+    const trace = error.details.trace;
+    const outcome = trace.slot_outcomes.find((entry) =>
+      entry.look_id === "insufficient-look" && entry.slot === "top");
+    assert.equal(outcome.status, "INSUFFICIENT_QUALITY_CANDIDATES");
+    assert.equal(trace.refill_rounds.length, 2);
+    assert.equal(trace.gate_reject.some((entry) =>
+      entry.candidate_id === "rejected-refill-child"), true);
+    assert.equal(trace.gate_pass.some((entry) =>
+      entry.candidate_id === "rejected-refill-child"), false);
+    return true;
+  });
+});
+
 test("Auto provider forwards the child provider candidate trace", async () => {
   const childTrace = {request_id: "trace-id", strategy_selected: []};
   const auto = new AutoProductProvider({
@@ -370,4 +503,31 @@ test("Auto provider forwards the child provider candidate trace", async () => {
   });
   await auto.recommendForQueries([], {});
   assert.equal(auto.lastPipelineTrace, childTrace);
+});
+
+test("Auto provider never disguises insufficient quality as Mock success", async () => {
+  let mockCalls = 0;
+  const auto = new AutoProductProvider({
+    taobao: {
+      async recommendForQueries() {
+        throw new ProductProviderError("insufficient", {
+          code: "INSUFFICIENT_QUALITY_CANDIDATES",
+          status: 422,
+        });
+      },
+    },
+    mock: {
+      async recommendForQueries() {
+        mockCalls += 1;
+        return [];
+      },
+    },
+    allowMockFallback: true,
+    logger: {warn() {}},
+  });
+  await assert.rejects(
+    auto.recommendForQueries([], {}),
+    (error) => error.code === "INSUFFICIENT_QUALITY_CANDIDATES",
+  );
+  assert.equal(mockCalls, 0);
 });

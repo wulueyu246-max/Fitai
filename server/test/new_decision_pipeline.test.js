@@ -372,6 +372,58 @@ test("E: identical body facts preserve different clean_fit and street silhouette
     .every((item) => Number.isFinite(item.body_strategy_match_score)), true);
 });
 
+test("requested three Looks returns two quality-valid native Looks without forcing a third", async () => {
+  const decisionContext = context({
+    requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    rawUserInput: "今晚出去玩，帮我搭3套",
+  });
+  const compiled = compileLookConceptPortfolio(decisionContext);
+  const acceptedLookIds = new Set(compiled.looks.slice(0, 2)
+    .map((look) => look.look_id));
+  const baseProvider = provider(portfolioCatalog());
+  const partialProvider = {
+    async recommendForQueries(requirements, providerInput) {
+      const products = await baseProvider.recommendForQueries(
+        requirements,
+        providerInput,
+      );
+      return products.filter((item) => acceptedLookIds.has(item.look_id));
+    },
+    get lastPipelineTrace() {
+      return baseProvider.lastPipelineTrace;
+    },
+  };
+
+  const result = await executeNewDecisionPipeline({
+    decisionContext,
+    productProvider: partialProvider,
+    logger: silentLogger,
+  });
+
+  assert.equal(result.looks.length, 2);
+  assert.equal(result.decision_pipeline.fallback_used, false);
+  assert.equal(
+    result.decision_pipeline.portfolio_validation.fulfillment_status,
+    "PARTIAL",
+  );
+  assert.equal(
+    result.decision_pipeline.portfolio_validation.fulfillment_reason,
+    "INSUFFICIENT_QUALITY_CANDIDATES",
+  );
+  assert.equal(
+    result.decision_pipeline.portfolio_validation.requested_look_count,
+    3,
+  );
+  assert.equal(
+    result.decision_pipeline.portfolio_validation.quality_valid_look_count,
+    2,
+  );
+  assert.equal(
+    result.decision_pipeline.portfolio_validation.unfulfilled_look_ids.length,
+    1,
+  );
+});
+
 test("provider/contract failure is explicit and eligible for visible legacy fallback", async () => {
   const brokenProvider = {
     async recommendForQueries() {

@@ -178,9 +178,24 @@ function finalLookForContract(contract, products) {
 function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
   const errors = [];
   const warnings = [];
-  const candidateLooks = compiled.looks.map((look) =>
-    finalLookForContract(look, products));
+  const requestedLookCount = compiled.looks.length;
+  const candidateLooks = compiled.looks.map((contract) => ({
+    contract,
+    look: finalLookForContract(contract, products),
+  })).filter(({contract, look}) => contract.items.every((requirement) =>
+    look.items.some((item) =>
+      item.category === requirement.category && item.selected_candidate_id)))
+    .map(({look}) => look);
   const looks = candidateLooks;
+  const returnedLookIds = new Set(looks.map((look) => look.look_id));
+  const unfulfilledLookIds = compiled.looks
+    .map((look) => look.look_id)
+    .filter((lookId) => !returnedLookIds.has(lookId));
+  if (unfulfilledLookIds.length > 0) {
+    warnings.push(
+      `INSUFFICIENT_QUALITY_CANDIDATES:${unfulfilledLookIds.join(",")}`,
+    );
+  }
   const explicitStyle = String(
     decisionContext?.intent?.user_intent_brain?.explicit_style?.value || "",
   ).trim().toLowerCase();
@@ -276,6 +291,13 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
   return Object.freeze({
     version: FINAL_PORTFOLIO_VALIDATOR_VERSION,
     status: errors.length === 0 ? "PASS" : "FAIL",
+    fulfillment_status: errors.length === 0 && looks.length < requestedLookCount
+      ? "PARTIAL" : errors.length === 0 ? "COMPLETE" : "FAILED",
+    fulfillment_reason: errors.length === 0 && looks.length < requestedLookCount
+      ? "INSUFFICIENT_QUALITY_CANDIDATES" : null,
+    requested_look_count: requestedLookCount,
+    quality_valid_look_count: looks.length,
+    unfulfilled_look_ids: Object.freeze(unfulfilledLookIds),
     checks: Object.freeze({
       concept_uniqueness: new Set(conceptIds).size === looks.length,
       product_uniqueness:
@@ -447,6 +469,7 @@ async function executeNewDecisionPipeline({
         stage: "PRODUCT_PROVIDER_CONTRACT",
         cause: error,
         details: error?.details,
+        fallbackAllowed: error?.code !== "INSUFFICIENT_QUALITY_CANDIDATES",
       },
     );
   }

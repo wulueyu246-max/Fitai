@@ -738,6 +738,66 @@ test("builds a twenty-item quality-filtered pool and sends only four to AI", asy
   assert.ok(products.every((product) => product.source === "taobao"));
 });
 
+test("new decision pipeline preserves twenty candidates even with legacy visual verifier configured", async () => {
+  const capturedGroups = [];
+  let visualCalls = 0;
+  const provider = new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client: {
+      call: async (method) => response(method, Array.from(
+        {length: 30},
+        (_, index) => taobaoItem({
+          item_basic_info: {
+            item_id: `new-pipeline-top-${index}`,
+            title: `男士简洁时髦短袖T恤${index}`,
+            category_name: "男士T恤",
+            pict_url: `//img.example.com/new-pipeline-top-${index}.jpg`,
+          },
+          publish_info: {
+            click_url: `//s.click.taobao.com/new-pipeline-top-${index}`,
+          },
+        }),
+      )),
+    },
+    visualVerifier: {
+      maxCandidatesPerSlot: 10,
+      async verifyGroups({groups}) {
+        visualCalls += 1;
+        return {groups, summary: {}};
+      },
+    },
+    reranker: {
+      rerank: async ({groups}) => {
+        capturedGroups.push(...groups);
+        return groups.flatMap((group) => group.candidates.slice(0, 6));
+      },
+    },
+    outfitPostProcessor: ({products}) => ({
+      applied: true,
+      products,
+      looks: [],
+    }),
+    logger: {info() {}, warn() {}},
+  });
+
+  const products = await provider.recommendForQueries([{
+    look_id: "new-pipeline-look",
+    category: "top",
+    gender: "male",
+    item_name: "简洁时髦短袖T恤",
+    search_keywords: ["男 T恤 时髦"],
+  }], {
+    requestId: "new-pipeline-reserve",
+    decision_pipeline: "new_decision_pipeline.v1",
+  });
+
+  assert.equal(visualCalls, 0);
+  assert.equal(capturedGroups[0].candidates.length, 20);
+  assert.equal(products.length, 4);
+  assert.ok(products.every((product) => product.source === "taobao"));
+});
+
 test("AI rerank timeout returns rule-ranked real Taobao products", async () => {
   const logs = [];
   const provider = new TaobaoProductProvider({
