@@ -131,6 +131,9 @@ class ProductAestheticReranker {
       visualFallbackCount: 0,
       visualTotalDurationMs: 0,
       visualLastDurationMs: null,
+      lastFallbackReason: null,
+      lastFallbackCategory: null,
+      fallbackReasons: new Map(),
     };
   }
 
@@ -154,6 +157,9 @@ class ProductAestheticReranker {
         ? Math.round(this.metrics.visualTotalDurationMs / this.metrics.visualCallCount)
         : 0,
       visual_last_duration_ms: this.metrics.visualLastDurationMs,
+      last_fallback_reason: this.metrics.lastFallbackReason,
+      last_fallback_category: this.metrics.lastFallbackCategory,
+      fallback_reasons: Object.fromEntries(this.metrics.fallbackReasons),
       cache_entries: this.cache.size,
     };
   }
@@ -207,14 +213,20 @@ class ProductAestheticReranker {
       selectionLimit,
       context,
     );
-    const fallback = () => finalize(ruleFallback(
+    const fallback = (reasonCode) => finalize(ruleFallback(
       workingGroups,
       selectionLimit,
       context,
-    ));
+    ).map((product) => ({
+      ...product,
+      ai_rerank_fallback: true,
+      ai_rerank_fallback_reason: reasonCode || "AI_RERANK_FAILED",
+    })));
     if (!this.configured) {
       this.metrics.fallbackCount += 1;
-      const products = fallback();
+      const reasonCode = "AI_RERANK_NOT_CONFIGURED";
+      this.#recordFallback(reasonCode, "ENVIRONMENT_CONFIGURATION");
+      const products = fallback(reasonCode);
       this.#logResult({
         requestId,
         candidateCount,
@@ -224,6 +236,7 @@ class ProductAestheticReranker {
         cached: false,
         fallback: true,
         errorCode: "AI_RERANK_NOT_CONFIGURED",
+        errorCategory: "ENVIRONMENT_CONFIGURATION",
       });
       return products;
     }
@@ -273,6 +286,16 @@ class ProductAestheticReranker {
       }
       const durationMs = Date.now() - startedAt;
       if (usedFallback) this.metrics.fallbackCount += 1;
+      if (usedFallback) {
+        this.#recordFallback(
+          "AI_RERANK_INCOMPLETE_SELECTION",
+          "RESPONSE_VALIDATION",
+        );
+        selected = selected.map((product) => product.ai_rerank_fallback === true
+          ? {...product,
+            ai_rerank_fallback_reason: "AI_RERANK_INCOMPLETE_SELECTION"}
+          : product);
+      }
       this.#writeCache(cacheKey, selected);
       const diversified = finalize(selected);
       this.#logResult({
@@ -285,12 +308,16 @@ class ProductAestheticReranker {
         cached: false,
         fallback: usedFallback,
         errorCode: usedFallback ? "AI_RERANK_INCOMPLETE_SELECTION" : undefined,
+        errorCategory: usedFallback ? "RESPONSE_VALIDATION" : undefined,
       });
       return cloneProducts(diversified);
     } catch (error) {
       const durationMs = Date.now() - startedAt;
       this.metrics.fallbackCount += 1;
-      const products = fallback();
+      const diagnosis = classifyRerankerFailure(error);
+      const reasonCode = diagnosis.reasonCode;
+      this.#recordFallback(reasonCode, diagnosis.category);
+      const products = fallback(reasonCode);
       this.#logResult({
         requestId,
         prefilterCount,
@@ -300,10 +327,21 @@ class ProductAestheticReranker {
         durationMs,
         cached: false,
         fallback: true,
-        errorCode: safeErrorCode(error),
+        errorCode: reasonCode,
+        errorCategory: diagnosis.category,
       });
       return products;
     }
+  }
+
+  #recordFallback(reasonCode, category = "OTHER") {
+    const code = String(reasonCode || "AI_RERANK_FAILED");
+    this.metrics.lastFallbackReason = code;
+    this.metrics.lastFallbackCategory = String(category || "OTHER");
+    this.metrics.fallbackReasons.set(
+      code,
+      (this.metrics.fallbackReasons.get(code) || 0) + 1,
+    );
   }
 
   async #select(groups, context, timeoutMs = this.timeoutMs) {
@@ -440,6 +478,7 @@ class ProductAestheticReranker {
       ruleFallback: details.fallback,
       brand_fallback: details.brandFallback === true,
       errorCode: details.errorCode || undefined,
+      errorCategory: details.errorCategory || undefined,
     };
     if (details.fallback) this.logger.warn?.(message, safeDetails);
     else this.logger.info?.(message, safeDetails);
@@ -1553,8 +1592,12 @@ function calibratedProductScore({
     (100 - boundedScore(diversityScore)) * 0.0125,
   );
   const duplicatePenalty = exactDuplicate ? 5 : 0;
+  const productAcceptancePenalty = boundedScore(
+    product?.product_acceptance_penalty ?? 0,
+  );
   const finalScore = roundScore(boundedScore(
-    coreScore + brandAdjustment - diversityPenalty - duplicatePenalty,
+    coreScore + brandAdjustment - diversityPenalty - duplicatePenalty -
+      productAcceptancePenalty,
   ));
   const reasons = [
     assessment?.style_classification || "NO_STYLE_ASSESSMENT",
@@ -1563,6 +1606,9 @@ function calibratedProductScore({
   if (brandAdjustment !== 0) reasons.push("BRAND_TIE_BREAKER");
   if (diversityPenalty > 0) reasons.push("DIVERSITY_TIE_BREAKER");
   if (duplicatePenalty > 0) reasons.push("REPEATED_CANDIDATE_PENALTY");
+  if (productAcceptancePenalty > 0) {
+    reasons.push("REAL_PRODUCT_ACCEPTANCE_PENALTY");
+  }
   const trace = Object.freeze({
     version: RERANKER_CALIBRATION_VERSION,
     candidate_id: String(product.product_id || product.id || ""),
@@ -1586,6 +1632,7 @@ function calibratedProductScore({
       brand_adjustment: brandAdjustment,
       diversity_penalty: diversityPenalty,
       duplicate_penalty: duplicatePenalty,
+      product_acceptance_penalty: productAcceptancePenalty,
     }),
     final_score: finalScore,
     ranking_reason: reasons.join(" | "),
@@ -2235,6 +2282,28 @@ function safeErrorCode(error) {
   return /^[A-Z0-9_.-]{3,80}$/i.test(code) ? code : "AI_RERANK_FAILED";
 }
 
+function classifyRerankerFailure(error) {
+  const reasonCode = safeErrorCode(error);
+  const evidence = `${reasonCode} ${String(error?.name || "")} ${String(
+    error?.message || "",
+  )}`.toLowerCase();
+  let category = "OTHER";
+  if (/timeout|timed out|aborted|etimedout|deadline/u.test(evidence)) {
+    category = "TIMEOUT";
+  } else if (/json|parse|syntax|schema|validation|response.*invalid/u.test(evidence)) {
+    category = "SCHEMA_OR_RESPONSE_VALIDATION";
+  } else if (/image|vision|fetch.*image|unsupported.*media/u.test(evidence)) {
+    category = "IMAGE_OR_VISION";
+  } else if (/model|not.?found|unsupported.?model/u.test(evidence)) {
+    category = "MODEL";
+  } else if (/api.?key|auth|permission|unauthorized|forbidden|401|403/u.test(evidence)) {
+    category = "API_AUTH_OR_PERMISSION";
+  } else if (/connect|network|econn|dns|socket|fetch/u.test(evidence)) {
+    category = "NETWORK";
+  }
+  return Object.freeze({reasonCode, category});
+}
+
 function positiveInteger(value, fallback) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : fallback;
@@ -2256,6 +2325,7 @@ module.exports = {
   buildVisualBatch,
   buildVisualQualityMessages,
   calibratedProductScore,
+  classifyRerankerFailure,
   candidateAestheticTargetAssessment,
   catalogAestheticAssessment,
   compositeProductScore,

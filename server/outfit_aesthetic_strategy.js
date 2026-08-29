@@ -6,6 +6,7 @@ const {
 const {
   resolveAestheticTargetProfile,
 } = require("./style_intelligence");
+const {canonicalProductIdentity} = require("./product_acceptance_gate");
 
 const STRATEGY_VERSION = "outfit_aesthetic_target_alignment_v1";
 const DEFAULT_TOP_PER_REQUIREMENT = 6;
@@ -73,7 +74,7 @@ function composeOutfitCandidates({
 
   const selectedLooks = [];
   const selectedProducts = [];
-  const usedProductIds = new Set();
+  const usedProductKeys = new Set();
   for (const look of composableLooks) {
     const pools = look.requirements.map((requirement, requirementIndex) => ({
       requirement,
@@ -113,13 +114,16 @@ function composeOutfitCandidates({
     if (combinations.length === 0) continue;
 
     const ranked = combinations.map((combination) => {
-      const repeatedIds = combination.entries
-        .map(({product}) => productId(product))
-        .filter((id) => id && usedProductIds.has(id));
-      const duplicatePenalty = repeatedIds.length * 45;
+      const repeatedEntries = combination.entries.filter(({product}) =>
+        usedProductKeys.has(productIdentity(product)));
+      const repeatedIds = repeatedEntries.map(({product}) => productId(product));
+      const repeatedProductKeys = repeatedEntries.map(({product}) =>
+        productIdentity(product));
+      const duplicatePenalty = repeatedEntries.length * 45;
       return {
         ...combination,
         repeatedIds,
+        repeatedProductKeys,
         duplicatePenalty,
         adjustedScore: Math.max(0, roundScore(
           combination.finalScore - duplicatePenalty,
@@ -146,11 +150,15 @@ function composeOutfitCandidates({
       base_score: chosen.finalScore,
       duplicate_penalty: chosen.duplicatePenalty,
       repeated_candidate_ids: Object.freeze([...chosen.repeatedIds]),
+      repeated_product_identities: Object.freeze([
+        ...chosen.repeatedProductKeys,
+      ]),
       scores: chosen.scores,
       target_profile_match: chosen.targetProfileMatch,
       internal_coherence: chosen.internalCoherence,
       cross_style_conflict_penalty: chosen.crossStyleConflictPenalty,
       target_miss_penalty: chosen.targetMissPenalty,
+      product_acceptance_penalty: chosen.productAcceptancePenalty,
       ranking_reason: chosen.rankingReason,
       strategy_trace: chosen.strategyTrace,
       combination_traces: combinationTraces,
@@ -181,8 +189,8 @@ function composeOutfitCandidates({
       aesthetic_target_profile: aestheticTargetProfile,
     });
     for (const {product, requirement} of chosen.entries) {
-      const id = productId(product);
-      if (id) usedProductIds.add(id);
+      const identity = productIdentity(product);
+      if (identity) usedProductKeys.add(identity);
       selectedProducts.push({
         ...product,
         look_id: look.lookId,
@@ -212,6 +220,7 @@ function composeOutfitCandidates({
         outfit_internal_coherence_score: chosen.internalCoherence,
         outfit_cross_style_conflict_penalty: chosen.crossStyleConflictPenalty,
         outfit_target_miss_penalty: chosen.targetMissPenalty,
+        outfit_product_acceptance_penalty: chosen.productAcceptancePenalty,
         outfit_strategy_ranking_reason: chosen.rankingReason,
         outfit_strategy_trace: chosen.strategyTrace,
       });
@@ -362,8 +371,9 @@ function buildCombinations(pools, context, beamWidth, metrics = {}) {
     const expanded = [];
     for (const combination of combinations) {
       for (const product of pool.candidates) {
-        const id = productId(product);
-        if (id && combination.some((entry) => productId(entry.product) === id)) continue;
+        const identity = productIdentity(product);
+        if (identity && combination.some((entry) =>
+          productIdentity(entry.product) === identity)) continue;
         expanded.push([...combination, {product, requirement: pool.requirement}]);
       }
     }
@@ -487,14 +497,16 @@ function scoreOutfitCombination(entries, context = {}) {
     slotOccasionFitSummary,
     formality: scores.formality,
   });
+  const productAcceptancePenalty = scoreProductAcceptancePenalty(entries);
   const rawOutfitScore = targetProfileMatch * TARGET_ALIGNMENT_WEIGHT +
     internalCoherence * INTERNAL_COHERENCE_WEIGHT;
   const finalScore = bounded(rawOutfitScore - crossStyleConflictPenalty -
-    targetMissPenalty);
+    targetMissPenalty - productAcceptancePenalty);
   scores.internalCoherence = internalCoherence;
   scores.targetProfileMatch = targetProfileMatch;
   scores.crossStyleConflictPenalty = crossStyleConflictPenalty;
   scores.targetMissPenalty = targetMissPenalty;
+  scores.productAcceptancePenalty = productAcceptancePenalty;
   const dimensionScores = Object.freeze({
     style_coherence: scores.styleCoherence,
     occasion_fit: scores.occasionFormalityFit,
@@ -518,12 +530,14 @@ function scoreOutfitCombination(entries, context = {}) {
     target_profile_match: targetProfileMatch,
     cross_style_conflict_penalty: crossStyleConflictPenalty,
     target_miss_penalty: targetMissPenalty,
+    product_acceptance_penalty: productAcceptancePenalty,
   });
   const rankingReason = buildRankingReason({
     internalCoherence,
     targetProfileMatch,
     crossStyleConflictPenalty,
     targetMissPenalty,
+    productAcceptancePenalty,
   });
   const strategyTrace = Object.freeze({
     candidate_ids: Object.freeze(entries.map(({product}) => productId(product))),
@@ -556,6 +570,7 @@ function scoreOutfitCombination(entries, context = {}) {
     slotGenderFitSummary,
     crossStyleConflictPenalty,
     targetMissPenalty,
+    productAcceptancePenalty,
     rawOutfitScore: roundScore(rawOutfitScore),
     finalOutfitScore: finalScore,
     ranking_reason: rankingReason,
@@ -569,9 +584,22 @@ function scoreOutfitCombination(entries, context = {}) {
     targetProfileMatch,
     crossStyleConflictPenalty,
     targetMissPenalty,
+    productAcceptancePenalty,
     rankingReason,
     strategyTrace,
   };
+}
+
+function scoreProductAcceptancePenalty(entries) {
+  const penalties = entries.map(({product}) => finiteNumber(
+    product?.product_acceptance_penalty,
+  ) ?? 0);
+  if (penalties.length === 0) return 0;
+  const maximum = Math.max(...penalties);
+  const mean = average(penalties, 0);
+  // A single human-obvious mismatch must not be hidden by color/coherence
+  // scores from the other slots.
+  return bounded(Math.min(45, maximum + mean * 0.35));
 }
 
 function scoreInternalCoherence(scores) {
@@ -773,6 +801,7 @@ function buildRankingReason({
   targetProfileMatch,
   crossStyleConflictPenalty,
   targetMissPenalty,
+  productAcceptancePenalty = 0,
 }) {
   const reasons = [];
   if (targetProfileMatch >= 88) reasons.push("STRONG_TARGET_ALIGNMENT");
@@ -782,6 +811,9 @@ function buildRankingReason({
   else if (internalCoherence >= 68) reasons.push("INTERNAL_COHERENCE_ACCEPTABLE");
   else reasons.push("INTERNAL_COHERENCE_WEAK");
   if (crossStyleConflictPenalty >= 6) reasons.push("CROSS_STYLE_CONFLICT");
+  if (productAcceptancePenalty > 0) {
+    reasons.push("REAL_PRODUCT_ACCEPTANCE_PENALTY");
+  }
   if (targetMissPenalty > 0) reasons.push("CORE_TARGET_FLOOR_PENALTY");
   return Object.freeze(reasons);
 }
@@ -1353,6 +1385,12 @@ function compareCombinationIdentity(left, right) {
 
 function productId(product) {
   return String(product?.product_id || product?.id || "").trim();
+}
+
+function productIdentity(product) {
+  return String(
+    product?.canonical_product_identity || canonicalProductIdentity(product),
+  ).trim();
 }
 
 function canonicalOutfitSlot(value = {}) {

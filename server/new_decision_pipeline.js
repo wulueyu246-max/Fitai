@@ -5,6 +5,7 @@ const {
   compileLookConceptPortfolio,
 } = require("./look_concept_compiler");
 const {ProductProviderError} = require("./product_provider");
+const {canonicalProductIdentity} = require("./product_acceptance_gate");
 
 const NEW_DECISION_PIPELINE_VERSION = "new_decision_pipeline.v1";
 const FINAL_PORTFOLIO_VALIDATOR_VERSION = "final_portfolio_validator.v1";
@@ -39,6 +40,12 @@ function productId(product = {}) {
   ).trim();
 }
 
+function productIdentity(product = {}) {
+  return String(
+    product.canonical_product_identity || canonicalProductIdentity(product),
+  ).trim();
+}
+
 const PUBLIC_PRODUCT_FIELDS = Object.freeze([
   "id", "product_id", "candidate_id", "title", "name", "brand",
   "brand_name", "shop_name", "category", "original_category",
@@ -57,6 +64,10 @@ const PUBLIC_PRODUCT_FIELDS = Object.freeze([
   "market_soft_match_score", "market_adjustment", "final_score",
   "outfit_strategy_score", "outfit_strategy_breakdown",
   "outfit_target_profile_match_score", "search_keyword",
+  "canonical_product_identity", "product_acceptance_result",
+  "product_acceptance_penalty", "product_acceptance_evidence",
+  "product_acceptance_trace", "ai_rerank_fallback_reason",
+  "outfit_product_acceptance_penalty",
 ]);
 
 function publicUrl(value) {
@@ -169,17 +180,7 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
   const warnings = [];
   const candidateLooks = compiled.looks.map((look) =>
     finalLookForContract(look, products));
-  const uniqueProductIds = new Set();
-  const looks = [];
-  for (const look of candidateLooks) {
-    const ids = look.selected_candidate_ids.filter(Boolean);
-    if (ids.some((id) => uniqueProductIds.has(id))) {
-      warnings.push(`PORTFOLIO_LOOK_DROPPED_FOR_PRODUCT_UNIQUENESS:${look.look_id}`);
-      continue;
-    }
-    looks.push(look);
-    ids.forEach((id) => uniqueProductIds.add(id));
-  }
+  const looks = candidateLooks;
   const explicitStyle = String(
     decisionContext?.intent?.user_intent_brain?.explicit_style?.value || "",
   ).trim().toLowerCase();
@@ -190,6 +191,7 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
   const itemBudget = budgetCeiling(decisionContext?.user_truth?.budget?.item);
   const outfitBudget = budgetCeiling(decisionContext?.user_truth?.budget?.outfit);
   const allIds = [];
+  const allProductIdentities = [];
 
   if (looks.length < 2 || looks.length > 4) errors.push("LOOK_COUNT_OUT_OF_RANGE");
   for (const look of looks) {
@@ -207,6 +209,11 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
       errors.push(`INTRA_LOOK_PRODUCT_DUPLICATE:${look.look_id}`);
     }
     allIds.push(...ids);
+    const identities = look.selected_products.map(productIdentity).filter(Boolean);
+    if (new Set(identities).size !== identities.length) {
+      errors.push(`INTRA_LOOK_UNDERLYING_PRODUCT_DUPLICATE:${look.look_id}`);
+    }
+    allProductIdentities.push(...identities);
     const contract = compiled.looks.find((item) => item.look_id === look.look_id);
     if (explicitStyle && String(contract?.style || "").toLowerCase() !== explicitStyle) {
       errors.push(`STYLE_LOCK_DRIFT:${look.look_id}`);
@@ -216,6 +223,11 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
       errors.push(`STYLE_LOCK_SIGNAL_MISSING:${look.look_id}`);
     }
     for (const product of look.selected_products) {
+      if (product.product_acceptance_result === "HARD_REJECT") {
+        errors.push(
+          `PRODUCT_ACCEPTANCE_REJECTED:${look.look_id}:${productId(product)}`,
+        );
+      }
       if (explicitAvoid.some((avoid) => violatesAvoid(product, avoid))) {
         errors.push(`USER_AVOID_CONFLICT:${look.look_id}:${productId(product)}`);
       }
@@ -248,6 +260,13 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
   if (duplicates.length > 0) {
     errors.push(`CROSS_LOOK_PRODUCT_DUPLICATE:${unique(duplicates).join(",")}`);
   }
+  const underlyingDuplicates = allProductIdentities.filter((identity, index) =>
+    allProductIdentities.indexOf(identity) !== index);
+  if (underlyingDuplicates.length > 0) {
+    errors.push(
+      `CROSS_LOOK_UNDERLYING_PRODUCT_DUPLICATE:${unique(underlyingDuplicates).join(",")}`,
+    );
+  }
   const conceptIds = looks.map((look) => look.concept_id);
   if (new Set(conceptIds).size !== looks.length ||
       decisionContext?.concept_diversity?.status !== "PASS") {
@@ -259,7 +278,8 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
     status: errors.length === 0 ? "PASS" : "FAIL",
     checks: Object.freeze({
       concept_uniqueness: new Set(conceptIds).size === looks.length,
-      product_uniqueness: duplicates.length === 0,
+      product_uniqueness:
+        duplicates.length === 0 && underlyingDuplicates.length === 0,
       style_lock: !errors.some((error) => error.startsWith("STYLE_LOCK_DRIFT")),
       avoid_compliance: !errors.some((error) => error.startsWith("USER_AVOID")),
       scene_fit: !errors.some((error) => error.startsWith("SCENE_FIT")),

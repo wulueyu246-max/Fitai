@@ -64,6 +64,10 @@ const {
   buildRawTaobaoProduct,
   enrichTaobaoCandidate,
 } = require("./taobao_candidate_enrichment");
+const {
+  canonicalProductIdentity,
+  evaluateProductAcceptance,
+} = require("./product_acceptance_gate");
 
 const PRODUCT_CATEGORIES = SUPPORTED_PRODUCT_CATEGORIES;
 const DEFAULT_SAMPLE_MATERIAL_ID = "28029";
@@ -249,6 +253,7 @@ async function runSharedCandidatePipeline({
     reranker_executed: false,
     strategy_executed: false,
     reranker_status: "NOT_RUN",
+    reranker_fallback_reasons: [],
     query_plans: safeRequirements.map((requirement) => Object.freeze({
       look_id: requirement.look_id,
       concept_id: requirement.concept_id,
@@ -282,7 +287,7 @@ async function runSharedCandidatePipeline({
       const gate = sharedCandidateGate(product, group.requirement, context);
       if (!gate.allowed) {
         trace.gate_reject.push(candidateTraceRecord(
-          product,
+          gate.product || product,
           group.requirement,
           "GATE_REJECT",
           gate.reason,
@@ -292,6 +297,7 @@ async function runSharedCandidatePipeline({
       const candidate = preserveCandidateContract({
         ...gate.product,
         candidate_gate_result: "PASS",
+        candidate_gate_state: "PASS",
         candidate_gate_reason: "PASS",
       }, group.requirement);
       candidates.push(candidate);
@@ -335,8 +341,14 @@ async function runSharedCandidatePipeline({
     }), timeoutMs, "AI_RERANK_TIMEOUT");
     trace.reranker_status = reranked.some((product) =>
       product?.ai_rerank_fallback === true) ? "FALLBACK" : "SUCCESS";
+    trace.reranker_fallback_reasons = [...new Set(
+      reranked.map((product) => product?.ai_rerank_fallback_reason)
+        .filter(Boolean),
+    )];
   } catch (error) {
     trace.reranker_status = "FAILED_FALLBACK";
+    trace.reranker_fallback_reason = safeProviderCode(error);
+    trace.reranker_fallback_reasons = [trace.reranker_fallback_reason];
     logger.warn?.("candidate_pipeline_reranker_failed", {
       request_id: trace.request_id || undefined,
       provider,
@@ -344,6 +356,7 @@ async function runSharedCandidatePipeline({
     });
     reranked = gateGroups.flatMap((group) => markRerankFallback(
       group.candidates.slice(0, DEFAULT_STRATEGY_CANDIDATE_BREADTH),
+      trace.reranker_fallback_reason,
     ));
   }
   const sourceCandidates = new Map(gateCandidatesFlat.map((product) => [
@@ -418,50 +431,96 @@ function sharedCandidateGate(product, requirement, context) {
     ...requirement,
     category: outfitRequirementSlot(requirement),
   };
-  const hardGate = candidateHardGate(product, gateRequirement, context);
-  if (!hardGate.allowed) return hardGate;
-  const qualityBlock = productQualityBlock(product, requirement);
+  const acceptance = evaluateProductAcceptance(product, requirement, context);
+  const hardGate = candidateHardGate(
+    acceptance.product,
+    gateRequirement,
+    context,
+  );
+  if (!hardGate.allowed) return {...hardGate, product: acceptance.product};
+  if (!acceptance.allowed) {
+    return {
+      allowed: false,
+      reason: `PRODUCT_ACCEPTANCE_${acceptance.reason}`,
+      product: acceptance.product,
+    };
+  }
+  const acceptedProduct = acceptance.product;
+  const qualityBlock = productQualityBlock(acceptedProduct, requirement);
   if (qualityBlock) {
-    return {allowed: false, reason: `QUALITY_${qualityBlock.blocked_category}`};
+    return {
+      allowed: false,
+      reason: `QUALITY_${qualityBlock.blocked_category}`,
+      product: acceptedProduct,
+    };
   }
   const purchaseSpecification = compilePurchaseSpecification(requirement, context);
-  const productSlot = outfitRequirementSlot(product);
+  const productSlot = outfitRequirementSlot(acceptedProduct);
   const purchaseGateProduct = productSlot !== requirement.category
-    ? {...product, category: requirement.category}
-    : product;
+    ? {...acceptedProduct, category: requirement.category}
+    : acceptedProduct;
   // The legacy Purchase Specification taxonomy represents hosiery as an
   // accessory. The shared slot gate above already validates the true `socks`
   // slot, so do not turn that taxonomy bridge into a false category conflict.
   if (productSlot !== "socks" &&
-      gateCandidates([purchaseGateProduct], purchaseSpecification).length === 0) {
-    return {allowed: false, reason: "PURCHASE_SPECIFICATION_CONFLICT"};
+    gateCandidates([purchaseGateProduct], purchaseSpecification).length === 0) {
+    return {
+      allowed: false,
+      reason: "PURCHASE_SPECIFICATION_CONFLICT",
+      product: acceptedProduct,
+    };
   }
   const outfitBlueprint = context.outfit_blueprint || context.outfitBlueprint ||
     context.recommendation_context?.outfit_blueprint || {};
   const styleProfile = context.style_profile || context.styleProfile ||
     context.recommendation_context?.style_profile || {};
   const intentPriorityScore = resolveIntentPriorityScore(styleProfile);
-  const blueprint = blueprintMatchAssessment(product, requirement, outfitBlueprint);
+  const blueprint = blueprintMatchAssessment(
+    acceptedProduct,
+    requirement,
+    outfitBlueprint,
+  );
   if (!blueprintMatchPassesHardGate(blueprint, intentPriorityScore)) {
-    return {allowed: false, reason: "BLUEPRINT_HARD_GATE_CONFLICT"};
+    return {
+      allowed: false,
+      reason: "BLUEPRINT_HARD_GATE_CONFLICT",
+      product: acceptedProduct,
+    };
   }
   const body = bodyStrategyMatchAssessment(
-    product,
+    acceptedProduct,
     requirement,
     outfitBlueprint,
     context,
   );
   if (!context.body_fit_soft_only && body.configured && body.score < 40) {
-    return {allowed: false, reason: "BODY_STRATEGY_CONFLICT"};
+    return {
+      allowed: false,
+      reason: "BODY_STRATEGY_CONFLICT",
+      product: acceptedProduct,
+    };
   }
-  const marketSoftMatchScore = marketSoftSignalAssessment(product, requirement);
-  const styleGate = evaluateStyleGate(product, styleProfile, intentPriorityScore);
-  if (!styleGate.allowed) return {allowed: false, reason: "STYLE_GATE_CONFLICT"};
+  const marketSoftMatchScore = marketSoftSignalAssessment(
+    acceptedProduct,
+    requirement,
+  );
+  const styleGate = evaluateStyleGate(
+    acceptedProduct,
+    styleProfile,
+    intentPriorityScore,
+  );
+  if (!styleGate.allowed) {
+    return {
+      allowed: false,
+      reason: "STYLE_GATE_CONFLICT",
+      product: acceptedProduct,
+    };
+  }
   return {
     allowed: true,
     reason: "PASS",
     product: {
-      ...product,
+      ...acceptedProduct,
       blueprint_match_score: blueprint.score,
       body_strategy_match_score: body.score,
       body_strategy_configured: body.configured,
@@ -566,6 +625,11 @@ function candidateTraceRecord(product, requirement = {}, stage, reason = "") {
     candidate_id: String(
       product?.candidate_id || product?.product_id || product?.id || "",
     ),
+    underlying_product_key:
+      product?.canonical_product_identity || canonicalProductIdentity(product),
+    title: String(product?.title || product?.name || "").slice(0, 240),
+    price: Number.isFinite(Number(product?.price)) ? Number(product.price) : null,
+    brand: String(product?.brand || product?.brand_name || "").slice(0, 120),
     original_gender: authoritativeProductGender(product),
     requested_gender: normalizeGender(
       requirement?.gender || product?.requested_gender || "unisex",
@@ -579,6 +643,26 @@ function candidateTraceRecord(product, requirement = {}, stage, reason = "") {
     source: String(product?.source || "unknown"),
     search_keyword: String(product?.search_keyword || ""),
     commerce_queries: Object.freeze(requirementSearchKeywords(requirement)),
+    relevance_score: Number.isFinite(Number(product?.relevance_score))
+      ? Number(product.relevance_score) : null,
+    relevance_negative_conflict: product?.relevance_negative_conflict === true,
+    product_acceptance_result: product?.product_acceptance_result || null,
+    product_acceptance_penalty: Number.isFinite(
+      Number(product?.product_acceptance_penalty),
+    ) ? Number(product.product_acceptance_penalty) : null,
+    product_acceptance_evidence: product?.product_acceptance_evidence || null,
+    ai_rerank_fallback: product?.ai_rerank_fallback === true,
+    ai_rerank_fallback_reason: product?.ai_rerank_fallback_reason || null,
+    reranker_score: Number.isFinite(Number(
+      product?.final_score ?? product?.ai_match_score,
+    )) ? Number(product?.final_score ?? product?.ai_match_score) : null,
+    reranker_score_trace: product?.reranker_score_trace || null,
+    outfit_strategy_score: Number.isFinite(Number(
+      product?.outfit_strategy_score,
+    )) ? Number(product.outfit_strategy_score) : null,
+    outfit_strategy_breakdown: product?.outfit_strategy_breakdown || null,
+    raw_product_ref: product?.raw_product_ref || null,
+    candidate_enrichment: product?.candidate_enrichment || null,
   });
 }
 
@@ -609,6 +693,9 @@ function freezeCandidatePipelineTrace(trace) {
     reranker_keep: Object.freeze([...trace.reranker_keep]),
     strategy_selected: Object.freeze([...trace.strategy_selected]),
     query_plans: Object.freeze([...(trace.query_plans || [])]),
+    reranker_fallback_reasons: Object.freeze([
+      ...(trace.reranker_fallback_reasons || []),
+    ]),
   });
 }
 
@@ -656,6 +743,8 @@ function annotateOutfitStrategySelection(product) {
         product?.outfit_brand_quality_value_score ?? null,
       legwear_compatibility: product?.outfit_legwear_compatibility_score ?? null,
       market_alignment: product?.outfit_market_alignment_score ?? null,
+      product_acceptance_penalty:
+        product?.outfit_product_acceptance_penalty ?? null,
     }),
   };
 }
@@ -1919,6 +2008,7 @@ class AutoProductProvider extends ProductProvider {
     this.configured = true;
     this.status = "checking";
     this.health = null;
+    this.lastPipelineTrace = null;
   }
 
   async recommend(filters = {}) {
@@ -1945,6 +2035,7 @@ class AutoProductProvider extends ProductProvider {
   async recommendForQueries(queries, context = {}) {
     try {
       const products = await this.taobao.recommendForQueries(queries, context);
+      this.lastPipelineTrace = this.taobao.lastPipelineTrace || null;
       this.health = true;
       this.status = "taobao";
       return products;
@@ -1961,7 +2052,9 @@ class AutoProductProvider extends ProductProvider {
         ...query,
         keyword: query?.search_keywords?.[0] || query?.item_name || query?.keyword,
       }));
-      return this.mock.recommendForQueries(fallbackQueries, context);
+      const products = await this.mock.recommendForQueries(fallbackQueries, context);
+      this.lastPipelineTrace = this.mock.lastPipelineTrace || null;
+      return products;
     }
   }
 
@@ -2599,10 +2692,11 @@ function requirementSearchKeywords(requirement = {}) {
   ].map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 1);
 }
 
-function markRerankFallback(products) {
+function markRerankFallback(products, reason = "AI_RERANK_FALLBACK") {
   return cloneProductArray(products).map((product) => ({
     ...product,
     ai_rerank_fallback: true,
+    ai_rerank_fallback_reason: String(reason || "AI_RERANK_FALLBACK"),
     rerank_status: "fallback",
   }));
 }
