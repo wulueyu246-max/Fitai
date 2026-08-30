@@ -1053,10 +1053,20 @@ function compactSlotCandidate(product = {}) {
     fit: product.fit,
     footwear: product.footwear,
     material: product.material,
-    candidate_enrichment: product.candidate_enrichment,
+    enrichment_evidence: compactEvidenceMap(
+      product.candidate_enrichment,
+      ["category", "subcategory", "gender", "style", "occasion", "color",
+        "silhouette", "fit", "footwear", "material", "body_fit",
+        "visual_quality", "quality"],
+    ),
     acceptance_result: product.product_acceptance_result,
     acceptance_penalty: product.product_acceptance_penalty,
-    acceptance_evidence: product.product_acceptance_evidence,
+    acceptance_evidence: compactEvidenceMap(
+      product.product_acceptance_evidence,
+      ["audience_fit", "contemporary_fit", "occasion_fit",
+        "desired_impression_fit", "visual_quality", "commerce_quality",
+        "product_identity_confidence"],
+    ),
     visual_evidence: pickFields(product, [
       "visible_category", "audience_expression", "style_expression",
       "visual_age_expression", "design_detail_level", "visual_quality_score",
@@ -1064,6 +1074,48 @@ function compactSlotCandidate(product = {}) {
       "image_url",
     ]),
   });
+}
+
+function compactEvidenceMap(source, keys) {
+  const value = source && typeof source === "object" ? source : {};
+  return compactObject(Object.fromEntries(keys.map((key) => [
+    key,
+    compactEvidenceRecord(value[key]),
+  ])));
+}
+
+function compactEvidenceRecord(record) {
+  if (record == null) return null;
+  if (typeof record !== "object") return truncatePromptValue(record);
+  return compactObject({
+    value: truncatePromptValue(record.value),
+    source: truncatePromptValue(record.source),
+    confidence: Number.isFinite(Number(record.confidence))
+      ? Number(record.confidence) : undefined,
+    evidence: truncatePromptValue(record.evidence),
+  });
+}
+
+function truncatePromptValue(value) {
+  if (Array.isArray(value)) {
+    return value.slice(0, 3).map((item) => truncatePromptValue(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).slice(0, 5).map(
+      ([key, item]) => [key, truncatePromptValue(item)],
+    ));
+  }
+  if (typeof value === "string") return value.slice(0, 180);
+  return value;
+}
+
+function compactSlotRequirement(requirement = {}) {
+  return pickFields(requirement, [
+    "look_id", "concept_id", "slot_key", "category", "subcategory",
+    "item_name", "gender", "scene", "style", "style_direction",
+    "silhouette", "fit", "footwear", "must_have", "must_avoid", "prefer",
+    "avoid_items", "avoid_attributes", "item_budget", "outfit_budget",
+  ]);
 }
 
 function buildSlotMessages(batch, context) {
@@ -1077,14 +1129,12 @@ function buildSlotMessages(batch, context) {
   const payload = {
     slot: slotForRequirement(requirement),
     intent: compactSlotIntent(context, requirement),
-    requirement: compactRequirementForPrompt(requirement),
     selection: {minimum, maximum},
-    candidates,
     product_groups: [{
       requirement_index: 0,
       required_minimum: minimum,
       maximum,
-      requirement: compactRequirementForPrompt(requirement),
+      requirement: compactSlotRequirement(requirement),
       candidates,
     }],
   };

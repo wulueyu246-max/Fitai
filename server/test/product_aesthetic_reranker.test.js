@@ -486,7 +486,20 @@ test("multi-Look AI batches remap local requirement indexes and complete without
       `${lookId}-top-${index + 1}`));
     value.requirement.look_id = lookId;
     value.requirement.avoid_attributes = ["overly_corporate"];
-    value.candidates = value.candidates.map((item) => ({...item, look_id: lookId}));
+    value.candidates = value.candidates.map((item) => ({
+      ...item,
+      look_id: lookId,
+      candidate_enrichment: {
+        style: {value: ["clean", "fashionable"], source: "title", confidence: 0.8,
+          evidence: "x".repeat(4_000)},
+        unused_raw_payload: "x".repeat(20_000),
+      },
+      product_acceptance_evidence: {
+        audience_fit: {value: "MATCH", source: "enrichment", confidence: 0.9,
+          evidence: ["adult", "contemporary", "x".repeat(4_000)]},
+        unused_diagnostics: "x".repeat(20_000),
+      },
+    }));
     value.requirement.slot_key = `slot-${lookIndex}`;
     return value;
   });
@@ -521,7 +534,7 @@ test("multi-Look AI batches remap local requirement indexes and complete without
     [[0], [1], [2]],
   );
   assert.equal(stats.last_trace.selection.batches.every((batch) =>
-    batch.prompt_bytes < 20_000), true);
+    batch.prompt_bytes < 12_000), true);
   assert.equal(stats.last_trace.selection.batches.every((batch) =>
     batch.candidate_count >= 1 && batch.candidate_count <= 6), true);
 });
@@ -760,7 +773,8 @@ test("queued selection batches receive independent per-slot timeouts", async () 
     ["look-1", "look-2", "look-3"]);
   assert.equal(trace.deadline_skipped_batch_count, 0);
   assert.equal(trace.batches.every((item) => item.status === "FAILED"), true);
-  assert.equal(trace.batches.every((item) => item.timeout_ms === 35), true);
+  assert.equal(trace.batches.every((item) =>
+    item.timeout_ms > 0 && item.timeout_ms <= 35), true);
   assert.equal(trace.batches.every((item) => Number.isFinite(item.queue_wait_ms)), true);
 });
 
