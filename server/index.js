@@ -59,6 +59,10 @@ const {
   createAiRerankerLatencyProbeHandler,
 } = require("./ai_reranker_latency_probe_endpoint");
 const {
+  AI_RERANKER_MODEL_BAKEOFF_PATH,
+  createAiRerankerModelBakeoffHandler,
+} = require("./ai_reranker_model_bakeoff_endpoint");
+const {
   buildSearchKeywords,
   normalizeGender,
   normalizeProductCategory,
@@ -5435,6 +5439,12 @@ app.post(AI_RERANKER_LATENCY_PROBE_PATH,
     client: shouldUseMockAi(config, aiClient) ? null : aiClient,
     provider: config.aiProvider,
     model: config.productRerankModel,
+  }));
+app.post(AI_RERANKER_MODEL_BAKEOFF_PATH,
+  createAiRerankerModelBakeoffHandler({
+    environment: () => process.env,
+    client: shouldUseMockAi(config, aiClient) ? null : aiClient,
+    provider: config.aiProvider,
   }));
 
 app.get("/products/:id/stats", async (req, res, next) => {
