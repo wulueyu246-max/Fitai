@@ -35,10 +35,11 @@ function titleForQuery(query, index) {
   const gender = /^男/u.test(query) ? "男士" : "女士";
   const category = categoryForQuery(query);
   const productType = category === "鞋"
-    ? "轻量休闲鞋"
+    ? "年轻时髦设计感轻量休闲鞋"
     : category === "裤装"
-      ? /裙/u.test(query) ? "高腰半身裙" : "利落直筒裤"
-      : "设计感短袖上衣";
+      ? /裙/u.test(query) ? "年轻时髦设计感高腰半身裙"
+        : "年轻时髦设计感利落直筒裤"
+      : "年轻时髦设计感短袖上衣";
   return `${gender}${productType} ${query} ${index + 1}`;
 }
 

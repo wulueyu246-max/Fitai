@@ -361,7 +361,8 @@ test("shared pipeline records acceptance evidence from gate through Strategy", a
 
 function slotCandidates(lookId, category, count, {gender = "female"} = {}) {
   const label = category === "top" ? "设计感上衣"
-    : category === "bottom" ? "年轻休闲直筒裤" : "现代轻量休闲鞋";
+    : category === "bottom" ? "年轻时髦设计感休闲直筒裤"
+      : "年轻时髦设计感现代轻量休闲鞋";
   return Array.from({length: count}, (_, index) => product(
     `${gender === "female" ? "女" : "男"}款${label}${index + 1}`,
     {

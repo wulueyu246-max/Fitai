@@ -12,6 +12,7 @@ const {
   normalizePublicImageUrl,
   parseTaobaoPlacement,
   extractTaobaoItems,
+  runSharedCandidatePipeline,
 } = require("../product_provider");
 const {
   TAOBAO_MATERIAL_SAMPLE_METHOD,
@@ -736,6 +737,62 @@ test("builds a twenty-item quality-filtered pool and sends only four to AI", asy
   assert.equal(capturedGroups[0].candidates.length, 4);
   assert.equal(products.length, 4);
   assert.ok(products.every((product) => product.source === "taobao"));
+});
+
+test("Candidate Refill never promotes a Soft Reject into the selectable pool", async () => {
+  const requirement = {
+    category: "shoes",
+    gender: "female",
+    scene: "nightlife",
+    item_name: "年轻有设计感的休闲鞋",
+  };
+  const softRejected = {
+    product_id: "mature-shoe",
+    source: "taobao",
+    is_mock: false,
+    title: "女士妈妈通勤成熟单鞋",
+    category: "shoes",
+    gender: "female",
+    original_gender: "female",
+    price: 175,
+    image_url: "https://img.example.com/mature-shoe.jpg",
+    relevance_score: 90,
+  };
+  let rerankerCalls = 0;
+  const result = await runSharedCandidatePipeline({
+    requirements: [requirement],
+    groups: [{requirement, candidates: [softRejected]}],
+    context: {
+      gender: "female",
+      scene: "nightlife",
+      decision_context: {
+        user_truth: {gender: "female", scene: "nightlife"},
+        intent: {user_intent_brain: {
+          desired_impression: {
+            value: ["年轻", "有设计感"], source: "user", confidence: 1,
+          },
+          explicit_avoid: {value: ["别太正式"], source: "user", confidence: 1},
+        }},
+      },
+    },
+    reranker: {async rerank() { rerankerCalls += 1; return []; }},
+    refillCandidates: async () => ({
+      queries: ["女 休闲鞋 年轻"],
+      returned_count: 1,
+      candidates: [{...softRejected, product_id: "mature-shoe-refill"}],
+    }),
+    maxRefillRounds: 1,
+    logger: {info() {}, warn() {}, error() {}},
+  });
+
+  assert.equal(rerankerCalls, 0);
+  assert.equal(result.products.length, 0);
+  assert.equal(result.trace.slot_outcomes[0].status,
+    "INSUFFICIENT_QUALITY_CANDIDATES");
+  assert.equal(result.trace.refill_rounds[0].accepted_count, 0);
+  assert.equal(result.trace.refill_rounds[0].after_count, 0);
+  assert.equal(result.trace.gate_reject.every((item) =>
+    item.reason === "PRODUCT_ACCEPTANCE_SOFT_REJECT"), true);
 });
 
 test("new decision pipeline preserves twenty candidates even with legacy visual verifier configured", async () => {

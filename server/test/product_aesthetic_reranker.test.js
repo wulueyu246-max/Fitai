@@ -248,11 +248,10 @@ test("ten identical male Clean Fit generations never repeat the same primary com
         assert.deepEqual(request.response_format, {type: "json_object"});
         assert.equal(request.enable_thinking, false);
         const prompt = JSON.parse(request.messages[1].content);
-        assert.equal(prompt.product_groups.length, 2);
-        return response([
-          selection("top-1"), selection("top-2"), selection("top-3"), selection("top-4"),
-          selection("shoe-1"), selection("shoe-2"), selection("shoe-3"), selection("shoe-4"),
-        ]);
+        assert.equal(prompt.product_groups.length, 1);
+        assert.ok(prompt.product_groups[0].candidates.length <= 6);
+        return response(prompt.product_groups[0].candidates.slice(0, 3)
+          .map((item) => selection(item.product_id, {requirement_index: 0})));
       }}},
     },
     model: "test-model",
@@ -281,7 +280,7 @@ test("ten identical male Clean Fit generations never repeat the same primary com
   assert.ok(combinations.every((combination, index) =>
     index === 0 || combination !== combinations[index - 1]));
   assert.ok(new Set(combinations).size >= 3);
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
   assert.equal(reranker.getStats().call_count, 1);
   assert.equal(reranker.getStats().cache_hits, 9);
 });
@@ -522,7 +521,9 @@ test("multi-Look AI batches remap local requirement indexes and complete without
     [[0], [1], [2]],
   );
   assert.equal(stats.last_trace.selection.batches.every((batch) =>
-    batch.prompt_bytes < 100_000), true);
+    batch.prompt_bytes < 20_000), true);
+  assert.equal(stats.last_trace.selection.batches.every((batch) =>
+    batch.candidate_count >= 1 && batch.candidate_count <= 6), true);
 });
 
 test("one bad image is degraded without dragging down the other image or text batch", async () => {
@@ -1206,8 +1207,11 @@ test("multiple incomplete groups fall back locally within one AI call", async ()
     client: {
       chat: {completions: {create: async (request) => {
         const payload = JSON.parse(request.messages[1].content);
-        assert.equal(payload.product_groups.length, 2);
-        return response([selection("top-1"), selection("shoe-1")]);
+        assert.equal(payload.product_groups.length, 1);
+        return response([selection(
+          payload.product_groups[0].candidates[0].product_id,
+          {requirement_index: 0},
+        )]);
       }}},
     },
     model: "test-model",
@@ -1226,4 +1230,5 @@ test("multiple incomplete groups fall back locally within one AI call", async ()
   assert.equal(products.length, 10);
   assert.ok(products.every((product) => product.ai_rerank_fallback === true));
   assert.equal(reranker.getStats().call_count, 1);
+  assert.equal(reranker.getStats().selection_batch_count, 2);
 });

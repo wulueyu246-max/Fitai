@@ -508,6 +508,16 @@ function processCandidateGroup({group, context, trace, stagePrefix = ""}) {
       ));
       continue;
     }
+    if (gate.product?.source === "taobao" &&
+        gate.product?.product_acceptance_result === "SOFT_REJECT") {
+      trace.gate_reject.push(candidateTraceRecord(
+        gate.product,
+        requirement,
+        `${stagePrefix}GATE_REJECT`,
+        "PRODUCT_ACCEPTANCE_SOFT_REJECT",
+      ));
+      continue;
+    }
     const candidate = preserveCandidateContract({
       ...gate.product,
       candidate_gate_result: "PASS",

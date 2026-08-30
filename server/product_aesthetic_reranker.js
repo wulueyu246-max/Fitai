@@ -31,6 +31,9 @@ const MAX_VISUAL_IMAGES_PER_REQUEST = 6;
 const MAX_VISUAL_STAGE_MS = 6_000;
 const MAX_VISUAL_IMAGE_MS = 2_500;
 const MAX_SELECTION_BATCH_MS = 7_500;
+const MAX_SLOT_CANDIDATES = 6;
+const MIN_SLOT_SELECTION = 2;
+const MAX_SLOT_SELECTION = 3;
 const DEFAULT_SELECTION_CONCURRENCY = 2;
 const DEFAULT_VISUAL_CONCURRENCY = 3;
 const MODEL_TRANSPORT_TIMEOUT_GRACE_MS = 1_000;
@@ -516,7 +519,7 @@ class ProductAestheticReranker {
           };
           try {
             const promptStartedAt = Date.now();
-            const messages = buildMessages(batch.groups, context);
+            const messages = buildSlotMessages(batch, context);
             baseTrace.prompt_build_ms = Date.now() - promptStartedAt;
             baseTrace.prompt_bytes = Buffer.byteLength(
               JSON.stringify(messages),
@@ -1004,6 +1007,111 @@ function buildMessages(groups, context) {
   ];
 }
 
+function evidenceValue(value, fallback = null) {
+  if (value && typeof value === "object" &&
+      Object.prototype.hasOwnProperty.call(value, "value")) {
+    return value.value;
+  }
+  return value ?? fallback;
+}
+
+function slotForRequirement(requirement = {}) {
+  const slot = String(
+    requirement.slot || requirement.slot_key || requirement.slotKey ||
+    requirement.category || requirement.subcategory || "other",
+  ).trim().toLowerCase();
+  return slot === "skirt" ? "bottom" : slot || "other";
+}
+
+function compactSlotIntent(context = {}, requirement = {}) {
+  const decisionContext = context.decision_context ||
+    context.recommendation_context?.decision_context || {};
+  const brain = decisionContext?.intent?.user_intent_brain || {};
+  const truth = decisionContext?.user_truth || {};
+  return compactObject({
+    primary_goal: evidenceValue(brain.primary_goal),
+    scene: evidenceValue(brain.scene_intent, truth.scene || context.scene),
+    desired_impression: evidenceValue(brain.desired_impression, []),
+    explicit_avoid: evidenceValue(
+      brain.explicit_avoid,
+      truth.explicit_avoid || context.user_requirements?.explicit_avoid || [],
+    ),
+    concept: pickFields(requirement, [
+      "look_id", "concept_id", "style", "style_direction", "styling_goal",
+      "scene", "formality", "silhouette", "fit", "footwear",
+      "must_have", "must_avoid", "prefer", "avoid_items",
+    ]),
+  });
+}
+
+function compactSlotCandidate(product = {}) {
+  return compactObject({
+    product_id: product.product_id,
+    title: product.title,
+    category: product.category,
+    subcategory: product.subcategory,
+    price: product.price,
+    original_gender: product.original_gender || product.gender,
+    style: product.style,
+    style_tags: product.style_tags,
+    occasion_tags: product.occasion_tags || product.occasions,
+    color: product.color,
+    silhouette: product.silhouette,
+    fit: product.fit,
+    footwear: product.footwear,
+    material: product.material,
+    candidate_enrichment: product.candidate_enrichment,
+    acceptance_result: product.product_acceptance_result,
+    acceptance_penalty: product.product_acceptance_penalty,
+    acceptance_evidence: product.product_acceptance_evidence,
+    visual_evidence: pickFields(product, [
+      "visible_category", "audience_expression", "style_expression",
+      "visual_age_expression", "design_detail_level", "visual_quality_score",
+      "fashion_taste_score", "subject_coverage_score", "commerce_visual_score",
+      "image_url",
+    ]),
+  });
+}
+
+function buildSlotMessages(batch, context) {
+  const group = batch?.groups?.[0] || {};
+  const requirement = group.requirement || {};
+  const candidates = (Array.isArray(group.candidates) ? group.candidates : [])
+    .slice(0, MAX_SLOT_CANDIDATES)
+    .map(compactSlotCandidate);
+  const minimum = Math.min(MIN_SLOT_SELECTION, candidates.length);
+  const maximum = Math.min(MAX_SLOT_SELECTION, candidates.length);
+  const payload = {
+    slot: slotForRequirement(requirement),
+    intent: compactSlotIntent(context, requirement),
+    requirement: compactRequirementForPrompt(requirement),
+    selection: {minimum, maximum},
+    candidates,
+    product_groups: [{
+      requirement_index: 0,
+      required_minimum: minimum,
+      maximum,
+      requirement: compactRequirementForPrompt(requirement),
+      candidates,
+    }],
+  };
+  return [
+    {
+      role: "system",
+      content: [
+        "你是 FitAI 单槽商品审美复选器，只能从同一 Slot 的候选中选择，不得编造或修改 product_id。",
+        "必须优先判断 audience fit、contemporary fit、desired impression fit、occasion fit 与 visual/style quality。",
+        "严重人群、时代感、场景或目标印象错配不能被品牌、价格或销量补救。",
+        "Acceptance evidence 是商品事实证据；不得把用户要求当成商品事实。",
+        "按 selection.minimum 至 selection.maximum 返回合格商品；若合格商品不足，可以少选，不得用明显错配商品凑数。",
+        "每项必须包含 product_id、aesthetic_score、fit_score、outfit_coherence_score、value_score、reason、concern。",
+        "只返回严格 JSON：{\"selected_products\":[{\"product_id\":\"候选ID\",\"aesthetic_score\":0,\"fit_score\":0,\"outfit_coherence_score\":0,\"value_score\":0,\"reason\":\"\",\"concern\":\"\"}]}。",
+      ].join("\n"),
+    },
+    {role: "user", content: JSON.stringify(payload)},
+  ];
+}
+
 function compactRequirementForPrompt(requirement = {}) {
   return pickFields(requirement, [
     "look_id", "lookId", "concept_id", "conceptId", "slot_key", "slotKey",
@@ -1045,25 +1153,25 @@ function compactOutfitPlanForPrompt(plan = {}, groups = []) {
 }
 
 function buildSelectionBatches(groups = []) {
-  const byLook = new Map();
-  (Array.isArray(groups) ? groups : []).forEach((group, globalIndex) => {
+  return (Array.isArray(groups) ? groups : []).map((group, globalIndex) => {
     const lookId = String(
       group?.requirement?.look_id || group?.requirement?.lookId || "default",
     ).trim() || "default";
-    const batch = byLook.get(lookId) || [];
-    batch.push({group, globalIndex});
-    byLook.set(lookId, batch);
+    return {
+      lookIds: [lookId],
+      slot: slotForRequirement(group?.requirement || {}),
+      groups: [{
+        ...group,
+        candidates: (Array.isArray(group?.candidates) ? group.candidates : [])
+          .slice(0, MAX_SLOT_CANDIDATES),
+      }],
+      globalGroupIndexes: [globalIndex],
+      candidateCount: Math.min(
+        MAX_SLOT_CANDIDATES,
+        Array.isArray(group?.candidates) ? group.candidates.length : 0,
+      ),
+    };
   });
-  return [...byLook.entries()].map(([lookId, entries]) => ({
-    lookIds: [lookId],
-    groups: entries.map((entry) => entry.group),
-    globalGroupIndexes: entries.map((entry) => entry.globalIndex),
-    candidateCount: entries.reduce(
-      (total, entry) => total + (Array.isArray(entry.group?.candidates)
-        ? entry.group.candidates.length : 0),
-      0,
-    ),
-  }));
 }
 
 function remapBatchSelectionPayload(payload, batch) {
@@ -1775,7 +1883,7 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
 function groupsBelowMinimum(groups, products) {
   const selectedIds = new Set(products.map(productGroupKey));
   return groups.filter((group) => {
-    const required = Math.min(4, group.candidates.length);
+    const required = Math.min(MIN_SLOT_SELECTION, group.candidates.length);
     const selected = group.candidates.filter((product) =>
       selectedIds.has(productGroupKey(product))).length;
     return required > 0 && selected < required;
