@@ -496,7 +496,11 @@ class ProductAestheticReranker {
 
   async #select(groups, context, timeoutMs = this.timeoutMs) {
     const startedAt = Date.now();
-    const deadlineAt = startedAt + Math.max(1, Math.min(timeoutMs, this.timeoutMs));
+    const slotTimeoutMs = Math.max(1, Math.min(
+      MAX_SELECTION_BATCH_MS,
+      timeoutMs,
+      this.timeoutMs,
+    ));
     const batches = buildSelectionBatches(groups);
     this.metrics.callCount += 1;
     this.metrics.selectionBatchCount += batches.length;
@@ -525,17 +529,7 @@ class ProductAestheticReranker {
               JSON.stringify(messages),
               "utf8",
             );
-            const remaining = deadlineAt - Date.now();
-            if (remaining <= 0) {
-              const error = new Error("AI reranker batch skipped after deadline");
-              error.code = "AI_RERANK_SELECTION_DEADLINE_SKIPPED";
-              throw error;
-            }
-            const requestTimeoutMs = Math.max(1, Math.min(
-              MAX_SELECTION_BATCH_MS,
-              remaining,
-            ));
-            baseTrace.timeout_ms = requestTimeoutMs;
+            baseTrace.timeout_ms = slotTimeoutMs;
             this.metrics.modelRequestCount += 1;
             const response = await abortableModelRequest(
               this.client,
@@ -546,7 +540,7 @@ class ProductAestheticReranker {
                 temperature: 0.2,
                 messages,
               },
-              requestTimeoutMs,
+              slotTimeoutMs,
               "AI_RERANK_SELECTION_BATCH_TIMEOUT",
             );
             const modelRequestMs = Date.now() - modelStartedAt;
@@ -570,8 +564,7 @@ class ProductAestheticReranker {
               ...baseTrace,
               model_request_ms: Date.now() - modelStartedAt,
               response_parse_ms: null,
-              status: reasonCode === "AI_RERANK_SELECTION_DEADLINE_SKIPPED"
-                ? "SKIPPED_DEADLINE" : "FAILED",
+              status: "FAILED",
               reason_code: reasonCode,
               category: classifyRerankerFailure(error).category,
               timeout_owner: error?.timeout_owner || null,

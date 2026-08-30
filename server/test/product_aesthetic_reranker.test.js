@@ -726,7 +726,7 @@ test("visual deadline skips are distinct from bad-image failures", async () => {
   "FAILED_UNASSESSED");
 });
 
-test("queued selection batches keep ordered trace when the deadline expires", async () => {
+test("queued selection batches receive independent per-slot timeouts", async () => {
   let modelCalls = 0;
   const groups = ["look-1", "look-2", "look-3"].map((lookId) => {
     const value = group("top", [`${lookId}-1`, `${lookId}-2`]);
@@ -754,13 +754,13 @@ test("queued selection batches keep ordered trace when the deadline expires", as
 
   await reranker.rerank({groups, requestId: "queued-deadline"});
   const trace = reranker.getTraceForRequest("queued-deadline").selection;
-  assert.equal(modelCalls, 1);
+  assert.equal(modelCalls, 3);
   assert.deepEqual(trace.batches.map((item) => item.batch_index), [0, 1, 2]);
   assert.deepEqual(trace.batches.map((item) => item.look_ids[0]),
     ["look-1", "look-2", "look-3"]);
-  assert.equal(trace.deadline_skipped_batch_count, 2);
-  assert.equal(trace.batches[1].status, "SKIPPED_DEADLINE");
-  assert.equal(trace.batches[2].status, "SKIPPED_DEADLINE");
+  assert.equal(trace.deadline_skipped_batch_count, 0);
+  assert.equal(trace.batches.every((item) => item.status === "FAILED"), true);
+  assert.equal(trace.batches.every((item) => item.timeout_ms === 35), true);
   assert.equal(trace.batches.every((item) => Number.isFinite(item.queue_wait_ms)), true);
 });
 
