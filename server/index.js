@@ -55,6 +55,10 @@ const {
   createDynamicTaobaoQueryValidationHandler,
 } = require("./dynamic_taobao_query_validation_endpoint");
 const {
+  AI_RERANKER_LATENCY_PROBE_PATH,
+  createAiRerankerLatencyProbeHandler,
+} = require("./ai_reranker_latency_probe_endpoint");
+const {
   buildSearchKeywords,
   normalizeGender,
   normalizeProductCategory,
@@ -5424,6 +5428,13 @@ app.get(TAOBAO_RAW_PROBE_ARTIFACT_PATH,
 app.post(DYNAMIC_TAOBAO_QUERY_VALIDATION_PATH,
   createDynamicTaobaoQueryValidationHandler({
     environment: () => process.env,
+  }));
+app.post(AI_RERANKER_LATENCY_PROBE_PATH,
+  createAiRerankerLatencyProbeHandler({
+    environment: () => process.env,
+    client: shouldUseMockAi(config, aiClient) ? null : aiClient,
+    provider: config.aiProvider,
+    model: config.productRerankModel,
   }));
 
 app.get("/products/:id/stats", async (req, res, next) => {
