@@ -795,6 +795,63 @@ test("Candidate Refill never promotes a Soft Reject into the selectable pool", a
     item.reason === "PRODUCT_ACCEPTANCE_SOFT_REJECT"), true);
 });
 
+test("one quality candidate per core slot may proceed after refill target misses", async () => {
+  const requirements = ["top", "bottom", "shoes"].map((category) => ({
+    look_id: "quality-look",
+    category,
+    gender: "female",
+    scene: "nightlife",
+    item_name: `年轻有设计感的${category}`,
+  }));
+  const groups = requirements.map((requirement) => ({
+    requirement,
+    candidates: [{
+      product_id: `quality-${requirement.category}`,
+      source: "taobao",
+      is_mock: false,
+      title: `女士年轻设计感${requirement.category}`,
+      category: requirement.category,
+      gender: "female",
+      original_gender: "female",
+      price: 199,
+      image_url: `https://img.example.com/${requirement.category}.jpg`,
+      relevance_score: 90,
+    }],
+  }));
+  let rerankerCalls = 0;
+  const result = await runSharedCandidatePipeline({
+    requirements,
+    groups,
+    context: {gender: "female", scene: "nightlife"},
+    reranker: {
+      async rerank({groups: rerankGroups}) {
+        rerankerCalls += 1;
+        return rerankGroups.flatMap((group) => group.candidates);
+      },
+      getTraceForRequest() { return null; },
+    },
+    refillCandidates: async () => ({
+      queries: ["refill"],
+      returned_count: 0,
+      candidates: [],
+    }),
+    maxRefillRounds: 1,
+    outfitPostProcessor: ({products}) => ({
+      applied: true,
+      products,
+      looks: [],
+    }),
+    logger: {info() {}, warn() {}, error() {}},
+  });
+
+  assert.equal(rerankerCalls, 1);
+  assert.equal(result.products.length, 3);
+  assert.equal(result.trace.slot_outcomes.every((item) =>
+    item.final_gate_pass === 1), true);
+  assert.equal(result.trace.slot_outcomes.every((item) =>
+    item.status === "INSUFFICIENT_QUALITY_CANDIDATES"), true);
+});
+
 test("new decision pipeline preserves twenty candidates even with legacy visual verifier configured", async () => {
   const capturedGroups = [];
   let visualCalls = 0;

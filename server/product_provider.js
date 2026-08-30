@@ -326,7 +326,7 @@ async function runSharedCandidatePipeline({
     ? completeLookIdsForGroups(
       safeRequirements,
       gateGroups,
-      effectiveGateTarget,
+      1,
     )
     : new Set(safeRequirements.map((requirement) => String(
       requirement?.look_id || "",
