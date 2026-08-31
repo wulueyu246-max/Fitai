@@ -19,6 +19,11 @@ const {
 const {
   resolveAestheticTargetProfile,
 } = require("./style_intelligence");
+const {
+  DEFAULT_ADJUDICATION_MARGIN,
+  MAX_ADJUDICATION_CALLS,
+  buildAmbiguityPlan,
+} = require("./product_reranker_ambiguity");
 
 const DEFAULT_SELECTION_LIMIT = 6;
 const MAX_SELECTION_LIMIT = 6;
@@ -36,6 +41,11 @@ const MIN_SLOT_SELECTION = 2;
 const MAX_SLOT_SELECTION = 3;
 const DEFAULT_SELECTION_CONCURRENCY = 2;
 const DEFAULT_VISUAL_CONCURRENCY = 3;
+const DEFAULT_ADJUDICATION_TIMEOUT_MS = 5_500;
+const DEFAULT_ADJUDICATION_TOTAL_BUDGET_MS = 10_000;
+const MAX_ADJUDICATION_TIMEOUT_MS = 6_000;
+const MAX_ADJUDICATION_TOTAL_BUDGET_MS = 10_000;
+const MAX_ADJUDICATION_OUTPUT_TOKENS = 220;
 const MODEL_TRANSPORT_TIMEOUT_GRACE_MS = 1_000;
 const DEFAULT_REQUEST_TRACE_ENTRIES = 200;
 const HIGH_QUALITY_BRAND_SCORE = 65;
@@ -117,6 +127,11 @@ class ProductAestheticReranker {
     cacheTtlMs = DEFAULT_CACHE_TTL_MS,
     maxCacheEntries = DEFAULT_CACHE_ENTRIES,
     visualEvaluationEnabled = true,
+    selectiveAdjudicationEnabled = false,
+    adjudicationMargin = DEFAULT_ADJUDICATION_MARGIN,
+    adjudicationMaxCalls = MAX_ADJUDICATION_CALLS,
+    adjudicationTimeoutMs = DEFAULT_ADJUDICATION_TIMEOUT_MS,
+    adjudicationTotalBudgetMs = DEFAULT_ADJUDICATION_TOTAL_BUDGET_MS,
     selectionConcurrency = DEFAULT_SELECTION_CONCURRENCY,
     visualConcurrency = DEFAULT_VISUAL_CONCURRENCY,
     visualStageMs = MAX_VISUAL_STAGE_MS,
@@ -132,6 +147,26 @@ class ProductAestheticReranker {
     this.cacheTtlMs = positiveInteger(cacheTtlMs, DEFAULT_CACHE_TTL_MS);
     this.maxCacheEntries = positiveInteger(maxCacheEntries, DEFAULT_CACHE_ENTRIES);
     this.visualEvaluationEnabled = visualEvaluationEnabled !== false;
+    this.selectiveAdjudicationEnabled = selectiveAdjudicationEnabled === true;
+    this.adjudicationMargin = positiveNumber(
+      adjudicationMargin,
+      DEFAULT_ADJUDICATION_MARGIN,
+    );
+    this.adjudicationMaxCalls = Math.min(
+      MAX_ADJUDICATION_CALLS,
+      positiveInteger(adjudicationMaxCalls, MAX_ADJUDICATION_CALLS),
+    );
+    this.adjudicationTimeoutMs = Math.min(
+      positiveInteger(adjudicationTimeoutMs, DEFAULT_ADJUDICATION_TIMEOUT_MS),
+      MAX_ADJUDICATION_TIMEOUT_MS,
+    );
+    this.adjudicationTotalBudgetMs = Math.min(
+      positiveInteger(
+        adjudicationTotalBudgetMs,
+        DEFAULT_ADJUDICATION_TOTAL_BUDGET_MS,
+      ),
+      MAX_ADJUDICATION_TOTAL_BUDGET_MS,
+    );
     this.selectionConcurrency = Math.min(
       positiveInteger(selectionConcurrency, DEFAULT_SELECTION_CONCURRENCY),
       DEFAULT_SELECTION_CONCURRENCY,
@@ -168,6 +203,12 @@ class ProductAestheticReranker {
       modelRequestCount: 0,
       selectionBatchCount: 0,
       selectionBatchFallbackCount: 0,
+      adjudicationRequiredCount: 0,
+      adjudicationAttemptedCount: 0,
+      adjudicationSuccessCount: 0,
+      adjudicationTimeoutCount: 0,
+      adjudicationFallbackCount: 0,
+      adjudicationTotalLatencyMs: 0,
       lastTrace: null,
     };
   }
@@ -198,6 +239,15 @@ class ProductAestheticReranker {
       model_request_count: this.metrics.modelRequestCount,
       selection_batch_count: this.metrics.selectionBatchCount,
       selection_batch_fallback_count: this.metrics.selectionBatchFallbackCount,
+      selective_adjudication_enabled: this.selectiveAdjudicationEnabled,
+      adjudication_margin: this.adjudicationMargin,
+      adjudication_max_calls: this.adjudicationMaxCalls,
+      adjudication_required_count: this.metrics.adjudicationRequiredCount,
+      adjudication_attempted_count: this.metrics.adjudicationAttemptedCount,
+      adjudication_success_count: this.metrics.adjudicationSuccessCount,
+      adjudication_timeout_count: this.metrics.adjudicationTimeoutCount,
+      adjudication_fallback_count: this.metrics.adjudicationFallbackCount,
+      adjudication_total_latency_ms: this.metrics.adjudicationTotalLatencyMs,
       last_trace: this.metrics.lastTrace,
       cache_entries: this.cache.size,
     };
@@ -280,6 +330,52 @@ class ProductAestheticReranker {
       ai_rerank_fallback_reason: reasonCode || "AI_RERANK_FAILED",
     })));
     if (!this.configured) {
+      if (this.selectiveAdjudicationEnabled) {
+        const deterministicGroups = buildDeterministicGroups(
+          normalizedGroups,
+          selectionLimit,
+          context,
+        );
+        const plan = buildAmbiguityPlan(deterministicGroups, {
+          margin: this.adjudicationMargin,
+          maxCalls: this.adjudicationMaxCalls,
+        });
+        const products = finalize(markSelectiveProducts(
+          deterministicGroups,
+          plan,
+          new Map(),
+          "AI_ADJUDICATION_NOT_CONFIGURED",
+        ));
+        if (plan.selected_count > 0) {
+          this.metrics.fallbackCount += 1;
+          this.metrics.adjudicationRequiredCount += plan.ambiguity_count;
+          this.metrics.adjudicationFallbackCount += plan.selected_count;
+          this.#recordFallback(
+            "AI_ADJUDICATION_NOT_CONFIGURED",
+            "ENVIRONMENT_CONFIGURATION",
+          );
+        }
+        this.#setTrace(requestId, Object.freeze({
+          request_id: requestId || null,
+          configured_timeout_ms: this.timeoutMs,
+          prefilter_candidate_count: prefilterCount,
+          normalized_candidate_count: candidateCount,
+          group_count: normalizedGroups.length,
+          selection: selectiveTraceWithoutCalls(
+            plan,
+            "AI_ADJUDICATION_NOT_CONFIGURED",
+            this.selectionConcurrency,
+          ),
+          total_ms: 0,
+          cached: false,
+          fallback: plan.selected_count > 0,
+          failure_reason: plan.selected_count > 0
+            ? "AI_ADJUDICATION_NOT_CONFIGURED" : null,
+          failure_category: plan.selected_count > 0
+            ? "ENVIRONMENT_CONFIGURATION" : null,
+        }));
+        return cloneProducts(products);
+      }
       this.metrics.fallbackCount += 1;
       const reasonCode = "AI_RERANK_NOT_CONFIGURED";
       this.#recordFallback(reasonCode, "ENVIRONMENT_CONFIGURATION");
@@ -310,17 +406,22 @@ class ProductAestheticReranker {
       return products;
     }
 
-    const cached = this.#readCache(cacheKey);
-    if (cached) {
+    const cachedEntry = this.#readCache(cacheKey);
+    if (cachedEntry) {
+      const cached = cachedEntry.products;
       this.metrics.cacheHits += 1;
       const cachedFallback = cached.some((product) => product.ai_rerank_fallback === true);
       const diversified = finalize(cached);
+      const cachedSelection = this.selectiveAdjudicationEnabled
+        ? buildCachedSelectiveTrace(cachedEntry.selectionTrace, cached)
+        : cachedEntry.selectionTrace;
       this.#setTrace(requestId, Object.freeze({
         request_id: requestId || null,
         configured_timeout_ms: this.timeoutMs,
         prefilter_candidate_count: prefilterCount,
         normalized_candidate_count: candidateCount,
         group_count: normalizedGroups.length,
+        selection: cachedSelection,
         total_ms: 0,
         cached: true,
         fallback: cachedFallback,
@@ -351,18 +452,41 @@ class ProductAestheticReranker {
       );
       workingGroups = visualResult.groups;
       visualTrace = visualResult.trace;
-      const selectionPayload = await this.#select(
+      let selectionPayload;
+      let selected;
+      if (this.selectiveAdjudicationEnabled) {
+        workingGroups = buildDeterministicGroups(
+          workingGroups,
+          selectionLimit,
+          context,
+        );
+        const selectiveResult = await this.#selectSelective(
+          workingGroups,
+          context,
+          remainingBudgetMs(deadlineAt),
+        );
+        selected = selectiveResult.products;
+        selectionPayload = {
+          _reranker_batch_trace: selectiveResult.trace,
+        };
+      } else {
+        selectionPayload = await this.#select(
+          workingGroups,
+          context,
+          remainingBudgetMs(deadlineAt),
+        );
+        selected = validateSelection(
+          selectionPayload,
+          workingGroups,
+          selectionLimit,
+          context,
+        );
+      }
+      const incompleteGroups = groupsBelowMinimum(
         workingGroups,
-        context,
-        remainingBudgetMs(deadlineAt),
+        selected,
+        this.selectiveAdjudicationEnabled ? 1 : MIN_SLOT_SELECTION,
       );
-      let selected = validateSelection(
-        selectionPayload,
-        workingGroups,
-        selectionLimit,
-        context,
-      );
-      const incompleteGroups = groupsBelowMinimum(workingGroups, selected);
       const failedSelectionBatches = Number(
         selectionPayload?._reranker_batch_trace?.failed_batch_count || 0,
       );
@@ -388,7 +512,9 @@ class ProductAestheticReranker {
       if (usedFallback) this.metrics.fallbackCount += 1;
       if (usedFallback) {
         const fallbackReason = failedSelectionBatches > 0
-          ? "AI_RERANK_PARTIAL_BATCH_FALLBACK"
+          ? (this.selectiveAdjudicationEnabled
+            ? "AI_ADJUDICATION_PARTIAL_FALLBACK"
+            : "AI_RERANK_PARTIAL_BATCH_FALLBACK")
           : "AI_RERANK_INCOMPLETE_SELECTION";
         this.#recordFallback(
           fallbackReason,
@@ -397,7 +523,8 @@ class ProductAestheticReranker {
         );
         selected = selected.map((product) => product.ai_rerank_fallback === true
           ? {...product,
-            ai_rerank_fallback_reason: fallbackReason}
+            ai_rerank_fallback_reason:
+              product.ai_rerank_fallback_reason || fallbackReason}
           : product);
       }
       this.#setTrace(requestId, Object.freeze({
@@ -414,7 +541,11 @@ class ProductAestheticReranker {
         cached: false,
         fallback: usedFallback,
       }));
-      this.#writeCache(cacheKey, selected);
+      this.#writeCache(
+        cacheKey,
+        selected,
+        selectionPayload?._reranker_batch_trace || null,
+      );
       const diversified = finalize(selected);
       this.#logResult({
         requestId,
@@ -427,7 +558,9 @@ class ProductAestheticReranker {
         fallback: usedFallback,
         errorCode: usedFallback
           ? (failedSelectionBatches > 0
-            ? "AI_RERANK_PARTIAL_BATCH_FALLBACK"
+            ? (this.selectiveAdjudicationEnabled
+              ? "AI_ADJUDICATION_PARTIAL_FALLBACK"
+              : "AI_RERANK_PARTIAL_BATCH_FALLBACK")
             : "AI_RERANK_INCOMPLETE_SELECTION")
           : undefined,
         errorCategory: usedFallback
@@ -492,6 +625,180 @@ class ProductAestheticReranker {
     while (this.requestTraces.size > DEFAULT_REQUEST_TRACE_ENTRIES) {
       this.requestTraces.delete(this.requestTraces.keys().next().value);
     }
+  }
+
+  async #selectSelective(groups, context, timeoutMs = this.timeoutMs) {
+    const startedAt = Date.now();
+    const budgetMs = Math.max(1, Math.min(
+      this.adjudicationTotalBudgetMs,
+      timeoutMs,
+      this.timeoutMs,
+    ));
+    const deadlineAt = startedAt + budgetMs;
+    const plan = buildAmbiguityPlan(groups, {
+      margin: this.adjudicationMargin,
+      maxCalls: this.adjudicationMaxCalls,
+    });
+    const selectedSlots = plan.slots.filter((slot) =>
+      slot.selected_for_adjudication);
+    this.metrics.callCount += 1;
+    this.metrics.selectionBatchCount += selectedSlots.length;
+    this.metrics.adjudicationRequiredCount += plan.ambiguity_count;
+    if (selectedSlots.length === 0) {
+      const trace = buildSelectiveTrace({
+        plan,
+        settled: [],
+        batches: [],
+        startedAt,
+        budgetMs,
+        concurrency: this.selectionConcurrency,
+      });
+      return {
+        products: markSelectiveProducts(groups, plan, new Map()),
+        trace,
+      };
+    }
+
+    const batches = [];
+    const settled = await mapSettledWithConcurrency(
+      selectedSlots,
+      this.selectionConcurrency,
+      async (slotPlan, batchIndex) => {
+        const group = groups[slotPlan.group_index];
+        const pair = (Array.isArray(group?.candidates) ? group.candidates : [])
+          .slice(0, 2);
+        const queuedAt = Date.now();
+        const remaining = deadlineAt - queuedAt;
+        const baseTrace = {
+          batch_index: batchIndex,
+          group_index: slotPlan.group_index,
+          look_id: slotPlan.look_id,
+          slot: slotPlan.slot,
+          ambiguity_reasons: slotPlan.reasons,
+          score_gap: slotPlan.score_gap,
+          candidate_count: pair.length,
+          candidate_ids: pair.map((candidate) => candidateId(candidate)),
+          queue_wait_ms: queuedAt - startedAt,
+          prompt_bytes: null,
+          prompt_build_ms: null,
+          timeout_ms: null,
+        };
+        if (remaining <= 0) {
+          const error = new Error("AI adjudication total budget exhausted");
+          error.code = "AI_ADJUDICATION_TOTAL_BUDGET_EXHAUSTED";
+          error.rerankerBatchTrace = {
+            ...baseTrace,
+            status: "FAILED",
+            reason_code: error.code,
+            category: "TIMEOUT",
+            model_request_ms: 0,
+            response_parse_ms: null,
+          };
+          batches[batchIndex] = error.rerankerBatchTrace;
+          throw error;
+        }
+        const modelStartedAt = Date.now();
+        try {
+          const promptStartedAt = Date.now();
+          const messages = buildAdjudicationMessages(group, pair, context);
+          baseTrace.prompt_build_ms = Date.now() - promptStartedAt;
+          baseTrace.prompt_bytes = Buffer.byteLength(
+            JSON.stringify(messages),
+            "utf8",
+          );
+          baseTrace.timeout_ms = Math.max(1, Math.min(
+            this.adjudicationTimeoutMs,
+            deadlineAt - Date.now(),
+          ));
+          this.metrics.modelRequestCount += 1;
+          this.metrics.adjudicationAttemptedCount += 1;
+          const response = await abortableModelRequest(
+            this.client,
+            {
+              model: this.model,
+              response_format: {type: "json_object"},
+              enable_thinking: false,
+              temperature: 0.2,
+              max_tokens: MAX_ADJUDICATION_OUTPUT_TOKENS,
+              messages,
+            },
+            baseTrace.timeout_ms,
+            "AI_ADJUDICATION_TIMEOUT",
+          );
+          const modelRequestMs = Date.now() - modelStartedAt;
+          const parseStartedAt = Date.now();
+          const payload = validateAdjudicationResponse(
+            parseJsonResponse(extractText(response)),
+            pair,
+          );
+          const responseParseMs = Date.now() - parseStartedAt;
+          const value = {
+            group_index: slotPlan.group_index,
+            winner_candidate_id: payload.winner_candidate_id,
+            payload,
+            trace: {
+              ...baseTrace,
+              model_request_ms: modelRequestMs,
+              response_parse_ms: responseParseMs,
+              status: "SUCCESS",
+              winner_candidate_id: payload.winner_candidate_id,
+              confidence: payload.confidence,
+            },
+          };
+          batches[batchIndex] = value.trace;
+          return value;
+        } catch (error) {
+          const reasonCode = safeErrorCode(error);
+          error.rerankerBatchTrace = {
+            ...baseTrace,
+            model_request_ms: Date.now() - modelStartedAt,
+            response_parse_ms: null,
+            status: "FAILED",
+            reason_code: reasonCode,
+            category: classifyRerankerFailure(error).category,
+            timeout_owner: error?.timeout_owner || null,
+          };
+          batches[batchIndex] = error.rerankerBatchTrace;
+          throw error;
+        }
+      },
+    );
+
+    const decisions = new Map();
+    for (let index = 0; index < settled.length; index += 1) {
+      const entry = settled[index];
+      if (entry.status === "fulfilled") {
+        decisions.set(entry.value.group_index, entry.value);
+        continue;
+      }
+      decisions.set(selectedSlots[index].group_index, {
+        group_index: selectedSlots[index].group_index,
+        failure_reason: safeErrorCode(entry.reason),
+      });
+    }
+    const failed = settled.filter((entry) => entry.status === "rejected");
+    const successCount = settled.filter((entry) =>
+      entry.status === "fulfilled").length;
+    const timeoutCount = failed.filter((entry) =>
+      classifyRerankerFailure(entry.reason).category === "TIMEOUT").length;
+    const wallClockAiLatencyMs = Math.max(0, Date.now() - startedAt);
+    this.metrics.selectionBatchFallbackCount += failed.length;
+    this.metrics.adjudicationSuccessCount += successCount;
+    this.metrics.adjudicationTimeoutCount += timeoutCount;
+    this.metrics.adjudicationFallbackCount += failed.length;
+    this.metrics.adjudicationTotalLatencyMs += wallClockAiLatencyMs;
+    const trace = buildSelectiveTrace({
+      plan,
+      settled,
+      batches,
+      startedAt,
+      budgetMs,
+      concurrency: this.selectionConcurrency,
+    });
+    return {
+      products: markSelectiveProducts(groups, plan, decisions),
+      trace,
+    };
   }
 
   async #select(groups, context, timeoutMs = this.timeoutMs) {
@@ -811,13 +1118,17 @@ class ProductAestheticReranker {
     }
     this.cache.delete(key);
     this.cache.set(key, entry);
-    return entry.products;
+    return {
+      products: cloneProducts(entry.products),
+      selectionTrace: cloneTrace(entry.selectionTrace),
+    };
   }
 
-  #writeCache(key, products) {
+  #writeCache(key, products, selectionTrace = null) {
     this.cache.set(key, {
       expiresAt: Date.now() + this.cacheTtlMs,
       products: cloneProducts(products),
+      selectionTrace: cloneTrace(selectionTrace),
     });
     while (this.cache.size > this.maxCacheEntries) {
       const oldestKey = this.cache.keys().next().value;
@@ -867,6 +1178,347 @@ class ProductAestheticReranker {
     if (details.fallback) this.logger.warn?.(message, safeDetails);
     else this.logger.info?.(message, safeDetails);
   }
+}
+
+function buildDeterministicGroups(groups, selectionLimit, context = {}) {
+  const safeLimit = Math.min(
+    positiveInteger(selectionLimit, DEFAULT_SELECTION_LIMIT),
+    MAX_SELECTION_LIMIT,
+  );
+  return (Array.isArray(groups) ? groups : []).map((group) => {
+    const eligibleGroup = {
+      ...group,
+      candidates: (Array.isArray(group?.candidates) ? group.candidates : [])
+        .filter((candidate) => String(
+          candidate?.product_acceptance_result || "PASS",
+        ).trim().toUpperCase() !== "HARD_REJECT"),
+    };
+    const products = ruleFallback([eligibleGroup], safeLimit, context)
+      .map((product) => ({
+        ...product,
+        deterministic_reranker_score: roundScore(Number(
+          product.deterministic_reranker_score ?? product.final_score ??
+          product.ai_match_score ?? 0,
+        )),
+        ai_rerank_fallback: false,
+        ai_rerank_fallback_reason: null,
+        ai_adjudication_status: "NOT_REQUIRED",
+      }))
+      .sort((left, right) =>
+        Number(right.deterministic_reranker_score || 0) -
+          Number(left.deterministic_reranker_score || 0) ||
+        candidateId(left).localeCompare(candidateId(right)));
+    return {
+      ...group,
+      candidates: products,
+      selectionLimit: safeLimit,
+    };
+  });
+}
+
+function buildAdjudicationMessages(group = {}, pair = [], context = {}) {
+  const requirement = group?.requirement || {};
+  const candidates = (Array.isArray(pair) ? pair : [])
+    .slice(0, 2)
+    .map((candidate) => ({
+      candidate_id: candidateId(candidate),
+      deterministic_score: Number(
+        candidate.deterministic_reranker_score ?? candidate.final_score ?? 0,
+      ),
+      ...compactSlotCandidate(candidate),
+    }));
+  const payload = {
+    intent: compactSlotIntent(context, requirement),
+    slot: slotForRequirement(requirement),
+    concept: compactObject({
+      concept_id: requirement.concept_id || requirement.conceptId,
+      look_id: requirement.look_id || requirement.lookId,
+      summary: requirement.concept_summary || requirement.styling_goal ||
+        requirement.style_direction || requirement.style,
+      scene: requirement.scene || context.scene,
+    }),
+    candidates,
+  };
+  return [
+    {
+      role: "system",
+      content: [
+        "你是 FitAI 商品歧义裁决器。只能比较输入中的两个同槽候选，不得编造、修改或复活其他商品。",
+        "判断 audience fit、contemporary fit、occasion fit、desired impression fit 与 visual/style quality；严重错配不能被品牌、价格或销量补救。",
+        "Acceptance evidence 是商品事实证据；用户意图只能作为适配目标，不能冒充商品事实。",
+        "只返回严格 JSON，且只能包含：winner_candidate_id、confidence、audience_fit、contemporary_fit、occasion_fit、desired_impression_fit、short_reason。",
+        "四个 fit 字段只能是 match、mixed、mismatch 或 unknown；confidence 为 0 到 1；short_reason 不超过80个字符。",
+      ].join("\n"),
+    },
+    {role: "user", content: JSON.stringify(payload)},
+  ];
+}
+
+function validateAdjudicationResponse(payload, pair = []) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw adjudicationValidationError("AI adjudication response is not an object");
+  }
+  const allowedKeys = new Set([
+    "winner_candidate_id",
+    "confidence",
+    "audience_fit",
+    "contemporary_fit",
+    "occasion_fit",
+    "desired_impression_fit",
+    "short_reason",
+  ]);
+  const keys = Object.keys(payload);
+  if (keys.some((key) => !allowedKeys.has(key)) ||
+      [...allowedKeys].some((key) => !keys.includes(key))) {
+    throw adjudicationValidationError("AI adjudication response keys are invalid");
+  }
+  const ids = new Set((Array.isArray(pair) ? pair : [])
+    .slice(0, 2).map(candidateId).filter(Boolean));
+  const winner = String(payload.winner_candidate_id || "").trim();
+  if (!winner || !ids.has(winner)) {
+    throw adjudicationValidationError("AI adjudication winner is not a candidate");
+  }
+  const confidence = Number(payload.confidence);
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+    throw adjudicationValidationError("AI adjudication confidence is invalid");
+  }
+  const fitValues = new Set(["match", "mixed", "mismatch", "unknown"]);
+  for (const key of [
+    "audience_fit",
+    "contemporary_fit",
+    "occasion_fit",
+    "desired_impression_fit",
+  ]) {
+    if (!fitValues.has(String(payload[key] || "").trim().toLowerCase())) {
+      throw adjudicationValidationError(`AI adjudication ${key} is invalid`);
+    }
+  }
+  const shortReason = String(payload.short_reason || "").trim();
+  if (!shortReason || [...shortReason].length > 80) {
+    throw adjudicationValidationError("AI adjudication short_reason is invalid");
+  }
+  return Object.freeze({
+    winner_candidate_id: winner,
+    confidence,
+    audience_fit: String(payload.audience_fit).trim().toLowerCase(),
+    contemporary_fit: String(payload.contemporary_fit).trim().toLowerCase(),
+    occasion_fit: String(payload.occasion_fit).trim().toLowerCase(),
+    desired_impression_fit:
+      String(payload.desired_impression_fit).trim().toLowerCase(),
+    short_reason: shortReason,
+  });
+}
+
+function adjudicationValidationError(message) {
+  const error = new Error(message);
+  error.code = "AI_ADJUDICATION_INVALID_RESPONSE";
+  return error;
+}
+
+function markSelectiveProducts(
+  groups,
+  plan,
+  decisions = new Map(),
+  globalFailureReason = null,
+) {
+  const slotPlans = new Map((plan?.slots || []).map((slot) => [
+    slot.group_index,
+    slot,
+  ]));
+  return (Array.isArray(groups) ? groups : []).flatMap((group, groupIndex) => {
+    const slotPlan = slotPlans.get(groupIndex) || {};
+    const decision = decisions.get(groupIndex) || null;
+    const candidates = Array.isArray(group?.candidates) ? group.candidates : [];
+    let retained = candidates;
+    let status = slotPlan.status || "DETERMINISTIC_MARGIN_CLEAR";
+    let fallbackReason = null;
+
+    if (decision?.winner_candidate_id) {
+      const pairedIds = new Set(candidates.slice(0, 2).map(candidateId));
+      retained = candidates.filter((candidate) =>
+        !pairedIds.has(candidateId(candidate)) ||
+        candidateId(candidate) === decision.winner_candidate_id);
+      retained.sort((left, right) => {
+        const leftWinner = candidateId(left) === decision.winner_candidate_id;
+        const rightWinner = candidateId(right) === decision.winner_candidate_id;
+        return Number(rightWinner) - Number(leftWinner) ||
+          Number(right.deterministic_reranker_score || 0) -
+            Number(left.deterministic_reranker_score || 0);
+      });
+      status = "AI_ADJUDICATION_SUCCESS";
+    } else if (slotPlan.selected_for_adjudication) {
+      fallbackReason = globalFailureReason || decision?.failure_reason ||
+        slotPlan.fallback_reason ||
+        "AI_ADJUDICATION_FAILED";
+      status = "AI_ADJUDICATION_FALLBACK";
+    }
+
+    return retained.map((candidate, candidateIndex) => ({
+      ...candidate,
+      ai_adjudication_status: status,
+      ai_adjudication_required: slotPlan.ai_adjudication_required === true,
+      ai_adjudication_selected: decision?.winner_candidate_id
+        ? candidateId(candidate) === decision.winner_candidate_id
+        : candidateIndex === 0,
+      ai_adjudication_confidence: decision?.payload?.confidence ?? null,
+      ai_adjudication_reason: decision?.payload?.short_reason || null,
+      ai_adjudication_evidence: decision?.payload || null,
+      ai_rerank_fallback: Boolean(fallbackReason),
+      ai_rerank_fallback_reason: fallbackReason,
+    }));
+  });
+}
+
+function buildSelectiveTrace({
+  plan,
+  settled = [],
+  batches = [],
+  startedAt = Date.now(),
+  budgetMs = DEFAULT_ADJUDICATION_TOTAL_BUDGET_MS,
+  concurrency = DEFAULT_SELECTION_CONCURRENCY,
+} = {}) {
+  const safeBatches = (Array.isArray(batches) ? batches : []).filter(Boolean);
+  const batchByGroup = new Map(safeBatches.map((batch) => [
+    batch.group_index,
+    batch,
+  ]));
+  const attemptedCount = safeBatches.filter((batch) =>
+    batch.timeout_ms != null &&
+    batch.reason_code !== "AI_ADJUDICATION_TOTAL_BUDGET_EXHAUSTED").length;
+  const successCount = safeBatches.filter((batch) =>
+    batch.status === "SUCCESS").length;
+  const failedBatches = safeBatches.filter((batch) =>
+    batch.status !== "SUCCESS");
+  const timeoutCount = failedBatches.filter((batch) =>
+    classifyRerankerFailure({
+      code: batch.reason_code,
+      message: batch.reason_code,
+    }).category === "TIMEOUT").length;
+  const summedModelLatencyMs = safeBatches.reduce((total, batch) =>
+    total + Math.max(0, Number(batch.model_request_ms) || 0), 0);
+  const wallClockMs = Math.max(0, Date.now() - startedAt);
+  const slots = (plan?.slots || []).map((slot) => {
+    const batch = batchByGroup.get(slot.group_index);
+    if (!slot.selected_for_adjudication) return Object.freeze({...slot});
+    if (batch?.status === "SUCCESS") {
+      return Object.freeze({
+        ...slot,
+        status: "AI_ADJUDICATION_SUCCESS",
+        winner_candidate_id: batch.winner_candidate_id,
+        confidence: batch.confidence,
+        fallback_reason: null,
+      });
+    }
+    return Object.freeze({
+      ...slot,
+      status: "AI_ADJUDICATION_FALLBACK",
+      fallback_reason: batch?.reason_code || "AI_ADJUDICATION_FAILED",
+    });
+  });
+  return Object.freeze({
+    mode: "SELECTIVE_AI_ADJUDICATION",
+    total_slot_count: plan?.total_slot_count || 0,
+    deterministic_slot_count:
+      Math.max(0, (plan?.total_slot_count || 0) - (plan?.selected_count || 0)),
+    unambiguous_slot_count: (plan?.slots || []).filter((slot) =>
+      !slot.ai_adjudication_required).length,
+    adjudication_required_count: plan?.ambiguity_count || 0,
+    adjudication_selected_count: plan?.selected_count || 0,
+    adjudication_attempted_count: attemptedCount,
+    success_count: successCount,
+    timeout_count: timeoutCount,
+    fallback_count: failedBatches.length,
+    batch_count: safeBatches.length,
+    successful_batch_count: successCount,
+    failed_batch_count: failedBatches.length,
+    concurrency: Math.min(
+      positiveInteger(concurrency, DEFAULT_SELECTION_CONCURRENCY),
+      DEFAULT_SELECTION_CONCURRENCY,
+    ),
+    margin: plan?.margin || DEFAULT_ADJUDICATION_MARGIN,
+    max_calls: plan?.max_calls || MAX_ADJUDICATION_CALLS,
+    total_budget_ms: budgetMs,
+    total_ai_latency_ms: wallClockMs,
+    summed_model_latency_ms: summedModelLatencyMs,
+    wall_clock_ms: wallClockMs,
+    slots: Object.freeze(slots),
+    batches: Object.freeze(safeBatches.map((batch) => Object.freeze({...batch}))),
+    settled_count: Array.isArray(settled) ? settled.length : 0,
+  });
+}
+
+function selectiveTraceWithoutCalls(
+  plan,
+  reason,
+  concurrency = DEFAULT_SELECTION_CONCURRENCY,
+) {
+  const batches = (plan?.slots || [])
+    .filter((slot) => slot.selected_for_adjudication)
+    .map((slot, batchIndex) => ({
+      batch_index: batchIndex,
+      group_index: slot.group_index,
+      look_id: slot.look_id,
+      slot: slot.slot,
+      candidate_count: 2,
+      status: "FAILED",
+      reason_code: reason,
+      category: "ENVIRONMENT_CONFIGURATION",
+      timeout_ms: null,
+      model_request_ms: 0,
+    }));
+  return buildSelectiveTrace({
+    plan,
+    settled: [],
+    batches,
+    startedAt: Date.now(),
+    budgetMs: 0,
+    concurrency,
+  });
+}
+
+function buildCachedSelectiveTrace(sourceTrace, products = []) {
+  const source = sourceTrace && typeof sourceTrace === "object"
+    ? sourceTrace : {};
+  const reusedWinnerIds = (Array.isArray(products) ? products : [])
+    .filter((product) => product.ai_adjudication_selected === true &&
+      product.ai_adjudication_status === "AI_ADJUDICATION_SUCCESS")
+    .map(candidateId)
+    .filter(Boolean);
+  return Object.freeze({
+    mode: "CACHED_SELECTIVE_AI_ADJUDICATION",
+    source_mode: source.mode || "SELECTIVE_AI_ADJUDICATION",
+    cached_reuse: true,
+    model_calls_this_request: 0,
+    total_slot_count: Number(source.total_slot_count || 0),
+    deterministic_slot_count: Number(source.deterministic_slot_count || 0),
+    unambiguous_slot_count: Number(source.unambiguous_slot_count || 0),
+    adjudication_required_count:
+      Number(source.adjudication_required_count || 0),
+    adjudication_selected_count:
+      Number(source.adjudication_selected_count || 0),
+    adjudication_attempted_count: 0,
+    success_count: 0,
+    timeout_count: 0,
+    fallback_count: 0,
+    reused_success_count: Number(source.success_count || 0),
+    reused_fallback_count: Number(source.fallback_count || 0),
+    reused_winner_candidate_ids: Object.freeze(reusedWinnerIds),
+    margin: source.margin || DEFAULT_ADJUDICATION_MARGIN,
+    max_calls: source.max_calls || MAX_ADJUDICATION_CALLS,
+    total_budget_ms: source.total_budget_ms || 0,
+    total_ai_latency_ms: 0,
+    summed_model_latency_ms: 0,
+    wall_clock_ms: 0,
+    slots: Object.freeze((Array.isArray(source.slots) ? source.slots : [])
+      .map((slot) => Object.freeze({...slot, cached_reuse: true}))),
+    batches: Object.freeze([]),
+  });
+}
+
+function candidateId(candidate = {}) {
+  return String(
+    candidate?.candidate_id || candidate?.product_id || candidate?.id || "",
+  ).trim();
 }
 
 function buildMessages(groups, context) {
@@ -1923,10 +2575,13 @@ function validateSelection(payload, groups, selectionLimit, context = {}) {
   return selectedByGroup.flatMap((products) => applyLabels(products));
 }
 
-function groupsBelowMinimum(groups, products) {
+function groupsBelowMinimum(groups, products, minimum = MIN_SLOT_SELECTION) {
   const selectedIds = new Set(products.map(productGroupKey));
   return groups.filter((group) => {
-    const required = Math.min(MIN_SLOT_SELECTION, group.candidates.length);
+    const required = Math.min(
+      positiveInteger(minimum, MIN_SLOT_SELECTION),
+      group.candidates.length,
+    );
     const selected = group.candidates.filter((product) =>
       selectedIds.has(productGroupKey(product))).length;
     return required > 0 && selected < required;
@@ -3095,6 +3750,14 @@ function buildCacheKey(groups, context) {
         price: product.price,
         brand: product.brand,
         brand_quality_score: product.brand_quality_score,
+        relevance_score: product.relevance_score,
+        body_strategy_match_score: product.body_strategy_match_score,
+        style_fit_score: product.style_fit_score,
+        aesthetic_target_assessment: product.aesthetic_target_assessment,
+        product_acceptance_result: product.product_acceptance_result,
+        product_acceptance_penalty: product.product_acceptance_penalty,
+        product_acceptance_evidence: product.product_acceptance_evidence,
+        candidate_enrichment: product.candidate_enrichment,
       })),
     })),
   });
@@ -3197,8 +3860,18 @@ function positiveInteger(value, fallback) {
   return Number.isInteger(number) && number > 0 ? number : fallback;
 }
 
+function positiveNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
 function cloneProducts(products) {
   return products.map((product) => ({...product}));
+}
+
+function cloneTrace(trace) {
+  if (!trace || typeof trace !== "object") return null;
+  return JSON.parse(JSON.stringify(trace));
 }
 
 module.exports = {
@@ -3209,6 +3882,8 @@ module.exports = {
   applyDiversityScores,
   applyLabels,
   brandQualityAssessment,
+  buildAdjudicationMessages,
+  buildDeterministicGroups,
   buildMessages,
   buildVisualBatch,
   buildVisualQualityMessages,
@@ -3218,5 +3893,6 @@ module.exports = {
   catalogAestheticAssessment,
   compositeProductScore,
   ruleFallback,
+  validateAdjudicationResponse,
   validateSelection,
 };

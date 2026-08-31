@@ -173,6 +173,11 @@ function readPositiveInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function readPositiveNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function readNonNegativeInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
@@ -417,6 +422,33 @@ const config = Object.freeze({
   productRerankCacheTtlMs: readPositiveInteger(
     process.env.PRODUCT_RERANK_CACHE_TTL_MS,
     15 * 60 * 1000,
+  ),
+  productRerankSelectiveAdjudication: readBoolean(
+    process.env.PRODUCT_RERANK_SELECTIVE_ADJUDICATION,
+    true,
+  ),
+  productRerankAdjudicationMargin: readPositiveNumber(
+    process.env.PRODUCT_RERANK_ADJUDICATION_MARGIN,
+    3,
+  ),
+  productRerankAdjudicationMaxCalls: Math.min(
+    readPositiveInteger(process.env.PRODUCT_RERANK_ADJUDICATION_MAX_CALLS, 3),
+    3,
+  ),
+  productRerankAdjudicationTimeoutMs: Math.min(
+    readPositiveInteger(process.env.PRODUCT_RERANK_ADJUDICATION_TIMEOUT_MS, 5_500),
+    6_000,
+  ),
+  productRerankAdjudicationTotalBudgetMs: Math.min(
+    readPositiveInteger(
+      process.env.PRODUCT_RERANK_ADJUDICATION_TOTAL_BUDGET_MS,
+      10_000,
+    ),
+    10_000,
+  ),
+  productRerankAdjudicationConcurrency: Math.min(
+    readPositiveInteger(process.env.PRODUCT_RERANK_ADJUDICATION_CONCURRENCY, 2),
+    2,
   ),
   productVisualMaxCandidatesPerSlot: Math.min(
     readPositiveInteger(process.env.PRODUCT_VISUAL_MAX_CANDIDATES_PER_SLOT, 10),
@@ -753,6 +785,12 @@ const productAestheticReranker = new ProductAestheticReranker({
   timeoutMs: config.productRerankTimeoutMs,
   cacheTtlMs: config.productRerankCacheTtlMs,
   visualEvaluationEnabled: false,
+  selectiveAdjudicationEnabled: config.productRerankSelectiveAdjudication,
+  adjudicationMargin: config.productRerankAdjudicationMargin,
+  adjudicationMaxCalls: config.productRerankAdjudicationMaxCalls,
+  adjudicationTimeoutMs: config.productRerankAdjudicationTimeoutMs,
+  adjudicationTotalBudgetMs: config.productRerankAdjudicationTotalBudgetMs,
+  selectionConcurrency: config.productRerankAdjudicationConcurrency,
 });
 const visualProductVerifier = new VisualProductVerifier({
   client: shouldUseMockAi(config, aiClient) ? null : aiClient,
