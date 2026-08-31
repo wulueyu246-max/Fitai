@@ -9,6 +9,7 @@ const {
   deterministicScore,
 } = require("../product_reranker_ambiguity");
 const {
+  buildDeterministicGroups,
   ProductAestheticReranker,
 } = require("../product_aesthetic_reranker");
 const {
@@ -196,6 +197,24 @@ function reranker(client, overrides = {}) {
 function selectionTrace(instance, requestId) {
   return instance.getTraceForRequest(requestId)?.selection;
 }
+
+test("an empty production slot with structured style metadata cannot abort deterministic grouping", () => {
+  const structuredStyle = Object.assign(Object.create(null), {
+    primary: "clean_fit",
+    source: "style_target",
+  });
+  const emptyStructuredGroup = group("look-empty", "bottom", [], {
+    style: structuredStyle,
+  });
+
+  const deterministicGroups = buildDeterministicGroups(
+    [emptyStructuredGroup],
+    3,
+    requestContext(),
+  );
+  assert.equal(deterministicGroups.length, 1);
+  assert.deepEqual(deterministicGroups[0].candidates, []);
+});
 
 test("A: a clear 88 vs 60 deterministic lead skips AI adjudication", async () => {
   const candidates = [candidate("clear-a", 88), candidate("clear-b", 60)];
