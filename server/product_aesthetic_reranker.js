@@ -2375,17 +2375,6 @@ function contextStyleSemantics(context = {}) {
     context.outfitPlan?.styleSemantics || {};
 }
 
-function firstScalarContextValue(...values) {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim()) return value.trim();
-    if ((typeof value === "number" || typeof value === "boolean") &&
-        String(value).trim()) {
-      return String(value).trim();
-    }
-  }
-  return "";
-}
-
 function contextAestheticTarget(context = {}, requirements = []) {
   const configured = context.aesthetic_target_profile ||
     context.aestheticTargetProfile ||
@@ -2395,29 +2384,16 @@ function contextAestheticTarget(context = {}, requirements = []) {
 
   const firstRequirement = (Array.isArray(requirements) ? requirements : [])
     .find((requirement) => requirement && typeof requirement === "object") || {};
-  const style = firstScalarContextValue(
-    context.style,
-    context.requested_style,
-    context.user_requirements?.style,
-    context.userRequirements?.style,
-    firstRequirement.style,
-  );
-  const scene = firstScalarContextValue(
-    context.scene,
-    context.occasion,
-    context.user_requirements?.scene,
-    context.userRequirements?.scene,
-    firstRequirement.scene,
-    firstRequirement.occasion,
-  );
-  const gender = firstScalarContextValue(
-    context.gender,
-    context.authoritative_gender,
-    context.user_profile?.gender,
-    context.userProfile?.gender,
-    firstRequirement.gender,
-  );
-  if (![style, scene, gender].some(Boolean)) {
+  const style = context.style || context.requested_style ||
+    context.user_requirements?.style || context.userRequirements?.style ||
+    firstRequirement.style;
+  const scene = context.scene || context.occasion ||
+    context.user_requirements?.scene || context.userRequirements?.scene ||
+    firstRequirement.scene || firstRequirement.occasion;
+  const gender = context.gender || context.authoritative_gender ||
+    context.user_profile?.gender || context.userProfile?.gender ||
+    firstRequirement.gender;
+  if (![style, scene, gender].some((value) => String(value || "").trim())) {
     return null;
   }
   return resolveAestheticTargetProfile({

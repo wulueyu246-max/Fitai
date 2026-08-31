@@ -73,15 +73,31 @@ function detectGroupAmbiguity(group = {}, {
   ).trim();
   const top = candidates[0] || null;
   const second = candidates[1] || null;
-  if (!top || !second) {
+  if (!top) {
+    return Object.freeze({
+      group_index: index,
+      look_id: lookId,
+      slot,
+      top_candidate_id: "",
+      second_candidate_id: "",
+      top_score: null,
+      second_score: null,
+      score_gap: null,
+      reasons: Object.freeze([]),
+      priority_score: 0,
+      ai_adjudication_required: false,
+      status: "NO_ELIGIBLE_CANDIDATES",
+    });
+  }
+  if (!second) {
     return Object.freeze({
       group_index: index,
       look_id: lookId,
       slot,
       top_candidate_id: candidateId(top),
-      second_candidate_id: candidateId(second),
+      second_candidate_id: "",
       top_score: deterministicScore(top),
-      second_score: deterministicScore(second),
+      second_score: null,
       score_gap: null,
       reasons: Object.freeze([]),
       priority_score: 0,

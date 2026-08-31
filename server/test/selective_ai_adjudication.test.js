@@ -9,7 +9,6 @@ const {
   deterministicScore,
 } = require("../product_reranker_ambiguity");
 const {
-  buildDeterministicGroups,
   ProductAestheticReranker,
 } = require("../product_aesthetic_reranker");
 const {
@@ -198,22 +197,33 @@ function selectionTrace(instance, requestId) {
   return instance.getTraceForRequest(requestId)?.selection;
 }
 
-test("an empty production slot with structured style metadata cannot abort deterministic grouping", () => {
-  const structuredStyle = Object.assign(Object.create(null), {
-    primary: "clean_fit",
-    source: "style_target",
-  });
-  const emptyStructuredGroup = group("look-empty", "bottom", [], {
-    style: structuredStyle,
-  });
+test("an empty production slot cannot abort selective adjudication", async () => {
+  const emptyGroup = group("look-empty", "bottom", []);
+  const emptyDetection = detectGroupAmbiguity(emptyGroup, {index: 1, margin: 3});
+  assert.equal(emptyDetection.status, "NO_ELIGIBLE_CANDIDATES");
+  assert.equal(emptyDetection.ai_adjudication_required, false);
 
-  const deterministicGroups = buildDeterministicGroups(
-    [emptyStructuredGroup],
-    3,
-    requestContext(),
-  );
-  assert.equal(deterministicGroups.length, 1);
-  assert.deepEqual(deterministicGroups[0].candidates, []);
+  const fake = fakeAdjudicationClient();
+  const instance = reranker(fake.client);
+  const products = await instance.rerank({
+    groups: [
+      group("look-structured", "top", [
+        candidate("structured-a", 84),
+        candidate("structured-b", 83),
+      ]),
+      emptyGroup,
+    ],
+    context: requestContext(),
+    requestId: "structured-style-contract",
+  });
+  const trace = instance.getTraceForRequest("structured-style-contract");
+
+  assert.equal(products.length > 0, true);
+  assert.notEqual(trace?.selection, null);
+  assert.equal(trace?.failure_reason, undefined);
+  assert.equal(trace.selection.adjudication_attempted_count, 1);
+  assert.equal(trace.selection.success_count, 1);
+  assert.equal(fake.state.calls.length, 1);
 });
 
 test("A: a clear 88 vs 60 deterministic lead skips AI adjudication", async () => {
