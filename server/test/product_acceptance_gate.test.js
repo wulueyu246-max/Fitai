@@ -667,7 +667,7 @@ function slotCandidates(lookId, category, count, {gender = "female"} = {}) {
   ));
 }
 
-test("Gate-pass underflow triggers bounded refill and new candidates cross the same Gate", async () => {
+test("whole-look quality failure triggers bounded refill and new candidates cross the same Gate", async () => {
   const lookId = "refill-look";
   const requirements = ["top", "bottom", "shoes"].map((category) =>
     requirement(category, {look_id: lookId, gender: "female", scene: "nightlife"}));
@@ -680,7 +680,7 @@ test("Gate-pass underflow triggers bounded refill and new candidates cross the s
       candidates: slotCandidates(
         lookId,
         item.category,
-        item.category === "top" ? 1 : 4,
+        item.category === "top" ? 20 : 4,
       ),
     })),
     context: context({
@@ -692,6 +692,9 @@ test("Gate-pass underflow triggers bounded refill and new candidates cross the s
     logger: {info() {}, warn() {}},
     refillCandidates: async ({requirement: item, round}) => {
       refillCalls.push({slot: item.category, round});
+      if (item.category !== "top") {
+        return {queries: [], candidates: []};
+      }
       return {
         queries: [{query: "女 上衣 设计感", page_no: 2}],
         candidates: [
@@ -723,19 +726,54 @@ test("Gate-pass underflow triggers bounded refill and new candidates cross the s
         })));
       },
     },
+    outfitPostProcessor: ({products}) => {
+      const hasRefill = products.some((item) =>
+        String(item.product_id).startsWith("refill-adult-top-"));
+      if (!hasRefill) {
+        return {
+          applied: true,
+          products: [],
+          looks: [],
+          rejected_looks: [{
+            look_id: lookId,
+            whole_look_quality: {status: "FAIL", reason: "LOW_QUALITY_LOOK"},
+          }],
+        };
+      }
+      const quality = {status: "PASS", overall_score: 80, reason_codes: []};
+      const selected = ["top", "bottom", "shoes"].map((category) =>
+        products.find((item) => item.category === category &&
+          (category !== "top" ||
+            String(item.product_id).startsWith("refill-adult-top-"))));
+      return {
+        applied: true,
+        products: selected.map((item) => ({...item,
+          whole_look_quality_status: "PASS", whole_look_quality: quality})),
+        looks: [{look_id: lookId, whole_look_quality: quality}],
+        rejected_looks: [],
+      };
+    },
   });
-  assert.deepEqual(refillCalls, [{slot: "top", round: 1}]);
-  assert.equal(rerankerGroupCounts.top, 4);
-  assert.equal(result.trace.refill_trigger_count, 1);
-  assert.equal(result.trace.refill_rounds[0].accepted_count, 3);
-  assert.equal(result.trace.refill_rounds[0].after_count, 4);
+  assert.deepEqual(refillCalls, [
+    {slot: "top", round: 1},
+    {slot: "bottom", round: 1},
+    {slot: "shoes", round: 1},
+  ]);
+  assert.equal(rerankerGroupCounts.top, 20);
+  assert.equal(result.trace.refill_trigger_count, 3);
+  const topRefill = result.trace.refill_rounds.find((entry) =>
+    entry.slot === "top");
+  assert.equal(topRefill.accepted_count, 3);
+  assert.equal(topRefill.after_count, 20);
+  assert.equal(result.products.some((item) =>
+    String(item.product_id).startsWith("refill-adult-top-")), true);
   assert.equal(result.trace.gate_reject.some((entry) =>
     entry.candidate_id === "refill-child-top"), true);
   assert.equal(result.products.some((item) =>
     item.product_id === "refill-child-top"), false);
 });
 
-test("refill exhaustion reports INSUFFICIENT_QUALITY_CANDIDATES without reviving rejects", async () => {
+test("refill exhaustion returns the remaining quality-valid Look without reviving rejects", async () => {
   const requirements = [];
   const groups = [];
   for (const lookId of ["complete-look", "insufficient-look"]) {
@@ -753,7 +791,7 @@ test("refill exhaustion reports INSUFFICIENT_QUALITY_CANDIDATES without reviving
       });
     }
   }
-  await assert.rejects(() => runSharedCandidatePipeline({
+  const result = await runSharedCandidatePipeline({
     requirements,
     groups,
     context: context({gender: "female", scene: "nightlife"}),
@@ -769,20 +807,38 @@ test("refill exhaustion reports INSUFFICIENT_QUALITY_CANDIDATES without reviving
           gender: "male",
         })] : [],
     }),
-    reranker: {async rerank() { throw new Error("must not reach reranker"); }},
-  }), (error) => {
-    assert.equal(error.code, "INSUFFICIENT_QUALITY_CANDIDATES");
-    const trace = error.details.trace;
-    const outcome = trace.slot_outcomes.find((entry) =>
-      entry.look_id === "insufficient-look" && entry.slot === "top");
-    assert.equal(outcome.status, "INSUFFICIENT_QUALITY_CANDIDATES");
-    assert.equal(trace.refill_rounds.length, 2);
-    assert.equal(trace.gate_reject.some((entry) =>
-      entry.candidate_id === "rejected-refill-child"), true);
-    assert.equal(trace.gate_pass.some((entry) =>
-      entry.candidate_id === "rejected-refill-child"), false);
-    return true;
+    reranker: {
+      async rerank({groups: rerankGroups}) {
+        return rerankGroups.flatMap((group) => group.candidates);
+      },
+    },
+    outfitPostProcessor: ({products}) => {
+      const quality = {status: "PASS", overall_score: 80, reason_codes: []};
+      const selected = products.filter((item) =>
+        item.look_id === "complete-look").filter((item, index, values) =>
+        values.findIndex((entry) => entry.category === item.category) === index);
+      return {
+        applied: true,
+        products: selected.map((item) => ({...item,
+          whole_look_quality_status: "PASS", whole_look_quality: quality})),
+        looks: [{look_id: "complete-look", whole_look_quality: quality}],
+        rejected_looks: [{
+          look_id: "insufficient-look",
+          whole_look_quality: {status: "FAIL", reason: "CANDIDATE_INCOMPLETE"},
+        }],
+      };
+    },
   });
+  const outcome = result.trace.slot_outcomes.find((entry) =>
+    entry.look_id === "insufficient-look" && entry.slot === "top");
+  assert.equal(outcome.status, "INSUFFICIENT_QUALITY_CANDIDATES");
+  assert.equal(result.trace.refill_rounds.length, 6);
+  assert.equal(result.trace.gate_reject.some((entry) =>
+    entry.candidate_id === "rejected-refill-child"), true);
+  assert.equal(result.trace.gate_pass.some((entry) =>
+    entry.candidate_id === "rejected-refill-child"), false);
+  assert.equal(result.products.every((item) =>
+    item.look_id === "complete-look"), true);
 });
 
 test("Auto provider forwards the child provider candidate trace", async () => {

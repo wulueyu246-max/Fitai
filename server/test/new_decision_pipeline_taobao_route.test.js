@@ -69,6 +69,46 @@ function fakeTaobaoResponse(query, callNumber) {
   };
 }
 
+function qualityPassingRoutePostProcessor({requirements, products}) {
+  const byLook = new Map();
+  for (const requirement of requirements) {
+    const entries = byLook.get(requirement.look_id) || [];
+    entries.push(requirement);
+    byLook.set(requirement.look_id, entries);
+  }
+  const composable = [...byLook.values()].some((entries) => {
+    const categories = new Set(entries.map((entry) => entry.category));
+    return categories.has("shoes") && (categories.has("dress") ||
+      (categories.has("bottom") &&
+        (categories.has("top") || categories.has("outerwear"))));
+  });
+  if (!composable) {
+    return {applied: false, products, looks: [], rejected_looks: []};
+  }
+  const quality = Object.freeze({status: "PASS", overall_score: 80,
+    reason_codes: Object.freeze([])});
+  const selected = [];
+  const looks = [];
+  for (const [lookId, entries] of byLook.entries()) {
+    const lookProducts = entries.map((requirement) => products.find((product) =>
+      product.look_id === lookId && product.category === requirement.category))
+      .filter(Boolean);
+    if (lookProducts.length !== entries.length) continue;
+    selected.push(...lookProducts.map((product) => ({...product,
+      body_strategy_match_score: 80,
+      outfit_strategy_score: 80,
+      outfit_target_profile_match_score: 80,
+      outfit_occasion_formality_score: 80,
+      outfit_strategy_breakdown: {occasion_fit: 80, style_coherence: 80},
+      whole_look_quality_status: "PASS",
+      whole_look_quality: quality,
+    })));
+    looks.push({look_id: lookId, whole_look_quality: quality,
+      selected_candidate_ids: lookProducts.map((product) => product.product_id)});
+  }
+  return {applied: true, products: selected, looks, rejected_looks: []};
+}
+
 test("/outfit executes the native Taobao decision pipeline without leaking credentials", async () => {
   assert.equal(config.newDecisionPipelineEnabled, true);
   assert.equal(productProvider.name, "taobao");
@@ -84,6 +124,8 @@ test("/outfit executes the native Taobao decision pipeline without leaking crede
     calls.push(query);
     return fakeTaobaoResponse(query, calls.length);
   };
+  const originalOutfitPostProcessor = productProvider.outfitPostProcessor;
+  productProvider.outfitPostProcessor = qualityPassingRoutePostProcessor;
 
   const originalConsole = {
     info: console.info,
@@ -175,6 +217,7 @@ test("/outfit executes the native Taobao decision pipeline without leaking crede
     assert.equal(/"pid"\s*:/u.test(serialized), false);
     assert.equal(/(?:\?|&)(?:pid|sign|token)=/iu.test(serialized), false);
   } finally {
+    productProvider.outfitPostProcessor = originalOutfitPostProcessor;
     await new Promise((resolve, reject) => server.close((error) =>
       error ? reject(error) : resolve()));
     console.info = originalConsole.info;

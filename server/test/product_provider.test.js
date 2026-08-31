@@ -1036,21 +1036,28 @@ test("one complete quality-valid Look is returned instead of forcing three", asy
       refillCalls += 1;
       return {queries: ["refill"], returned_count: 0, candidates: []};
     },
-    outfitPostProcessor: ({products}) => ({
-      applied: true,
-      products,
-      looks: [],
-    }),
+    outfitPostProcessor: ({products}) => {
+      const quality = Object.freeze({status: "PASS", score: 90});
+      return {
+        applied: true,
+        products: products.map((item) => ({
+          ...item,
+          whole_look_quality_status: "PASS",
+          whole_look_quality: quality,
+        })),
+        looks: [{look_id: "quality-look-1", whole_look_quality: quality}],
+        rejected_looks: [],
+      };
+    },
     logger: {info() {}, warn() {}, error() {}},
   });
 
-  assert.equal(refillCalls, 18);
+  assert.equal(refillCalls, 12);
   assert.equal(result.trace.requested_looks, 3);
-  assert.equal(result.trace.quality_valid_looks, 1);
-  assert.deepEqual([...result.trace.insufficient_quality_looks].sort(), [
-    "quality-look-2",
-    "quality-look-3",
-  ]);
+  assert.equal(result.trace.candidate_complete_looks, 1);
+  assert.equal(result.trace.whole_look_quality_valid_looks, 1);
+  assert.deepEqual(result.trace.rejected.map((entry) => entry.look_id).sort(),
+    ["quality-look-2", "quality-look-3"]);
   assert.equal(result.products.length, 3);
   assert.equal(result.products.every((product) =>
     product.look_id === "quality-look-1"), true);
@@ -1097,11 +1104,19 @@ test("one quality candidate per core slot may proceed after refill target misses
       candidates: [],
     }),
     maxRefillRounds: 1,
-    outfitPostProcessor: ({products}) => ({
-      applied: true,
-      products,
-      looks: [],
-    }),
+    outfitPostProcessor: ({products}) => {
+      const quality = Object.freeze({status: "PASS", score: 90});
+      return {
+        applied: true,
+        products: products.map((item) => ({
+          ...item,
+          whole_look_quality_status: "PASS",
+          whole_look_quality: quality,
+        })),
+        looks: [{look_id: "quality-look", whole_look_quality: quality}],
+        rejected_looks: [],
+      };
+    },
     logger: {info() {}, warn() {}, error() {}},
   });
 
@@ -1110,7 +1125,257 @@ test("one quality candidate per core slot may proceed after refill target misses
   assert.equal(result.trace.slot_outcomes.every((item) =>
     item.final_gate_pass === 1), true);
   assert.equal(result.trace.slot_outcomes.every((item) =>
-    item.status === "INSUFFICIENT_QUALITY_CANDIDATES"), true);
+    item.status === "READY"), true);
+});
+
+test("zero whole-look quality PASS returns INSUFFICIENT_QUALITY_LOOKS", async () => {
+  const requirements = ["top", "bottom", "shoes"].map((category) => ({
+    look_id: "quality-rejected-look",
+    concept_id: "quality-rejected-concept",
+    category,
+    gender: "female",
+    scene: "nightlife",
+    item_name: `年轻有设计感的${category}`,
+  }));
+  const groups = requirements.map((requirement) => ({
+    requirement,
+    candidates: [{
+      product_id: `rejected-${requirement.category}`,
+      source: "taobao",
+      title: `女士年轻设计感${requirement.category}`,
+      category: requirement.category,
+      gender: "female",
+      original_gender: "female",
+      price: 199,
+      image_url: `https://img.example.com/rejected-${requirement.category}.jpg`,
+      relevance_score: 90,
+    }],
+  }));
+
+  await assert.rejects(runSharedCandidatePipeline({
+    requirements,
+    groups,
+    context: {gender: "female", scene: "nightlife"},
+    reranker: {
+      async rerank({groups: rerankGroups}) {
+        return rerankGroups.flatMap((group) => group.candidates);
+      },
+      getTraceForRequest() { return null; },
+    },
+    outfitPostProcessor: () => ({
+      applied: true,
+      products: [],
+      looks: [],
+      rejected_looks: [{
+        look_id: "quality-rejected-look",
+        whole_look_quality: {status: "REJECT", reason: "LOW_COHERENCE"},
+      }],
+    }),
+    logger: {info() {}, warn() {}, error() {}},
+  }), (error) => error.code === "INSUFFICIENT_QUALITY_LOOKS" &&
+    error.details.trace.candidate_complete_looks === 1 &&
+    error.details.trace.whole_look_quality_valid_looks === 0 &&
+    error.details.trace.rejected[0].look_id === "quality-rejected-look");
+});
+
+test("whole-look adjudication can select a near-score quality-valid alternative", async () => {
+  const requirements = ["top", "bottom", "shoes"].map((category) => ({
+    look_id: "adjudicated-look",
+    concept_id: "adjudicated-concept",
+    category,
+    gender: "female",
+    scene: "nightlife",
+    item_name: `年轻设计感${category}`,
+  }));
+  const groups = requirements.map((requirement) => ({
+    requirement,
+    candidates: ["a", "b"].map((suffix) => ({
+      product_id: `${requirement.category}-${suffix}`,
+      source: "taobao",
+      is_mock: false,
+      title: `女士年轻设计感${requirement.category}${suffix}`,
+      category: requirement.category,
+      gender: "female",
+      original_gender: "female",
+      price: 199,
+      image_url: `https://img.example.com/${requirement.category}-${suffix}.jpg`,
+      relevance_score: 90,
+    })),
+  }));
+  const quality = Object.freeze({
+    status: "PASS",
+    overall_score: 80,
+    reason_codes: Object.freeze([]),
+  });
+  const ids = (suffix) => requirements.map((entry) =>
+    `${entry.category}-${suffix}`);
+  const result = await runSharedCandidatePipeline({
+    requirements,
+    groups,
+    context: {
+      gender: "female",
+      scene: "nightlife",
+      decision_context: {
+        user_truth: {gender: "female", scene: "nightlife"},
+        intent: {user_intent_brain: {
+          desired_impression: {value: ["年轻", "有设计感"]},
+          explicit_avoid: {value: ["太正式"]},
+        }},
+      },
+      outfit_plan: {looks: [{
+        look_id: "adjudicated-look",
+        concept_summary: "年轻、有设计感、不过度正式的夜间社交造型",
+        style_direction: "contemporary expressive",
+      }]},
+    },
+    reranker: {
+      async rerank({groups: rerankGroups}) {
+        return rerankGroups.flatMap((group) => group.candidates);
+      },
+      getTraceForRequest() { return null; },
+    },
+    outfitPostProcessor: ({products}) => ({
+      applied: true,
+      products: products.filter((product) => product.product_id.endsWith("-a"))
+        .map((product) => ({
+          ...product,
+          whole_look_quality_status: "PASS",
+          whole_look_quality: quality,
+        })),
+      looks: [{
+        look_id: "adjudicated-look",
+        look_candidate_id: ids("a").join("|"),
+        selected_candidate_ids: ids("a"),
+        final_score: 80,
+        whole_look_quality: quality,
+        quality_valid_alternatives: [
+          {
+            look_candidate_id: ids("a").join("|"),
+            candidate_ids: ids("a"),
+            adjusted_score: 80,
+            base_score: 80,
+            cross_look_duplicate_penalty: 0,
+            strategy_trace: {styleCoherence: 80},
+            whole_look_quality: quality,
+          },
+          {
+            look_candidate_id: ids("b").join("|"),
+            candidate_ids: ids("b"),
+            adjusted_score: 79,
+            base_score: 79,
+            cross_look_duplicate_penalty: 0,
+            strategy_trace: {styleCoherence: 90},
+            whole_look_quality: quality,
+          },
+        ],
+      }],
+      rejected_looks: [],
+    }),
+    wholeLookAIAdjudicator: {
+      createSession() { return {kind: "test-session"}; },
+      async adjudicate({candidates}) {
+        assert.equal(candidates[0].concept_summary,
+          "年轻、有设计感、不过度正式的夜间社交造型");
+        assert.equal(candidates[0].style_direction,
+          "contemporary expressive");
+        return {
+          winner_look_candidate_id: candidates[1].look_candidate_id,
+          winner: candidates[1],
+          source: "AI",
+          fallback: false,
+          trace: {
+            status: "AI_SUCCESS",
+            decision_mode: "AI",
+            winner_look_candidate_id: candidates[1].look_candidate_id,
+          },
+        };
+      },
+    },
+    logger: {info() {}, warn() {}, error() {}},
+  });
+
+  assert.deepEqual(result.products.map((product) => product.product_id).sort(),
+    ids("b").sort());
+  assert.equal(result.looks[0].look_candidate_id, ids("b").join("|"));
+  assert.equal(result.trace.whole_look_ai_adjudication[0].status, "AI_SUCCESS");
+  assert.equal(result.products.every((product) =>
+    product.whole_look_quality_status === "PASS"), true);
+});
+
+test("whole-look AI failure preserves the deterministic quality-valid winner", async () => {
+  const requirements = ["top", "bottom", "shoes"].map((category) => ({
+    look_id: "ai-fallback-look",
+    category,
+    gender: "female",
+    scene: "nightlife",
+    item_name: `年轻设计感${category}`,
+  }));
+  const groups = requirements.map((requirement) => ({
+    requirement,
+    candidates: [{
+      product_id: `fallback-${requirement.category}`,
+      source: "taobao",
+      is_mock: false,
+      title: `女士年轻设计感${requirement.category}`,
+      category: requirement.category,
+      gender: "female",
+      original_gender: "female",
+      price: 199,
+      image_url: `https://img.example.com/fallback-${requirement.category}.jpg`,
+      relevance_score: 90,
+    }],
+  }));
+  const quality = Object.freeze({status: "PASS", overall_score: 80,
+    reason_codes: Object.freeze([])});
+  const ids = requirements.map((entry) => `fallback-${entry.category}`);
+  const result = await runSharedCandidatePipeline({
+    requirements,
+    groups,
+    context: {gender: "female", scene: "nightlife"},
+    reranker: {
+      async rerank({groups: rerankGroups}) {
+        return rerankGroups.flatMap((group) => group.candidates);
+      },
+      getTraceForRequest() { return null; },
+    },
+    outfitPostProcessor: ({products}) => ({
+      applied: true,
+      products: products.map((product) => ({...product,
+        whole_look_quality_status: "PASS", whole_look_quality: quality})),
+      looks: [{
+        look_id: "ai-fallback-look",
+        look_candidate_id: ids.join("|"),
+        selected_candidate_ids: ids,
+        final_score: 80,
+        whole_look_quality: quality,
+        quality_valid_alternatives: [{
+          look_candidate_id: ids.join("|"),
+          candidate_ids: ids,
+          adjusted_score: 80,
+          base_score: 80,
+          cross_look_duplicate_penalty: 0,
+          strategy_trace: {styleCoherence: 80},
+          whole_look_quality: quality,
+        }],
+      }],
+      rejected_looks: [],
+    }),
+    wholeLookAIAdjudicator: {
+      createSession() { return {kind: "test-session"}; },
+      async adjudicate() {
+        const error = new Error("timeout");
+        error.code = "AI_ADJUDICATION_TIMEOUT";
+        throw error;
+      },
+    },
+    logger: {info() {}, warn() {}, error() {}},
+  });
+
+  assert.deepEqual(result.products.map((product) => product.product_id).sort(),
+    [...ids].sort());
+  assert.equal(result.looks.length, 1);
+  assert.equal(result.trace.whole_look_ai_adjudication[0].status,
+    "AI_FALLBACK");
 });
 
 test("new decision pipeline preserves twenty candidates even with legacy visual verifier configured", async () => {

@@ -678,3 +678,114 @@ test("a compatible near-miss can win when it materially improves outfit coherenc
   assert.equal(result.looks[0].strategy_trace.slotStyleFitSummary.slots
     .find((slot) => slot.slot === "shoes").score, 78);
 });
+
+test("strategy skips a rank-one critical failure and selects the first quality PASS", () => {
+  const lookId = "quality-rank-fallback";
+  const requirements = ["top", "bottom", "shoes"].map((category) =>
+    requirement(lookId, category, {style: "minimal"}));
+  const products = [
+    calibratedProduct(lookId, "top", "quality-top", "minimal", 94, {
+      gender: "female", color: "white",
+    }),
+    calibratedProduct(lookId, "bottom", "quality-bottom", "minimal", 94, {
+      gender: "female", color: "black",
+    }),
+    calibratedProduct(lookId, "shoes", "rank-one-severe-shoe", "minimal", 100, {
+      gender: "female",
+      title: "女士黑色轻量极简乐福鞋",
+      footwear_fit_score: 35,
+    }),
+    calibratedProduct(lookId, "shoes", "rank-two-safe-shoe", "clean_fit", 78, {
+      gender: "female",
+      title: "女士黑色轻量简洁乐福鞋",
+      footwear_fit_score: 82,
+    }),
+  ];
+  const result = composeOutfitCandidates({
+    requirements,
+    products,
+    context: {gender: "female", scene: "daily", style: "minimal"},
+  });
+  const report = result.looks[0];
+
+  assert.equal(report.combination_traces[0].whole_look_quality.status, "FAIL");
+  assert.ok(report.combination_traces[0].whole_look_quality.reason_codes
+    .includes("CRITICAL_DIMENSION_BELOW_FLOOR:FOOTWEAR"));
+  assert.deepEqual(idsFor(result, "shoes"), ["rank-two-safe-shoe"]);
+  assert.equal(report.whole_look_quality.status, "PASS");
+  assert.equal(report.quality_valid_alternatives[0].look_candidate_id,
+    report.look_candidate_id);
+  assert.ok(report.quality_valid_alternatives.length <= 3);
+});
+
+test("an all-failing look selects no products and reports LOW_QUALITY_LOOK", () => {
+  const lookId = "all-low-quality-look";
+  const requirements = ["top", "bottom", "shoes"].map((category) =>
+    requirement(lookId, category, {style: "minimal"}));
+  const products = requirements.map((item) => product(
+    lookId,
+    item.category,
+    `low-${item.category}`,
+    `女士简洁${item.category}`,
+    {
+      final_score: 36,
+      style_match_score: 36,
+      occasion_fit_score: 36,
+      quality_fit_score: 36,
+    },
+  ));
+  const result = composeOutfitCandidates({
+    requirements,
+    products,
+    context: {gender: "female", scene: "daily", style: "minimal"},
+  });
+
+  assert.deepEqual(result.products, []);
+  assert.deepEqual(result.looks, []);
+  assert.equal(result.rejected_looks.length, 1);
+  assert.equal(result.rejected_looks[0].look_id, lookId);
+  assert.ok(result.rejected_looks[0].reason_codes.includes("LOW_QUALITY_LOOK"));
+  assert.equal(result.rejected_looks[0].selected_candidate_ids.length, 0);
+  assert.equal(result.rejected_looks[0].rejected_combination_traces[0]
+    .whole_look_quality.status, "FAIL");
+});
+
+test("high-confidence acceptance mismatch cannot be hidden by a high aggregate score", () => {
+  const lookId = "acceptance-evidence-mismatch";
+  const requirements = ["top", "bottom", "shoes"].map((category) =>
+    requirement(lookId, category, {scene: "nightlife"}));
+  const products = requirements.map((item) => product(
+    lookId,
+    item.category,
+    `mismatch-${item.category}`,
+    `女士年轻时髦${item.category}`,
+    {
+      final_score: 95,
+      style_match_score: 95,
+      aesthetic_score: 95,
+      product_acceptance_evidence: item.category === "shoes" ? {
+        desired_impression_fit: {
+          value: "mismatch",
+          confidence: 0.95,
+          source: "product_text",
+          evidence: ["traditional mature expression"],
+        },
+      } : {},
+    },
+  ));
+  const result = composeOutfitCandidates({
+    requirements,
+    products,
+    context: {
+      gender: "female",
+      scene: "nightlife",
+      desired_impression: ["年轻", "有设计感"],
+    },
+  });
+
+  assert.equal(result.looks.length, 0);
+  assert.equal(result.rejected_looks.length, 1);
+  assert.equal(result.rejected_looks[0].whole_look_quality.reason_codes.some(
+    (reason) => reason ===
+      "CRITICAL_DIMENSION_BELOW_FLOOR:DESIRED_IMPRESSION"), true);
+});

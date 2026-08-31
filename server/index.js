@@ -69,6 +69,7 @@ const {
   normalizeProductRequirement,
 } = require("./product_relevance");
 const {ProductAestheticReranker} = require("./product_aesthetic_reranker");
+const {WholeLookAIAdjudicator} = require("./whole_look_ai_adjudicator");
 const {VisualProductVerifier} = require("./visual_product_verification");
 const {
   ShoppingAgentV1Error,
@@ -798,11 +799,20 @@ const visualProductVerifier = new VisualProductVerifier({
   maxCandidatesPerSlot: config.productVisualMaxCandidatesPerSlot,
   timeoutMs: config.productVisualVerificationTimeoutMs,
 });
+const wholeLookAIAdjudicator = new WholeLookAIAdjudicator({
+  client: shouldUseMockAi(config, aiClient) ? null : aiClient,
+  model: config.productRerankModel,
+  scoreGap: 8,
+  timeoutMs: 6_000,
+  totalBudgetMs: 10_000,
+  maxCalls: 2,
+});
 const productProvider = createProductProvider({
   environment: process.env,
   catalog: productCatalog,
   reranker: productAestheticReranker,
   visualVerifier: visualProductVerifier,
+  wholeLookAIAdjudicator,
 });
 const taobaoService = new TaobaoService({provider: productProvider});
 const shoppingAgentV1 = new TaobaoShoppingAgentV1({

@@ -19,6 +19,7 @@ const {
   NewDecisionPipelineError,
   comparePipelineOutcomes,
   executeNewDecisionPipeline,
+  validateFinalPortfolio,
 } = require("../new_decision_pipeline");
 
 const silentLogger = Object.freeze({info() {}, warn() {}, error() {}});
@@ -186,8 +187,43 @@ function marketContrastCatalog() {
   };
 }
 
-function provider(catalog) {
-  return new MockProductProvider({catalog, logger: silentLogger});
+function qualityPassingTestPostProcessor({requirements, products}) {
+  const quality = Object.freeze({status: "PASS", overall_score: 80,
+    reason_codes: Object.freeze([])});
+  const selected = [];
+  const looks = [];
+  const used = new Set();
+  for (const lookId of [...new Set(requirements.map((item) => item.look_id))]) {
+    const lookProducts = [];
+    for (const requirement of requirements.filter((item) =>
+      item.look_id === lookId)) {
+      const candidate = products.filter((item) => item.look_id === lookId &&
+        item.category === requirement.category &&
+        !used.has(productId(item))).sort((left, right) =>
+        Number(right.market_soft_match_score || 0) -
+        Number(left.market_soft_match_score || 0))[0];
+      if (!candidate) break;
+      lookProducts.push(candidate);
+      used.add(productId(candidate));
+    }
+    if (lookProducts.length !== requirements.filter((item) =>
+      item.look_id === lookId).length) continue;
+    selected.push(...lookProducts.map((item) => ({...item,
+      outfit_strategy_score: 80,
+      outfit_occasion_formality_score: 80,
+      outfit_target_profile_match_score: 80,
+      outfit_strategy_breakdown: {occasion_fit: 80, style_coherence: 80},
+      whole_look_quality_status: "PASS",
+      whole_look_quality: quality,
+    })));
+    looks.push({look_id: lookId, whole_look_quality: quality,
+      selected_candidate_ids: lookProducts.map(productId)});
+  }
+  return {applied: true, products: selected, looks, rejected_looks: []};
+}
+
+function provider(catalog, options = {}) {
+  return new MockProductProvider({catalog, logger: silentLogger, ...options});
 }
 
 test("feature flag defaults to the legacy path", () => {
@@ -320,12 +356,16 @@ test("D: niche preference changes market evidence and final product selection", 
   const catalog = marketContrastCatalog();
   const currentResult = await executeNewDecisionPipeline({
     decisionContext: current,
-    productProvider: provider(catalog),
+    productProvider: provider(catalog, {
+      outfitPostProcessor: qualityPassingTestPostProcessor,
+    }),
     logger: silentLogger,
   });
   const nicheResult = await executeNewDecisionPipeline({
     decisionContext: niche,
-    productProvider: provider(catalog),
+    productProvider: provider(catalog, {
+      outfitPostProcessor: qualityPassingTestPostProcessor,
+    }),
     logger: silentLogger,
   });
   const currentIds = currentResult.looks.flatMap((look) =>
@@ -408,7 +448,7 @@ test("requested three Looks returns two quality-valid native Looks without forci
   );
   assert.equal(
     result.decision_pipeline.portfolio_validation.fulfillment_reason,
-    "INSUFFICIENT_QUALITY_CANDIDATES",
+    "INSUFFICIENT_QUALITY_LOOKS",
   );
   assert.equal(
     result.decision_pipeline.portfolio_validation.requested_look_count,
@@ -459,7 +499,7 @@ test("requested three Looks returns one quality-valid native Look instead of low
   );
   assert.equal(
     result.decision_pipeline.portfolio_validation.fulfillment_reason,
-    "INSUFFICIENT_QUALITY_CANDIDATES",
+    "INSUFFICIENT_QUALITY_LOOKS",
   );
   assert.equal(
     result.decision_pipeline.portfolio_validation.quality_valid_look_count,
@@ -469,6 +509,68 @@ test("requested three Looks returns one quality-valid native Look instead of low
     result.decision_pipeline.portfolio_validation.unfulfilled_look_ids.length,
     2,
   );
+  assert.equal(result.looks.every((look) => look.selected_products.every((item) =>
+    item.whole_look_quality_status === "PASS")), true);
+});
+
+test("zero whole-look quality PASS fails closed without entering Optional", async () => {
+  const decisionContext = context({
+    requestId: "acacacac-acac-4cac-8cac-acacacacacac",
+  });
+  const baseProvider = provider(portfolioCatalog());
+  let providerCalls = 0;
+  const unprovenProvider = {
+    async recommendForQueries(requirements, providerInput) {
+      providerCalls += 1;
+      const products = await baseProvider.recommendForQueries(
+        requirements,
+        providerInput,
+      );
+      return products.map(({whole_look_quality: _quality,
+        whole_look_quality_status: _status, ...item}) => item);
+    },
+    get lastPipelineTrace() {
+      return baseProvider.lastPipelineTrace;
+    },
+  };
+
+  await assert.rejects(
+    executeNewDecisionPipeline({
+      decisionContext,
+      productProvider: unprovenProvider,
+      logger: silentLogger,
+    }),
+    (error) => error instanceof NewDecisionPipelineError &&
+      error.code === "INSUFFICIENT_QUALITY_LOOKS" &&
+      error.stage === "PORTFOLIO_VALIDATOR" &&
+      error.fallbackAllowed === false,
+  );
+  assert.equal(providerCalls, 1);
+});
+
+test("Portfolio rejects a complete Look that lacks whole-look quality proof", async () => {
+  const decisionContext = context({
+    requestId: "adadadad-adad-4dad-8dad-adadadadadad",
+  });
+  const compiled = compileLookConceptPortfolio(decisionContext);
+  const baseProvider = provider(portfolioCatalog());
+  const products = await baseProvider.recommendForQueries(
+    compiled.requirements,
+    {gender: "female", scene: "nightlife"},
+  );
+  const unproven = products.map(({whole_look_quality: _quality,
+    whole_look_quality_status: _status, ...item}) => item);
+
+  const validation = validateFinalPortfolio({
+    decisionContext,
+    compiled,
+    products: unproven,
+  });
+
+  assert.equal(validation.status, "FAIL");
+  assert.equal(validation.quality_valid_look_count, 0);
+  assert.equal(validation.looks.length, 0);
+  assert.equal(validation.unfulfilled_look_ids.length, compiled.looks.length);
 });
 
 test("provider/contract failure is explicit and eligible for visible legacy fallback", async () => {

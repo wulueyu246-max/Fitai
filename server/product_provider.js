@@ -152,14 +152,27 @@ function postProcessOutfitCandidates({
     });
   }
 
+  const qualityPassLooks = (Array.isArray(composition?.looks)
+    ? composition.looks : []).filter((look) =>
+    look?.whole_look_quality?.status === "PASS");
+  const qualityByLook = new Map(qualityPassLooks.map((look) => [
+    String(look.look_id || ""),
+    look.whole_look_quality,
+  ]));
   const selectedProducts = Array.isArray(composition?.products)
-    ? composition.products.map(annotateOutfitStrategySelection)
+    ? composition.products.map((product) => annotateOutfitStrategySelection(
+      product,
+      qualityByLook.get(String(product?.look_id || "")),
+    )).filter((product) => product.whole_look_quality_status === "PASS")
     : [];
   const selectedKeys = new Set(selectedProducts.map(outfitSelectionKey));
+  const qualityPassLookIds = new Set(qualityPassLooks.map((look) =>
+    String(look.look_id || "")));
   const missingSelections = expectedSelections.filter((selection) =>
+    qualityPassLookIds.has(selection.lookId) &&
     !selectedKeys.has(selection.key));
-  if (composition?.applied !== true || selectedProducts.length === 0 ||
-      missingSelections.length > 0) {
+  if (composition?.applied !== true || missingSelections.length > 0 ||
+      (qualityPassLooks.length > 0 && selectedProducts.length === 0)) {
     logger.error?.("outfit_aesthetic_strategy_incomplete", {
       request_id: context.requestId || undefined,
       provider,
@@ -184,6 +197,7 @@ function postProcessOutfitCandidates({
 
   const result = Object.freeze({
     ...composition,
+    looks: Object.freeze(qualityPassLooks),
     products: Object.freeze(selectedProducts),
   });
   logger.info?.("outfit_aesthetic_strategy_summary", {
@@ -192,6 +206,8 @@ function postProcessOutfitCandidates({
     version: result.version,
     look_count: result.looks.length,
     selected_count: result.products.length,
+    rejected_look_count: Array.isArray(result.rejected_looks)
+      ? result.rejected_looks.length : 0,
     looks: result.looks.map((look) => ({
       look_id: look.look_id,
       final_score: look.final_score,
@@ -218,6 +234,7 @@ async function runSharedCandidatePipeline({
   gatePassTargetPerCoreSlot = DEFAULT_GATE_PASS_TARGET_PER_CORE_SLOT,
   maxRefillRounds = DEFAULT_MAX_REFILL_ROUNDS,
   minimumCompleteLooks = DEFAULT_MINIMUM_COMPLETE_LOOKS,
+  wholeLookAIAdjudicator = null,
 } = {}) {
   const safeRequirements = (Array.isArray(requirements) ? requirements : [])
     .map((requirement) => normalizeProductRequirement(
@@ -274,8 +291,10 @@ async function runSharedCandidatePipeline({
     slot_outcomes: [],
     requested_looks: [...new Set(safeRequirements.map((requirement) =>
       String(requirement?.look_id || "")).filter(Boolean))].length,
-    quality_valid_looks: 0,
-    insufficient_quality_looks: [],
+    candidate_complete_looks: 0,
+    whole_look_quality_valid_looks: 0,
+    rejected: [],
+    whole_look_ai_adjudication: [],
     query_plans: safeRequirements.map((requirement) => Object.freeze({
       look_id: requirement.look_id,
       concept_id: requirement.concept_id,
@@ -298,6 +317,7 @@ async function runSharedCandidatePipeline({
     requirement,
     candidates: gateCandidates,
   }));
+  const hasComposableContract = expectedOutfitSelections(safeRequirements).length > 0;
   const configuredGateTarget = Math.max(1, Math.min(
     DEFAULT_STRATEGY_CANDIDATE_BREADTH,
     positiveInteger(
@@ -307,65 +327,172 @@ async function runSharedCandidatePipeline({
   ));
   const effectiveGateTarget = typeof refillCandidates === "function"
     ? configuredGateTarget : 1;
-
-  const refillResult = await refillGateDeficientGroups({
-    groups: gateGroups,
-    context,
-    trace,
-    refillCandidates,
-    targetPerCoreSlot: effectiveGateTarget,
-    maxRounds: Math.min(
-      DEFAULT_MAX_REFILL_ROUNDS,
-      positiveInteger(maxRefillRounds, DEFAULT_MAX_REFILL_ROUNDS),
-    ),
+  const activeReranker = reranker || new ProductAestheticReranker({
+    client: null,
+    visualEvaluationEnabled: false,
+    logger,
   });
-  gateGroups = refillResult.groups;
-  trace.slot_outcomes = refillResult.slotOutcomes;
+  if (!hasComposableContract) {
+    const refillResult = await refillGateDeficientGroups({
+      groups: gateGroups,
+      context,
+      trace,
+      refillCandidates,
+      targetPerCoreSlot: effectiveGateTarget,
+      maxRounds: Math.min(
+        DEFAULT_MAX_REFILL_ROUNDS,
+        positiveInteger(maxRefillRounds, DEFAULT_MAX_REFILL_ROUNDS),
+      ),
+    });
+    gateGroups = refillResult.groups;
+    trace.slot_outcomes = refillResult.slotOutcomes;
+    return finalizeNonComposableCandidatePipeline({
+      requirements: safeRequirements,
+      gateGroups,
+      context,
+      provider,
+      logger,
+      trace,
+      activeReranker,
+      outfitPostProcessor,
+      rerankTimeoutMs,
+      deadlineAt,
+    });
+  }
 
-  const hasComposableContract = expectedOutfitSelections(safeRequirements).length > 0;
-  const completeLookIds = hasComposableContract
-    ? completeLookIdsForGroups(
+  // Whole-look refill is quality-triggered: first evaluate every complete
+  // combination already available, then retrieve only for rejected Looks.
+  const requestedLookIds = new Set(safeRequirements.map((requirement) =>
+    String(requirement?.look_id || "")).filter(Boolean));
+  const seenByGroup = buildSeenCandidatesByGroup(trace.raw_candidates);
+  const boundedRefillRounds = Math.min(
+    DEFAULT_MAX_REFILL_ROUNDS,
+    positiveInteger(maxRefillRounds, DEFAULT_MAX_REFILL_ROUNDS),
+  );
+  let selection = emptyWholeLookSelection();
+  for (let round = 0; round <= boundedRefillRounds; round += 1) {
+    const completeLookIds = completeLookIdsForGroups(
       safeRequirements,
       gateGroups,
       1,
-    )
-    : new Set(safeRequirements.map((requirement) => String(
-      requirement?.look_id || "",
-    )).filter(Boolean));
-  trace.quality_valid_looks = hasComposableContract
-    ? completeLookIds.size : trace.requested_looks;
-  trace.insufficient_quality_looks = hasComposableContract
-    ? [...new Set(safeRequirements
-      .map((requirement) => String(requirement?.look_id || ""))
-      .filter((lookId) => lookId && !completeLookIds.has(lookId)))]
-    : [];
-  if (hasComposableContract) {
-    const requiredCompleteLooks = Math.min(
-      trace.requested_looks || DEFAULT_MINIMUM_COMPLETE_LOOKS,
-      positiveInteger(minimumCompleteLooks, DEFAULT_MINIMUM_COMPLETE_LOOKS),
     );
-    if (completeLookIds.size < requiredCompleteLooks) {
+    trace.candidate_complete_looks = completeLookIds.size;
+    const activeRequirements = safeRequirements.filter((requirement) =>
+      completeLookIds.has(String(requirement?.look_id || "")));
+    const activeGroups = gateGroups.filter((group) => completeLookIds.has(String(
+      group?.requirement?.look_id || "",
+    )));
+    selection = activeGroups.length > 0
+      ? await executeCandidateSelectionAttempt({
+        requirements: activeRequirements,
+        gateGroups: activeGroups,
+        context,
+        provider,
+        logger,
+        trace,
+        activeReranker,
+        outfitPostProcessor,
+        rerankTimeoutMs,
+        deadlineAt,
+      })
+      : emptyWholeLookSelection();
+
+    const passLookIds = new Set(selection.looks.map((look) =>
+      String(look?.look_id || "")).filter(Boolean));
+    trace.whole_look_quality_valid_looks = passLookIds.size;
+    const rejectedLookIds = new Set([...requestedLookIds].filter((lookId) =>
+      !passLookIds.has(lookId)));
+    trace.rejected = buildRejectedLookTrace({
+      requestedLookIds,
+      completeLookIds,
+      composition: selection,
+    });
+    if (rejectedLookIds.size === 0 || round === boundedRefillRounds ||
+        typeof refillCandidates !== "function") break;
+    gateGroups = await refillWholeLookFailures({
+      groups: gateGroups,
+      rejectedLookIds,
+      context,
+      trace,
+      refillCandidates,
+      round: round + 1,
+      seenByGroup,
+    });
+  }
+
+  trace.slot_outcomes = buildSlotOutcomes(gateGroups, 1, trace);
+  if (selection.looks.length < 1) {
+    emitCandidatePipelineTrace(logger, trace);
+    throw new ProductProviderError("没有通过整套质量判定的穿搭", {
+      status: 422,
+      code: "INSUFFICIENT_QUALITY_LOOKS",
+      details: {trace: freezeCandidatePipelineTrace(trace)},
+    });
+  }
+  if (wholeLookAIAdjudicator?.adjudicate) {
+    selection = await applyWholeLookAIAdjudication({
+      composition: selection,
+      candidatePool: selection.candidate_pool,
+      context,
+      adjudicator: wholeLookAIAdjudicator,
+      logger,
+      requestId: trace.request_id,
+    });
+    trace.whole_look_ai_adjudication = selection.whole_look_ai_adjudication || [];
+    trace.whole_look_quality_valid_looks = selection.looks.length;
+    trace.rejected = buildRejectedLookTrace({
+      requestedLookIds,
+      completeLookIds: completeLookIdsForGroups(safeRequirements, gateGroups, 1),
+      composition: selection,
+    });
+    if (selection.looks.length === 0) {
       emitCandidatePipelineTrace(logger, trace);
-      throw new ProductProviderError("Gate 后没有足够候选组成高质量穿搭", {
+      throw new ProductProviderError("整套裁决后没有质量合格穿搭", {
         status: 422,
-        code: "INSUFFICIENT_QUALITY_CANDIDATES",
+        code: "INSUFFICIENT_QUALITY_LOOKS",
         details: {trace: freezeCandidatePipelineTrace(trace)},
       });
     }
   }
-  const activeRequirements = hasComposableContract
-    ? safeRequirements.filter((requirement) => completeLookIds.has(String(
-      requirement?.look_id || "",
-    )))
-    : safeRequirements;
-  if (hasComposableContract) {
-    gateGroups = gateGroups.filter((group) => completeLookIds.has(String(
-      group?.requirement?.look_id || "",
-    )));
-  }
+  trace.strategy_selected = selection.products.map((product) =>
+    candidateTraceRecord(product, findRequirementForProduct(
+      safeRequirements,
+      product,
+    ), "STRATEGY_SELECTED"));
+  emitCandidatePipelineTrace(logger, trace);
+  const {candidate_pool: _candidatePool, ...publicSelection} = selection;
+  return Object.freeze({
+    ...publicSelection,
+    products: Object.freeze(selection.products),
+    looks: Object.freeze(selection.looks),
+    rejected_looks: Object.freeze(selection.rejected_looks || []),
+    trace: freezeCandidatePipelineTrace(trace),
+  });
+}
 
-  const gateCandidatesFlat = gateGroups.flatMap((group) => group.candidates);
-  if (gateCandidatesFlat.length === 0) {
+function emptyWholeLookSelection() {
+  return {
+    applied: true,
+    products: [],
+    looks: [],
+    rejected_looks: [],
+    version: null,
+  };
+}
+
+async function finalizeNonComposableCandidatePipeline({
+  requirements,
+  gateGroups,
+  context,
+  provider,
+  logger,
+  trace,
+  activeReranker,
+  outfitPostProcessor,
+  rerankTimeoutMs,
+  deadlineAt,
+}) {
+  if (gateGroups.flatMap((group) => group.candidates).length === 0) {
     emitCandidatePipelineTrace(logger, trace);
     return Object.freeze({
       applied: false,
@@ -375,12 +502,43 @@ async function runSharedCandidatePipeline({
       trace: freezeCandidatePipelineTrace(trace),
     });
   }
-
-  const activeReranker = reranker || new ProductAestheticReranker({
-    client: null,
-    visualEvaluationEnabled: false,
+  const result = await executeCandidateSelectionAttempt({
+    requirements,
+    gateGroups,
+    context,
+    provider,
     logger,
+    trace,
+    activeReranker,
+    outfitPostProcessor,
+    rerankTimeoutMs,
+    deadlineAt,
+    requireWholeLookQuality: false,
   });
+  emitCandidatePipelineTrace(logger, trace);
+  return Object.freeze({
+    ...result,
+    products: Object.freeze(result.products),
+    trace: freezeCandidatePipelineTrace(trace),
+  });
+}
+
+async function executeCandidateSelectionAttempt({
+  requirements,
+  gateGroups,
+  context,
+  provider,
+  logger,
+  trace,
+  activeReranker,
+  outfitPostProcessor,
+  rerankTimeoutMs,
+  deadlineAt,
+  requireWholeLookQuality = true,
+  wholeLookAIAdjudicator = null,
+}) {
+  const gateCandidatesFlat = gateGroups.flatMap((group) => group.candidates);
+  if (gateCandidatesFlat.length === 0) return emptyWholeLookSelection();
   trace.reranker_executed = true;
   let reranked;
   try {
@@ -401,17 +559,21 @@ async function runSharedCandidatePipeline({
     }), outerTimeoutMs, "AI_RERANK_TIMEOUT");
     trace.reranker_status = reranked.some((product) =>
       product?.ai_rerank_fallback === true) ? "FALLBACK" : "SUCCESS";
-    trace.reranker_fallback_reasons = [...new Set(
-      reranked.map((product) => product?.ai_rerank_fallback_reason)
+    trace.reranker_fallback_reasons = [...new Set([
+      ...(trace.reranker_fallback_reasons || []),
+      ...reranked.map((product) => product?.ai_rerank_fallback_reason)
         .filter(Boolean),
-    )];
+    ])];
     trace.reranker_timing = activeReranker.getTraceForRequest?.(
       trace.request_id || "",
     ) || activeReranker.getStats?.().last_trace || null;
   } catch (error) {
     trace.reranker_status = "FAILED_FALLBACK";
     trace.reranker_fallback_reason = safeProviderCode(error);
-    trace.reranker_fallback_reasons = [trace.reranker_fallback_reason];
+    trace.reranker_fallback_reasons = [...new Set([
+      ...(trace.reranker_fallback_reasons || []),
+      trace.reranker_fallback_reason,
+    ])];
     trace.reranker_timing = activeReranker.getTraceForRequest?.(
       trace.request_id || "",
     ) || activeReranker.getStats?.().last_trace || null;
@@ -431,29 +593,22 @@ async function runSharedCandidatePipeline({
   ]));
   const rerankerProducts = limitProductsPerRequirement(
     (Array.isArray(reranked) ? reranked : [])
-    .map((product) => restoreCandidateContract(product, sourceCandidates))
+      .map((product) => restoreCandidateContract(product, sourceCandidates))
       .filter(Boolean),
-    activeRequirements,
+    requirements,
     DEFAULT_STRATEGY_CANDIDATE_BREADTH,
   );
   trace.reranker_keep.push(...rerankerProducts.map((product) =>
     candidateTraceRecord(product, findRequirementForProduct(
-      activeRequirements,
+      requirements,
       product,
     ), "RERANKER_KEEP")));
-  if (rerankerProducts.length === 0) {
-    emitCandidatePipelineTrace(logger, trace);
-    throw new ProductProviderError("商品审美复选后没有可用商品", {
-      status: 422,
-      code: "PRODUCT_RERANKER_EMPTY",
-      details: {trace},
-    });
-  }
+  if (rerankerProducts.length === 0) return emptyWholeLookSelection();
 
   let composition;
   try {
     composition = outfitPostProcessor({
-      requirements: activeRequirements,
+      requirements,
       products: rerankerProducts,
       context,
       provider,
@@ -464,19 +619,425 @@ async function runSharedCandidatePipeline({
     throw error;
   }
   trace.strategy_executed = composition?.applied === true;
-  const selectedProducts = (Array.isArray(composition?.products)
-    ? composition.products : []).map((product) =>
+  const adjudicated = requireWholeLookQuality
+    ? normalizeQualityPassingComposition(composition)
+    : composition;
+  const selectedProducts = (Array.isArray(adjudicated?.products)
+    ? adjudicated.products : []).map((product) =>
     restoreCandidateContract(product, sourceCandidates) || product);
-  trace.strategy_selected.push(...selectedProducts.map((product) =>
-    candidateTraceRecord(product, findRequirementForProduct(
-      activeRequirements,
-      product,
-    ), "STRATEGY_SELECTED")));
-  emitCandidatePipelineTrace(logger, trace);
-  return Object.freeze({
+  return {
+    ...adjudicated,
+    products: selectedProducts,
+    looks: Array.isArray(adjudicated?.looks) ? adjudicated.looks : [],
+    rejected_looks: Array.isArray(adjudicated?.rejected_looks)
+      ? adjudicated.rejected_looks : [],
+    candidate_pool: rerankerProducts,
+  };
+}
+
+function normalizeQualityPassingComposition(composition) {
+  const looks = (Array.isArray(composition?.looks) ? composition.looks : [])
+    .filter((look) => look?.whole_look_quality?.status === "PASS");
+  const rejected = [
+    ...(Array.isArray(composition?.rejected_looks)
+      ? composition.rejected_looks : []),
+    ...(Array.isArray(composition?.looks) ? composition.looks : [])
+      .filter((look) => look?.whole_look_quality?.status !== "PASS"),
+  ];
+  const acceptedById = new Map(looks.map((look) => [
+    String(look.look_id || ""),
+    look.whole_look_quality,
+  ]));
+  return {
     ...composition,
-    products: Object.freeze(selectedProducts),
-    trace: freezeCandidatePipelineTrace(trace),
+    looks,
+    rejected_looks: rejected,
+    products: (composition?.products || []).filter((product) =>
+      acceptedById.has(String(product?.look_id || ""))).map((product) => ({
+      ...product,
+      whole_look_quality_status: "PASS",
+      whole_look_quality: acceptedById.get(String(product.look_id || "")),
+    })),
+  };
+}
+
+async function applyWholeLookAIAdjudication({
+  composition,
+  candidatePool = [],
+  context = {},
+  adjudicator,
+  logger = console,
+  requestId = null,
+}) {
+  const looks = Array.isArray(composition?.looks) ? composition.looks : [];
+  if (looks.length === 0 || !adjudicator?.adjudicate) return composition;
+  const session = typeof adjudicator.createSession === "function"
+    ? adjudicator.createSession() : null;
+  const preparedByLook = looks.map((look) => ({
+    look,
+    candidates: prepareWholeLookAdjudicationCandidates(
+      look,
+      candidatePool,
+      context,
+    ),
+  }));
+  const decisions = await Promise.all(preparedByLook.map(async ({look, candidates}) => {
+    try {
+      const decision = await adjudicator.adjudicate({
+        candidates,
+        context,
+        requestId,
+        lookId: look.look_id,
+        session,
+      });
+      return {look, candidates, decision};
+    } catch (error) {
+      logger.warn?.("whole_look_ai_adjudication_failed", {
+        request_id: requestId || undefined,
+        look_id: look.look_id || undefined,
+        error_code: safeWholeLookAdjudicationCode(error),
+      });
+      return {
+        look,
+        candidates,
+        decision: {
+          winner_look_candidate_id: candidates[0]?.look_candidate_id || null,
+          winner: candidates[0] || null,
+          source: "DETERMINISTIC",
+          fallback: true,
+          fallback_reason: safeWholeLookAdjudicationCode(error),
+          trace: Object.freeze({
+            version: "whole_look_ai_adjudicator.v1",
+            look_id: look.look_id || null,
+            status: "AI_FALLBACK",
+            decision_mode: "DETERMINISTIC_FALLBACK",
+            fallback_reason: safeWholeLookAdjudicationCode(error),
+          }),
+        },
+      };
+    }
+  }));
+
+  const selectedProducts = [];
+  const selectedLooks = [];
+  const traces = [];
+  const usedProductKeys = new Set();
+  for (const {look, candidates, decision} of decisions) {
+    let winner = candidates.find((candidate) =>
+      candidate.look_candidate_id === decision?.winner_look_candidate_id) ||
+      candidates[0] || null;
+    let duplicateGuardApplied = false;
+    if (winner && candidateRepeatsUsedProduct(winner, usedProductKeys)) {
+      const nonDuplicate = candidates.find((candidate) =>
+        !candidateRepeatsUsedProduct(candidate, usedProductKeys));
+      if (nonDuplicate) {
+        winner = nonDuplicate;
+        duplicateGuardApplied = true;
+      }
+    }
+    const deterministicProducts = (composition.products || []).filter((product) =>
+      String(product?.look_id || "") === String(look?.look_id || ""));
+    const products = winner?.whole_look_quality?.status === "PASS"
+      ? materializeWholeLookWinnerProducts(winner, look)
+      : deterministicProducts;
+    if (products.length === 0 || look?.whole_look_quality?.status !== "PASS") {
+      continue;
+    }
+    products.forEach((product) => {
+      const identity = productIdentity(product);
+      if (identity) usedProductKeys.add(identity);
+      selectedProducts.push(product);
+    });
+    const adjudicationTrace = Object.freeze({
+      ...(decision?.trace || {}),
+      status: winner ? decision?.trace?.status : "AI_FALLBACK",
+      decision_mode: winner
+        ? decision?.trace?.decision_mode : "DETERMINISTIC_FALLBACK",
+      fallback_reason: winner
+        ? decision?.trace?.fallback_reason : "AI_CANDIDATE_PREPARATION_FAILED",
+      applied_winner_look_candidate_id: winner?.look_candidate_id ||
+        look.look_candidate_id,
+      duplicate_guard_applied: duplicateGuardApplied,
+    });
+    traces.push(adjudicationTrace);
+    selectedLooks.push(Object.freeze({
+      ...look,
+      look_candidate_id: winner?.look_candidate_id || look.look_candidate_id,
+      final_score: winner?.adjusted_score ?? look.final_score,
+      base_score: winner?.base_score ?? look.base_score,
+      duplicate_penalty: winner?.cross_look_duplicate_penalty ??
+        look.duplicate_penalty,
+      selected_candidate_ids: Object.freeze([...(winner?.candidate_ids ||
+        look.selected_candidate_ids || [])]),
+      strategy_trace: winner?.strategy_trace || look.strategy_trace,
+      whole_look_quality: winner?.whole_look_quality || look.whole_look_quality,
+      quality: winner?.whole_look_quality || look.whole_look_quality,
+      quality_status: (winner?.whole_look_quality || look.whole_look_quality).status,
+      whole_look_ai_adjudication: adjudicationTrace,
+    }));
+  }
+  return {
+    ...composition,
+    products: selectedProducts,
+    looks: selectedLooks,
+    whole_look_ai_adjudication: Object.freeze(traces),
+  };
+}
+
+function prepareWholeLookAdjudicationCandidates(look, candidatePool, context = {}) {
+  const alternatives = Array.isArray(look?.quality_valid_alternatives)
+    ? look.quality_valid_alternatives : [];
+  const concept = (context?.outfit_plan?.looks || []).find((entry) =>
+    String(entry?.look_id || entry?.lookId || "") === String(look?.look_id || "")) ||
+    {};
+  return alternatives.slice(0, 3).map((alternative) => {
+    const products = (alternative.candidate_ids || []).map((candidateId) =>
+      findCandidateForLook(candidatePool, look.look_id, candidateId))
+      .filter(Boolean);
+    return Object.freeze({
+      ...alternative,
+      look_id: look.look_id,
+      concept_summary: concept.concept_summary || concept.summary ||
+        concept.concept_name || concept.name || null,
+      style_direction: concept.style_target || concept.style_direction ||
+        concept.style || null,
+      scene: concept.scene || context.scene || null,
+      silhouette: concept.silhouette || concept.body_fit_strategy || null,
+      palette: concept.palette || concept.color_target || null,
+      selected_products: Object.freeze(products),
+      whole_look_quality: alternative.whole_look_quality || alternative.quality,
+    });
+  }).filter((candidate) =>
+    candidate.whole_look_quality?.status === "PASS" &&
+    candidate.selected_products.length === candidate.candidate_ids.length);
+}
+
+function findCandidateForLook(candidatePool, lookId, candidateId) {
+  const expectedLookId = String(lookId || "");
+  const expectedCandidateId = String(candidateId || "");
+  return (candidatePool || []).find((candidate) =>
+    String(candidate?.look_id || "") === expectedLookId &&
+    candidateProductId(candidate) === expectedCandidateId) || null;
+}
+
+function candidateProductId(product = {}) {
+  return String(product?.candidate_id || product?.product_id || product?.id || "");
+}
+
+function productIdentity(product = {}) {
+  return String(product?.canonical_product_identity ||
+    canonicalProductIdentity(product) || candidateProductId(product));
+}
+
+function candidateRepeatsUsedProduct(candidate, usedProductKeys) {
+  return (candidate?.selected_products || []).some((product) => {
+    const identity = productIdentity(product);
+    return identity && usedProductKeys.has(identity);
+  });
+}
+
+function materializeWholeLookWinnerProducts(winner, look) {
+  const trace = winner.strategy_trace || {};
+  const quality = winner.whole_look_quality;
+  return winner.selected_products.map((product) => ({
+    ...product,
+    look_id: look.look_id,
+    outfit_selected: true,
+    outfit_strategy_score: winner.adjusted_score,
+    outfit_duplicate_penalty: winner.cross_look_duplicate_penalty,
+    outfit_strategy_trace: trace,
+    outfit_strategy_breakdown: Object.freeze({
+      style_coherence: trace.styleCoherence,
+      occasion_fit: trace.occasionFormalityFit,
+      formality: trace.formality,
+      silhouette: trace.silhouetteCoherence,
+      body_proportion: trace.bodyProportion,
+      color_harmony: trace.colorHarmony,
+      footwear_compatibility: trace.footwearCompatibility,
+      brand_quality_value: trace.brandQualityValueCoherence,
+      focal_hierarchy: trace.focalHierarchy,
+      market_alignment: trace.marketAlignment,
+    }),
+    outfit_quality_status: quality.status,
+    outfit_quality_reason_codes: quality.reason_codes,
+    outfit_quality_trace: quality,
+    whole_look_quality_status: quality.status,
+    whole_look_quality: quality,
+  }));
+}
+
+function buildSeenCandidatesByGroup(rawCandidates = []) {
+  const seenByGroup = new Map();
+  for (const record of rawCandidates || []) {
+    const key = `${record.look_id}:${record.slot}`;
+    const seen = seenByGroup.get(key) || new Set();
+    if (record.underlying_product_key) {
+      seen.add(`identity:${record.underlying_product_key}`);
+    }
+    if (record.candidate_id) seen.add(`id:${record.candidate_id}`);
+    seenByGroup.set(key, seen);
+  }
+  return seenByGroup;
+}
+
+async function refillWholeLookFailures({
+  groups,
+  rejectedLookIds,
+  context,
+  trace,
+  refillCandidates,
+  round,
+  seenByGroup,
+}) {
+  const working = groups.map((group) => ({
+    requirement: group.requirement,
+    candidates: dedupeCandidates(group.candidates),
+  }));
+  const targets = working.map((group, index) => ({group, index}))
+    .filter(({group}) => rejectedLookIds.has(String(
+      group?.requirement?.look_id || "",
+    )));
+  trace.refill_trigger_count += new Set(targets.map(({group}) =>
+    requirementPipelineKey(group.requirement))).size;
+  trace.refill_slot_attempt_count += targets.length;
+  trace.refill_max_rounds_used = Math.max(trace.refill_max_rounds_used, round);
+  const settled = await mapSettledWithConcurrency(
+    targets,
+    DEFAULT_REFILL_CONCURRENCY,
+    async ({group, index}) => ({
+      index,
+      response: await refillCandidates({
+        requirement: group.requirement,
+        round,
+        originalCount: group.candidates.length,
+        currentCount: group.candidates.length,
+        reason: "WHOLE_LOOK_QUALITY_REJECTED",
+      }),
+    }),
+  );
+  for (let resultIndex = 0; resultIndex < settled.length; resultIndex += 1) {
+    const result = settled[resultIndex];
+    const target = targets[resultIndex];
+    const group = working[target.index];
+    const requirement = group.requirement;
+    const groupKey = requirementPipelineKey(requirement);
+    const beforeCount = group.candidates.length;
+    if (result.status === "rejected") {
+      const failed = result.reason?.refillAttemptTrace || {};
+      const queries = Array.isArray(failed.queries) ? failed.queries : [];
+      trace.refill_network_query_count += Number(
+        failed.network_query_count || queries.length || 0,
+      );
+      trace.refill_rounds.push(Object.freeze({
+        look_id: requirement.look_id || null,
+        slot: outfitRequirementSlot(requirement),
+        round,
+        refill_reason: "WHOLE_LOOK_QUALITY_REJECTED",
+        before_count: beforeCount,
+        query: Object.freeze([...queries]),
+        returned_count: 0,
+        unique_added: 0,
+        accepted_count: 0,
+        after_count: beforeCount,
+        status: "FAILED",
+        failure_reason: safeProviderCode(result.reason),
+      }));
+      continue;
+    }
+    const response = result.value?.response;
+    const returned = Array.isArray(response)
+      ? response
+      : Array.isArray(response?.candidates) ? response.candidates : [];
+    trace.refill_network_query_count += Array.isArray(response?.queries)
+      ? response.queries.length : 0;
+    const seen = seenByGroup.get(groupKey) || new Set();
+    const uniqueRaw = [];
+    for (const rawProduct of returned) {
+      const product = preserveCandidateContract(rawProduct, requirement);
+      const keys = candidateDedupeKeys(product);
+      if (keys.some((key) => seen.has(key))) continue;
+      keys.forEach((key) => seen.add(key));
+      uniqueRaw.push(product);
+    }
+    seenByGroup.set(groupKey, seen);
+    trace.raw_candidates.push(...uniqueRaw.map((product) =>
+      candidateTraceRecord(product, requirement, "QUALITY_REFILL_RAW")));
+    const processed = processCandidateGroup({
+      group: {requirement, candidates: uniqueRaw},
+      context,
+      trace,
+      stagePrefix: "QUALITY_REFILL_",
+    });
+    // The existing pool has already failed every complete combination. Give
+    // newly gated candidates a real chance to enter the bounded reranker pool
+    // instead of appending them behind a full 20-item slice.
+    group.candidates = dedupeCandidates([
+      ...processed.gateCandidates,
+      ...group.candidates,
+    ]).slice(0, DEFAULT_RELEVANCE_POOL_PER_REQUIREMENT);
+    trace.refill_rounds.push(Object.freeze({
+      look_id: requirement.look_id || null,
+      slot: outfitRequirementSlot(requirement),
+      round,
+      refill_reason: "WHOLE_LOOK_QUALITY_REJECTED",
+      before_count: beforeCount,
+      query: Object.freeze([...(response?.queries || [])]),
+      returned_count: Number(response?.returned_count ?? returned.length),
+      unique_added: uniqueRaw.length,
+      relevance_pass: processed.relevanceCandidates.length,
+      accepted_count: processed.gateCandidates.length,
+      after_count: group.candidates.length,
+      status: processed.gateCandidates.length > 0
+        ? "CANDIDATES_ADDED" : "NO_QUALITY_CANDIDATES_ADDED",
+    }));
+  }
+  return working;
+}
+
+function buildRejectedLookTrace({
+  requestedLookIds,
+  completeLookIds,
+  composition,
+}) {
+  const selected = new Set((composition?.looks || []).map((look) =>
+    String(look?.look_id || "")));
+  const reported = new Map((composition?.rejected_looks || []).map((look) => [
+    String(look?.look_id || ""),
+    look,
+  ]));
+  return Object.freeze([...requestedLookIds].filter((lookId) =>
+    !selected.has(lookId)).map((lookId) => {
+    const rejection = reported.get(lookId);
+    return Object.freeze({
+      look_id: lookId,
+      reason: completeLookIds.has(lookId)
+        ? rejection?.whole_look_quality?.reason ||
+          rejection?.whole_look_quality?.reason_code ||
+          "WHOLE_LOOK_QUALITY_REJECTED"
+        : "CANDIDATE_INCOMPLETE",
+      whole_look_quality: rejection?.whole_look_quality || null,
+    });
+  }));
+}
+
+function buildSlotOutcomes(groups, targetPerCoreSlot, trace) {
+  return (groups || []).map((group) => {
+    const key = requirementPipelineKey(group.requirement);
+    const target = candidateTargetForRequirement(
+      group.requirement,
+      targetPerCoreSlot,
+    );
+    const attempts = (trace.refill_rounds || []).filter((entry) =>
+      `${entry.look_id || ""}:${entry.slot || ""}` === key);
+    return Object.freeze({
+      look_id: group.requirement.look_id || null,
+      slot: outfitRequirementSlot(group.requirement),
+      target_count: target,
+      final_gate_pass: group.candidates.length,
+      refill_round_count: attempts.length,
+      status: group.candidates.length >= target
+        ? "READY" : "INSUFFICIENT_QUALITY_CANDIDATES",
+    });
   });
 }
 
@@ -1086,8 +1647,9 @@ function freezeCandidatePipelineTrace(trace) {
     strategy_selected: Object.freeze([...trace.strategy_selected]),
     refill_rounds: Object.freeze([...(trace.refill_rounds || [])]),
     slot_outcomes: Object.freeze([...(trace.slot_outcomes || [])]),
-    insufficient_quality_looks: Object.freeze([
-      ...(trace.insufficient_quality_looks || []),
+    rejected: Object.freeze([...(trace.rejected || [])]),
+    whole_look_ai_adjudication: Object.freeze([
+      ...(trace.whole_look_ai_adjudication || []),
     ]),
     query_plans: Object.freeze([...(trace.query_plans || [])]),
     reranker_fallback_reasons: Object.freeze([
@@ -1121,13 +1683,15 @@ function expectedOutfitSelections(requirements) {
   });
 }
 
-function annotateOutfitStrategySelection(product) {
+function annotateOutfitStrategySelection(product, wholeLookQuality = null) {
   const candidateId = String(
     product?.candidate_id || product?.product_id || product?.id || "",
   ).trim();
   return {
     ...product,
     outfit_selected_candidate_id: candidateId,
+    whole_look_quality_status: wholeLookQuality?.status || null,
+    whole_look_quality: wholeLookQuality || null,
     outfit_strategy_breakdown: Object.freeze({
       style_coherence: product?.outfit_style_coherence_score ?? null,
       occasion_formality_fit: product?.outfit_occasion_formality_score ?? null,
@@ -1257,6 +1821,7 @@ class MockProductProvider extends ProductProvider {
     reranker = null,
     outfitPostProcessor = postProcessOutfitCandidates,
     candidatePipeline = runSharedCandidatePipeline,
+    wholeLookAIAdjudicator = null,
   } = {}) {
     super();
     this.catalog = catalog;
@@ -1268,6 +1833,7 @@ class MockProductProvider extends ProductProvider {
     });
     this.outfitPostProcessor = outfitPostProcessor;
     this.candidatePipeline = candidatePipeline;
+    this.wholeLookAIAdjudicator = wholeLookAIAdjudicator;
     this.lastPipelineTrace = null;
     this.name = "mock";
     this.configured = false;
@@ -1317,6 +1883,7 @@ class MockProductProvider extends ProductProvider {
       logger: this.logger,
       reranker: this.reranker,
       outfitPostProcessor: this.outfitPostProcessor,
+      wholeLookAIAdjudicator: this.wholeLookAIAdjudicator,
     });
     this.lastPipelineTrace = result.trace;
     return result.products;
@@ -1371,6 +1938,7 @@ class TaobaoProductProvider extends ProductProvider {
     rerankBudgetMs = PRODUCT_RERANK_BUDGET_MS,
     outfitPostProcessor = postProcessOutfitCandidates,
     candidatePipeline = runSharedCandidatePipeline,
+    wholeLookAIAdjudicator = null,
     rawCapture = null,
     logger = console,
   }) {
@@ -1400,6 +1968,7 @@ class TaobaoProductProvider extends ProductProvider {
     );
     this.outfitPostProcessor = outfitPostProcessor;
     this.candidatePipeline = candidatePipeline;
+    this.wholeLookAIAdjudicator = wholeLookAIAdjudicator;
     this.rawCapture = typeof rawCapture === "function" ? rawCapture : null;
     this.lastPipelineTrace = null;
     this.logger = logger;
@@ -1829,6 +2398,7 @@ class TaobaoProductProvider extends ProductProvider {
         logger: this.logger,
         reranker: this.reranker,
         outfitPostProcessor: this.outfitPostProcessor,
+        wholeLookAIAdjudicator: this.wholeLookAIAdjudicator,
         rerankTimeoutMs: this.rerankBudgetMs,
         deadlineAt: pipelineDeadline,
         refillCandidates: async ({requirement, round}) => withTimeBudget(
@@ -2566,8 +3136,11 @@ class AutoProductProvider extends ProductProvider {
       this.health = false;
       const first = Array.isArray(queries) ? queries[0] || {} : {};
       this.#logFallback(error, {...context, ...first});
-      if (error?.code === "INSUFFICIENT_QUALITY_CANDIDATES") {
-        this.status = "insufficient_quality_candidates";
+      if ([
+        "INSUFFICIENT_QUALITY_CANDIDATES",
+        "INSUFFICIENT_QUALITY_LOOKS",
+      ].includes(error?.code)) {
+        this.status = error.code.toLowerCase();
         throw asProductProviderError(error);
       }
       if (!this.allowMockFallback) {
@@ -2624,6 +3197,7 @@ function createProductProvider({
   visualVerifier = null,
   outfitPostProcessor = postProcessOutfitCandidates,
   candidatePipeline = runSharedCandidatePipeline,
+  wholeLookAIAdjudicator = null,
   rawCapture = null,
 } = {}) {
   const mode = String(environment.PRODUCT_PROVIDER || "auto").trim().toLowerCase();
@@ -2669,6 +3243,7 @@ function createProductProvider({
       reranker,
       outfitPostProcessor,
       candidatePipeline,
+      wholeLookAIAdjudicator,
     });
   }
   if (!configured) {
@@ -2701,6 +3276,7 @@ function createProductProvider({
       ),
       outfitPostProcessor,
       candidatePipeline,
+      wholeLookAIAdjudicator,
       rawCapture,
       recommendationCacheTtlMs: positiveInteger(
         environment.PRODUCT_RECOMMENDATION_CACHE_TTL_MS,
@@ -2726,6 +3302,7 @@ function createProductProvider({
       reranker,
       outfitPostProcessor,
       candidatePipeline,
+      wholeLookAIAdjudicator,
     }),
     logger,
     allowMockFallback: allowMock,
@@ -3364,6 +3941,12 @@ function parseTaobaoPlacement(pid, adzoneIdOverride = "") {
 function safeProviderCode(error) {
   if (error instanceof TaobaoApiError || error instanceof ProductProviderError) return error.code;
   return "TAOBAO_UNKNOWN_ERROR";
+}
+
+function safeWholeLookAdjudicationCode(error) {
+  const code = String(error?.code || "WHOLE_LOOK_AI_ADJUDICATION_FAILED").trim();
+  return /^[A-Z0-9_.-]{3,80}$/u.test(code)
+    ? code : "WHOLE_LOOK_AI_ADJUDICATION_FAILED";
 }
 
 function isEmptyTaobaoResult(error) {

@@ -114,6 +114,38 @@ function requestContext(overrides = {}) {
   };
 }
 
+function qualityPassingPostProcessor({requirements, products}) {
+  const quality = Object.freeze({
+    status: "PASS",
+    overall_score: 80,
+    reason_codes: Object.freeze([]),
+  });
+  const lookIds = [...new Set(requirements.map((item) => item.look_id))];
+  const selected = [];
+  const looks = [];
+  for (const lookId of lookIds) {
+    const lookProducts = [];
+    for (const requirement of requirements.filter((item) =>
+      item.look_id === lookId)) {
+      const product = products.find((entry) =>
+        entry.look_id === lookId && entry.category === requirement.category);
+      if (product) lookProducts.push(product);
+    }
+    if (lookProducts.length === 0) continue;
+    selected.push(...lookProducts.map((product) => ({
+      ...product,
+      whole_look_quality_status: "PASS",
+      whole_look_quality: quality,
+    })));
+    looks.push({
+      look_id: lookId,
+      selected_candidate_ids: lookProducts.map((item) => item.product_id),
+      whole_look_quality: quality,
+    });
+  }
+  return {applied: true, products: selected, looks, rejected_looks: []};
+}
+
 function extractAdjudicationPayload(request) {
   const raw = request?.messages?.find((message) =>
     message.role === "user")?.content;
@@ -374,6 +406,7 @@ test("E: a child Hard Reject never enters the AI adjudication payload", async ()
     context: requestContext(),
     provider: "taobao",
     reranker: instance,
+    outfitPostProcessor: qualityPassingPostProcessor,
     logger: silentLogger,
   });
   assert.equal(result.trace.gate_reject.some((item) =>
@@ -450,6 +483,7 @@ test("G: AI timeout falls back to deterministic Top1 and the pipeline continues"
     context: requestContext(),
     provider: "taobao",
     reranker: instance,
+    outfitPostProcessor: qualityPassingPostProcessor,
     logger: silentLogger,
   });
   const trace = selectionTrace(instance, result.trace.request_id || "");

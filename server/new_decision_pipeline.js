@@ -72,6 +72,7 @@ const PUBLIC_PRODUCT_FIELDS = Object.freeze([
   "product_acceptance_penalty", "product_acceptance_evidence",
   "product_acceptance_trace", "ai_rerank_fallback_reason",
   "outfit_product_acceptance_penalty",
+  "whole_look_quality_status", "whole_look_quality",
   "styling_slot", "styling_completion_slot",
   "styling_completion_selected", "styling_completion_score_delta",
   "styling_completion_version",
@@ -182,6 +183,17 @@ function finalLookForContract(contract, products) {
   });
 }
 
+function wholeLookQualityPasses(contract, look) {
+  const requiredCategories = new Set((contract?.items || []).map((item) =>
+    String(item?.category || "")));
+  const coreProducts = (look?.selected_products || []).filter((product) =>
+    requiredCategories.has(String(product?.category || "")));
+  if (coreProducts.length === 0) return false;
+  return coreProducts.every((product) =>
+    product?.whole_look_quality_status === "PASS" &&
+    product?.whole_look_quality?.status === "PASS");
+}
+
 function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
   const errors = [];
   const warnings = [];
@@ -191,7 +203,8 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
     look: finalLookForContract(contract, products),
   })).filter(({contract, look}) => contract.items.every((requirement) =>
     look.items.some((item) =>
-      item.category === requirement.category && item.selected_candidate_id)))
+      item.category === requirement.category && item.selected_candidate_id)) &&
+      wholeLookQualityPasses(contract, look))
     .map(({look}) => look);
   const looks = candidateLooks;
   const returnedLookIds = new Set(looks.map((look) => look.look_id));
@@ -200,7 +213,7 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
     .filter((lookId) => !returnedLookIds.has(lookId));
   if (unfulfilledLookIds.length > 0) {
     warnings.push(
-      `INSUFFICIENT_QUALITY_CANDIDATES:${unfulfilledLookIds.join(",")}`,
+      `INSUFFICIENT_QUALITY_LOOKS:${unfulfilledLookIds.join(",")}`,
     );
   }
   const explicitStyle = String(
@@ -301,7 +314,7 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
     fulfillment_status: errors.length === 0 && looks.length < requestedLookCount
       ? "PARTIAL" : errors.length === 0 ? "COMPLETE" : "FAILED",
     fulfillment_reason: errors.length === 0 && looks.length < requestedLookCount
-      ? "INSUFFICIENT_QUALITY_CANDIDATES" : null,
+      ? "INSUFFICIENT_QUALITY_LOOKS" : null,
     requested_look_count: requestedLookCount,
     quality_valid_look_count: looks.length,
     unfulfilled_look_ids: Object.freeze(unfulfilledLookIds),
@@ -552,6 +565,14 @@ function publicCandidatePipelineSummary(trace = null, completion = {}) {
     gate_pass_count: count("gate_pass"),
     gate_reject_count: count("gate_reject"),
     reranker_keep_count: count("reranker_keep"),
+    candidate_complete_looks: Number(trace.candidate_complete_looks || 0),
+    whole_look_quality_valid_looks: Number(
+      trace.whole_look_quality_valid_looks || 0,
+    ),
+    rejected: Object.freeze([...(trace.rejected || [])]),
+    whole_look_ai_adjudication: Object.freeze([
+      ...(trace.whole_look_ai_adjudication || []),
+    ]),
     candidates: publicCandidateTimeline(trace, completion),
     query_plans: Object.freeze((trace.query_plans || []).map((entry) =>
       Object.freeze({
@@ -744,7 +765,10 @@ async function executeNewDecisionPipeline({
         stage: "PRODUCT_PROVIDER_CONTRACT",
         cause: error,
         details: error?.details,
-        fallbackAllowed: error?.code !== "INSUFFICIENT_QUALITY_CANDIDATES",
+        fallbackAllowed: !new Set([
+          "INSUFFICIENT_QUALITY_CANDIDATES",
+          "INSUFFICIENT_QUALITY_LOOKS",
+        ]).has(error?.code),
       },
     );
   }
@@ -755,11 +779,20 @@ async function executeNewDecisionPipeline({
     compiled,
     products,
   });
+  if (coreValidation.quality_valid_look_count === 0) {
+    throw new NewDecisionPipelineError("No whole-look quality PASS result", {
+      code: "INSUFFICIENT_QUALITY_LOOKS",
+      stage: "PORTFOLIO_VALIDATOR",
+      details: coreValidation,
+      fallbackAllowed: false,
+    });
+  }
   if (coreValidation.status !== "PASS") {
     throw new NewDecisionPipelineError("Final concept portfolio is invalid", {
       code: "NEW_DECISION_PORTFOLIO_INVALID",
       stage: "PORTFOLIO_VALIDATOR",
       details: coreValidation,
+      fallbackAllowed: false,
     });
   }
 

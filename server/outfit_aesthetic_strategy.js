@@ -7,6 +7,7 @@ const {
   resolveAestheticTargetProfile,
 } = require("./style_intelligence");
 const {canonicalProductIdentity} = require("./product_acceptance_gate");
+const {evaluateFinalLookQuality} = require("./final_look_quality");
 
 const STRATEGY_VERSION = "outfit_aesthetic_target_alignment_v1";
 const DEFAULT_TOP_PER_REQUIREMENT = 6;
@@ -68,12 +69,15 @@ function composeOutfitCandidates({
       applied: false,
       products: safeProducts,
       looks: [],
+      rejected_looks: [],
+      reason_codes: [],
       version: STRATEGY_VERSION,
     });
   }
 
   const selectedLooks = [];
   const selectedProducts = [];
+  const rejectedLooks = [];
   const usedProductKeys = new Set();
   for (const look of composableLooks) {
     const pools = look.requirements.map((requirement, requirementIndex) => ({
@@ -132,10 +136,16 @@ function composeOutfitCandidates({
     }).sort((left, right) => right.adjustedScore - left.adjustedScore ||
       right.finalScore - left.finalScore ||
       compareCombinationIdentity(left.entries, right.entries));
-    const chosen = ranked[0];
-    const combinationTraces = Object.freeze(ranked.map((combination, index) =>
+    const qualityRanked = ranked.map((combination) => ({
+      ...combination,
+      quality: evaluateCombinationQuality(combination),
+    }));
+    const chosen = qualityRanked.find((combination) =>
+      combination.quality.status === "PASS");
+    const combinationTraces = Object.freeze(qualityRanked.map((combination, index) =>
       Object.freeze({
         rank: index + 1,
+        look_candidate_id: combinationIdentity(combination.entries),
         candidate_ids: Object.freeze(
           combination.entries.map(({product}) => productId(product)),
         ),
@@ -143,9 +153,38 @@ function composeOutfitCandidates({
         cross_look_duplicate_penalty: combination.duplicatePenalty,
         adjusted_score: combination.adjustedScore,
         strategy_trace: combination.strategyTrace,
+        quality: combination.quality,
+        whole_look_quality: combination.quality,
       })));
+    if (!chosen) {
+      rejectedLooks.push(Object.freeze({
+        look_id: look.lookId,
+        status: "FAIL",
+        reason_codes: Object.freeze(["LOW_QUALITY_LOOK"]),
+        whole_look_quality: qualityRanked[0].quality,
+        selected_candidate_ids: Object.freeze([]),
+        quality_valid_alternatives: Object.freeze([]),
+        rejected_combination_traces: combinationTraces,
+        combination_traces: combinationTraces,
+        candidate_breadth: candidateBreadth(pools, combinationMetrics,
+          topPerRequirement, beamWidth, combinations.length),
+        aesthetic_target_profile: aestheticTargetProfile,
+      }));
+      continue;
+    }
+    const qualityValidAlternatives = Object.freeze(qualityRanked
+      .filter((combination) => combination.quality.status === "PASS")
+      .slice(0, 3)
+      .map((combination) => combinationTrace(combination, qualityRanked)));
+    const qualityValidAlternativeOnly = Object.freeze(qualityValidAlternatives
+      .filter((combination) =>
+        combination.look_candidate_id !== combinationIdentity(chosen.entries)));
+    const rejectedCombinationTraces = Object.freeze(combinationTraces.filter(
+      (trace) => trace.quality.status === "FAIL",
+    ));
     const report = Object.freeze({
       look_id: look.lookId,
+      look_candidate_id: combinationIdentity(chosen.entries),
       final_score: chosen.adjustedScore,
       base_score: chosen.finalScore,
       duplicate_penalty: chosen.duplicatePenalty,
@@ -161,26 +200,19 @@ function composeOutfitCandidates({
       product_acceptance_penalty: chosen.productAcceptancePenalty,
       ranking_reason: chosen.rankingReason,
       strategy_trace: chosen.strategyTrace,
+      quality: chosen.quality,
+      whole_look_quality: chosen.quality,
+      quality_status: chosen.quality.status,
+      quality_reason_codes: chosen.quality.reason_codes,
+      quality_valid_alternatives: qualityValidAlternatives,
+      quality_valid_alternative_only: qualityValidAlternativeOnly,
+      rejected_combination_traces: rejectedCombinationTraces,
       combination_traces: combinationTraces,
       selected_candidate_ids: Object.freeze(
         chosen.entries.map(({product}) => productId(product)),
       ),
-      candidate_breadth: Object.freeze({
-        candidate_count_per_slot: Object.freeze(Object.fromEntries(
-          pools.map((pool) => [pool.requirement.category, pool.candidates.length]),
-        )),
-        candidate_pool_limit: positiveInteger(
-          topPerRequirement,
-          DEFAULT_TOP_PER_REQUIREMENT,
-        ),
-        beam_width: positiveInteger(beamWidth, DEFAULT_BEAM_WIDTH),
-        expanded_combination_count: combinationMetrics.expandedCombinationCount,
-        pruned_combination_count: combinationMetrics.prunedCombinationCount,
-        max_frontier_count: combinationMetrics.maxFrontierCount,
-        evaluated_complete_combination_count: combinations.length,
-        budget_rejected_combination_count:
-          combinationMetrics.budgetRejectedCombinationCount,
-      }),
+      candidate_breadth: candidateBreadth(pools, combinationMetrics,
+        topPerRequirement, beamWidth, combinations.length),
       budget_rejections: Object.freeze(combinationMetrics.budgetRejections
         .map((entry) => Object.freeze({
           ...entry,
@@ -223,6 +255,11 @@ function composeOutfitCandidates({
         outfit_product_acceptance_penalty: chosen.productAcceptancePenalty,
         outfit_strategy_ranking_reason: chosen.rankingReason,
         outfit_strategy_trace: chosen.strategyTrace,
+        outfit_quality_status: chosen.quality.status,
+        outfit_quality_reason_codes: chosen.quality.reason_codes,
+        outfit_quality_trace: chosen.quality,
+        whole_look_quality_status: chosen.quality.status,
+        whole_look_quality: chosen.quality,
       });
     }
     selectedLooks.push(report);
@@ -232,7 +269,160 @@ function composeOutfitCandidates({
     applied: true,
     products: selectedProducts,
     looks: Object.freeze(selectedLooks),
+    rejected_looks: Object.freeze(rejectedLooks),
+    reason_codes: Object.freeze(rejectedLooks.length > 0
+      ? ["LOW_QUALITY_LOOK"] : []),
     version: STRATEGY_VERSION,
+  });
+}
+
+function evaluateCombinationQuality(combination) {
+  const trace = combination.strategyTrace;
+  const entries = combination.entries;
+  return evaluateFinalLookQuality({
+    overall_score: combination.adjustedScore,
+    dimension_scores: {
+      scene: conservativeScore([
+        trace.occasionFormalityFit,
+        trace.slotOccasionFitSummary?.minimum,
+        minimumProductScore(entries, ["scene_fit_score", "occasion_fit_score"]),
+        minimumAcceptanceEvidenceScore(entries, "occasion_fit"),
+      ]),
+      desired_impression: conservativeScore([
+        trace.targetProfileMatch,
+        minimumProductScore(entries, [
+          "desired_impression_fit_score", "impression_fit_score", "persona_fit_score",
+        ]),
+        minimumAcceptanceEvidenceScore(entries, "desired_impression_fit"),
+        minimumAcceptanceEvidenceScore(entries, "audience_fit"),
+      ]),
+      contemporary: conservativeScore([
+        trace.marketAlignment,
+        minimumProductScore(entries, [
+          "contemporary_fit_score", "contemporary_score", "market_soft_match_score",
+        ]),
+        minimumAcceptanceEvidenceScore(entries, "contemporary_fit"),
+        average([trace.targetProfileMatch, trace.focalHierarchy], 60),
+      ]),
+      style: conservativeScore([
+        trace.styleCoherence,
+        trace.slotStyleFitSummary?.minimum,
+      ]),
+      silhouette: conservativeScore([
+        trace.silhouetteCoherence,
+        trace.slotSilhouetteFitSummary?.minimum,
+      ]),
+      color: conservativeScore([
+        trace.colorHarmony,
+        trace.colorIntensityFit,
+        trace.slotColorFitSummary?.minimum,
+      ]),
+      footwear: conservativeScore([
+        trace.footwearCompatibility,
+        trace.slotFootwearFitSummary?.minimum,
+      ]),
+      quality: conservativeScore([
+        trace.brandQualityValueCoherence,
+        trace.materialTexture,
+        trace.slotQualityFitSummary?.minimum,
+        minimumAcceptanceEvidenceScore(entries, "visual_quality"),
+        minimumAcceptanceEvidenceScore(entries, "commerce_quality"),
+      ]),
+      body: conservativeScore([
+        trace.bodyProportion,
+        minimumProductScore(entries, [
+          "body_fit_score", "body_strategy_match_score", "proportion_score",
+        ]),
+      ]),
+      statement: conservativeScore([
+        trace.focalHierarchy,
+        minimumProductScore(entries, [
+          "statement_fit_score", "visual_hierarchy_score", "distinctiveness_score",
+        ]),
+      ]),
+    },
+  });
+}
+
+function minimumProductScore(entries, fields) {
+  const values = entries.flatMap(({product}) => fields
+    .map((field) => finiteNumber(product?.[field]))
+    .filter((value) => value != null));
+  return values.length > 0 ? Math.min(...values) : null;
+}
+
+function minimumAcceptanceEvidenceScore(entries, dimension) {
+  const values = entries.map(({product}) =>
+    acceptanceEvidenceScore(product?.product_acceptance_evidence?.[dimension]))
+    .filter((value) => value != null);
+  return values.length > 0 ? Math.min(...values) : null;
+}
+
+function acceptanceEvidenceScore(record) {
+  if (!record || typeof record !== "object" ||
+      record.applicability === "NOT_APPLICABLE") return null;
+  const value = String(record.value || "").trim().toLowerCase();
+  const baseScores = {
+    strong_match: 95,
+    match: 85,
+    supported: 80,
+    high: 80,
+    pass: 80,
+    partial_match: 65,
+    neutral: 60,
+    anomaly_risk: 45,
+    low: 30,
+    unsupported: 25,
+    mismatch: 20,
+    severe_mismatch: 10,
+  };
+  if (!Object.hasOwn(baseScores, value)) return null;
+  const confidence = finiteNumber(record.confidence);
+  const weight = confidence == null ? 0.5 : Math.max(0, Math.min(1, confidence));
+  return bounded(60 + (baseScores[value] - 60) * weight);
+}
+
+function conservativeScore(values) {
+  const finite = values.filter((value) => Number.isFinite(value));
+  return finite.length > 0 ? bounded(Math.min(...finite)) : 60;
+}
+
+function combinationTrace(combination, ranked) {
+  return Object.freeze({
+    rank: ranked.indexOf(combination) + 1,
+    look_candidate_id: combinationIdentity(combination.entries),
+    candidate_ids: Object.freeze(
+      combination.entries.map(({product}) => productId(product)),
+    ),
+    base_score: combination.finalScore,
+    cross_look_duplicate_penalty: combination.duplicatePenalty,
+    adjusted_score: combination.adjustedScore,
+    strategy_trace: combination.strategyTrace,
+    quality: combination.quality,
+    whole_look_quality: combination.quality,
+  });
+}
+
+function combinationIdentity(entries) {
+  return entries.map(({product}) => productId(product)).join("|");
+}
+
+function candidateBreadth(pools, metrics, topPerRequirement, beamWidth,
+  combinationCount) {
+  return Object.freeze({
+    candidate_count_per_slot: Object.freeze(Object.fromEntries(
+      pools.map((pool) => [pool.requirement.category, pool.candidates.length]),
+    )),
+    candidate_pool_limit: positiveInteger(
+      topPerRequirement,
+      DEFAULT_TOP_PER_REQUIREMENT,
+    ),
+    beam_width: positiveInteger(beamWidth, DEFAULT_BEAM_WIDTH),
+    expanded_combination_count: metrics.expandedCombinationCount,
+    pruned_combination_count: metrics.prunedCombinationCount,
+    max_frontier_count: metrics.maxFrontierCount,
+    evaluated_complete_combination_count: combinationCount,
+    budget_rejected_combination_count: metrics.budgetRejectedCombinationCount,
   });
 }
 
