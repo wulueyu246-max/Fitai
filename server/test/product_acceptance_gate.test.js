@@ -466,6 +466,7 @@ test("refill exhaustion reports INSUFFICIENT_QUALITY_CANDIDATES without reviving
     groups,
     context: context({gender: "female", scene: "nightlife"}),
     provider: "taobao",
+    minimumCompleteLooks: 2,
     logger: {info() {}, warn() {}},
     refillCandidates: async ({requirement: item}) => ({
       candidates: item.look_id === "insufficient-look" && item.category === "top"

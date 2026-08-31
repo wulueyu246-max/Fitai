@@ -7,6 +7,7 @@ const {
   TaobaoProductProvider,
   UnavailableProductProvider,
   budgetPreferenceAssessment,
+  buildCandidateRefillQueries,
   createProductProvider,
   mapTaobaoProduct,
   normalizePublicImageUrl,
@@ -793,6 +794,150 @@ test("Candidate Refill never promotes a Soft Reject into the selectable pool", a
   assert.equal(result.trace.refill_rounds[0].after_count, 0);
   assert.equal(result.trace.gate_reject.every((item) =>
     item.reason === "PRODUCT_ACCEPTANCE_SOFT_REJECT"), true);
+});
+
+test("Candidate Refill consumes the existing query plan as a two-round broadening ladder", () => {
+  const cases = [
+    {
+      slot: "top",
+      q1: "女 短袖上衣",
+      q2: "女 短袖上衣 设计感",
+      q3: "女 上衣",
+      signal: "设计感",
+      expectedRound1: "女 上衣 设计感",
+      expectedRound2: "女 上衣",
+    },
+    {
+      slot: "bottom",
+      q1: "女 半身裙",
+      q2: "女 半身裙 年轻",
+      q3: "女 下装",
+      signal: "年轻",
+      expectedRound1: "女 下装 年轻",
+      expectedRound2: "女 下装",
+    },
+    {
+      slot: "shoes",
+      q1: "女 单鞋",
+      q2: "女 单鞋 设计感",
+      q3: "女 鞋",
+      signal: "设计感",
+      expectedRound1: "女 鞋 设计感",
+      expectedRound2: "女 鞋",
+    },
+  ];
+
+  for (const entry of cases) {
+    const requirement = {
+      category: entry.slot,
+      commerce_query_plan: {
+        query_candidates: [
+          {query_id: "Q1", query: entry.q1},
+          {query_id: "Q2", query: entry.q2, aesthetic_signal: entry.signal},
+        ],
+        fallback_query: {query_id: "Q3", query: entry.q3},
+      },
+    };
+    assert.deepEqual(buildCandidateRefillQueries(requirement, 1), [{
+      query: entry.expectedRound1,
+      query_type: "Q3_BROADER_CATEGORY_WITH_CORE_INTENT",
+      page_no: 1,
+      fallback_level: 3,
+    }]);
+    assert.deepEqual(buildCandidateRefillQueries(requirement, 2), [{
+      query: entry.expectedRound2,
+      query_type: "Q3_BROADER_CATEGORY",
+      page_no: 1,
+      fallback_level: 4,
+    }]);
+    assert.deepEqual(buildCandidateRefillQueries(requirement, 3), []);
+  }
+});
+
+test("Candidate Refill keeps both rounds unique when no aesthetic signal exists", () => {
+  const requirement = {
+    category: "shoes",
+    commerce_query_plan: {
+      query_candidates: [
+        {query_id: "Q1", query: "女 休闲鞋"},
+        {query_id: "Q2", query: "女 休闲鞋"},
+      ],
+      fallback_query: {query_id: "Q3", query: "女 鞋"},
+    },
+  };
+
+  assert.deepEqual(buildCandidateRefillQueries(requirement, 1), [{
+    query: "女 鞋",
+    query_type: "Q3_BROADER_CATEGORY",
+    page_no: 1,
+    fallback_level: 3,
+  }]);
+  assert.deepEqual(buildCandidateRefillQueries(requirement, 2), [{
+    query: "女 鞋",
+    query_type: "Q3_BROADER_CATEGORY_NEXT_PAGE",
+    page_no: 2,
+    fallback_level: 4,
+  }]);
+});
+
+test("one complete quality-valid Look is returned instead of forcing three", async () => {
+  const requirements = [1, 2, 3].flatMap((lookNumber) =>
+    ["top", "bottom", "shoes"].map((category) => ({
+      look_id: `quality-look-${lookNumber}`,
+      concept_id: `quality-concept-${lookNumber}`,
+      category,
+      gender: "female",
+      scene: "nightlife",
+      item_name: `年轻有设计感的${category}`,
+    })));
+  const groups = requirements.map((requirement) => ({
+    requirement,
+    candidates: requirement.look_id === "quality-look-1" ? [{
+      product_id: `${requirement.look_id}-${requirement.category}`,
+      source: "taobao",
+      is_mock: false,
+      title: `女士年轻设计感${requirement.category}`,
+      category: requirement.category,
+      gender: "female",
+      original_gender: "female",
+      price: 199,
+      image_url: `https://img.example.com/${requirement.category}.jpg`,
+      relevance_score: 90,
+    }] : [],
+  }));
+  let refillCalls = 0;
+  const result = await runSharedCandidatePipeline({
+    requirements,
+    groups,
+    context: {gender: "female", scene: "nightlife"},
+    reranker: {
+      async rerank({groups: rerankGroups}) {
+        return rerankGroups.flatMap((group) => group.candidates);
+      },
+      getTraceForRequest() { return null; },
+    },
+    refillCandidates: async () => {
+      refillCalls += 1;
+      return {queries: ["refill"], returned_count: 0, candidates: []};
+    },
+    outfitPostProcessor: ({products}) => ({
+      applied: true,
+      products,
+      looks: [],
+    }),
+    logger: {info() {}, warn() {}, error() {}},
+  });
+
+  assert.equal(refillCalls, 18);
+  assert.equal(result.trace.requested_looks, 3);
+  assert.equal(result.trace.quality_valid_looks, 1);
+  assert.deepEqual([...result.trace.insufficient_quality_looks].sort(), [
+    "quality-look-2",
+    "quality-look-3",
+  ]);
+  assert.equal(result.products.length, 3);
+  assert.equal(result.products.every((product) =>
+    product.look_id === "quality-look-1"), true);
 });
 
 test("one quality candidate per core slot may proceed after refill target misses", async () => {

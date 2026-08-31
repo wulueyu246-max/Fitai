@@ -424,6 +424,53 @@ test("requested three Looks returns two quality-valid native Looks without forci
   );
 });
 
+test("requested three Looks returns one quality-valid native Look instead of lower-quality filler", async () => {
+  const decisionContext = context({
+    requestId: "abababab-abab-4bab-8bab-abababababab",
+    rawUserInput: "今晚出去玩，帮我搭3套",
+  });
+  const compiled = compileLookConceptPortfolio(decisionContext);
+  const acceptedLookId = compiled.looks[0].look_id;
+  const baseProvider = provider(portfolioCatalog());
+  const partialProvider = {
+    async recommendForQueries(requirements, providerInput) {
+      const products = await baseProvider.recommendForQueries(
+        requirements,
+        providerInput,
+      );
+      return products.filter((item) => item.look_id === acceptedLookId);
+    },
+    get lastPipelineTrace() {
+      return baseProvider.lastPipelineTrace;
+    },
+  };
+
+  const result = await executeNewDecisionPipeline({
+    decisionContext,
+    productProvider: partialProvider,
+    logger: silentLogger,
+  });
+
+  assert.equal(result.looks.length, 1);
+  assert.equal(result.decision_pipeline.fallback_used, false);
+  assert.equal(
+    result.decision_pipeline.portfolio_validation.fulfillment_status,
+    "PARTIAL",
+  );
+  assert.equal(
+    result.decision_pipeline.portfolio_validation.fulfillment_reason,
+    "INSUFFICIENT_QUALITY_CANDIDATES",
+  );
+  assert.equal(
+    result.decision_pipeline.portfolio_validation.quality_valid_look_count,
+    1,
+  );
+  assert.equal(
+    result.decision_pipeline.portfolio_validation.unfulfilled_look_ids.length,
+    2,
+  );
+});
+
 test("provider/contract failure is explicit and eligible for visible legacy fallback", async () => {
   const brokenProvider = {
     async recommendForQueries() {

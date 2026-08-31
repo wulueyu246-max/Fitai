@@ -80,7 +80,7 @@ const DEFAULT_RELEVANCE_POOL_PER_REQUIREMENT = 20;
 const DEFAULT_STRATEGY_CANDIDATE_BREADTH = 6;
 const DEFAULT_STRATEGY_BEAM_WIDTH = 72;
 const DEFAULT_GATE_PASS_TARGET_PER_CORE_SLOT = 4;
-const DEFAULT_MINIMUM_COMPLETE_LOOKS = 2;
+const DEFAULT_MINIMUM_COMPLETE_LOOKS = 1;
 const DEFAULT_MAX_REFILL_ROUNDS = 2;
 const DEFAULT_REFILL_CONCURRENCY = 3;
 const DEFAULT_REFILL_QUERY_LIMIT = 8;
@@ -3128,6 +3128,11 @@ function requirementSearchKeywords(requirement = {}) {
 }
 
 function buildCandidateRefillQueries(requirement = {}, round = 1) {
+  const normalizedRound = Number(round);
+  if (!Number.isInteger(normalizedRound) || normalizedRound < 1 ||
+      normalizedRound > DEFAULT_MAX_REFILL_ROUNDS) {
+    return [];
+  }
   const plan = requirement?.commerce_query_plan || {};
   const candidates = Array.isArray(plan.query_candidates)
     ? plan.query_candidates : [];
@@ -3141,20 +3146,33 @@ function buildCandidateRefillQueries(requirement = {}, round = 1) {
   const signal = String(q2?.aesthetic_signal || "").trim();
   const broadWithIntent = [...new Set([broad, signal].filter(Boolean))]
     .join(" ").trim().slice(0, 80);
-  const values = Number(round) <= 1
-    ? [
-      {query: highRecall, query_type: "Q1_HIGH_RECALL_NEXT_PAGE", page_no: 2},
-    ]
-    : [
-      {
-        query: broadWithIntent || broad,
-        query_type: "Q3_BROADER_CATEGORY_WITH_CORE_INTENT_NEXT_PAGE",
-        page_no: 2,
-      },
-    ];
+  const hasBroaderCategory = Boolean(broad && broad !== highRecall);
+  const hasBroadIntentVariant = Boolean(hasBroaderCategory && signal &&
+    broadWithIntent !== broad);
+  const values = normalizedRound === 1
+    ? [{
+      query: hasBroadIntentVariant ? broadWithIntent
+        : (hasBroaderCategory ? broad : highRecall),
+      query_type: hasBroadIntentVariant
+        ? "Q3_BROADER_CATEGORY_WITH_CORE_INTENT"
+        : (hasBroaderCategory
+          ? "Q3_BROADER_CATEGORY"
+          : "Q1_HIGH_RECALL_NEXT_PAGE"),
+      page_no: hasBroaderCategory ? 1 : 2,
+    }]
+    : [{
+      query: broad || highRecall,
+      query_type: hasBroaderCategory
+        ? (hasBroadIntentVariant
+          ? "Q3_BROADER_CATEGORY"
+          : "Q3_BROADER_CATEGORY_NEXT_PAGE")
+        : "Q1_HIGH_RECALL_LATER_PAGE",
+      page_no: hasBroaderCategory && !hasBroadIntentVariant ? 2
+        : (hasBroaderCategory ? 1 : 3),
+    }];
   return values.filter((entry) => entry.query).map((entry) => ({
     ...entry,
-    fallback_level: Number(round) + 2,
+    fallback_level: normalizedRound + 2,
   }));
 }
 
@@ -3290,6 +3308,7 @@ module.exports = {
   TaobaoProductProvider,
   UnavailableProductProvider,
   budgetPreferenceAssessment,
+  buildCandidateRefillQueries,
   createProductProvider,
   extractTaobaoItems,
   mapTaobaoProduct,

@@ -208,7 +208,7 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
   const allIds = [];
   const allProductIdentities = [];
 
-  if (looks.length < 2 || looks.length > 4) errors.push("LOOK_COUNT_OUT_OF_RANGE");
+  if (looks.length < 1 || looks.length > 4) errors.push("LOOK_COUNT_OUT_OF_RANGE");
   for (const look of looks) {
     const categories = new Set(look.selected_products.map((product) => product.category));
     for (const required of ["top", "bottom", "shoes"]) {
