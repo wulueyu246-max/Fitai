@@ -241,12 +241,26 @@ function audienceFit(product, target, text, vision) {
       [`audience:${childMatch[0]}`, `target:${target.targetAudience}`],
     );
   }
-  if (requestedGender !== "unisex" && productGender !== "unisex" &&
-      productGender !== requestedGender) {
+  const explicitOppositeGender =
+    (requestedGender === "male" && productGender === "female") ||
+    (requestedGender === "female" && productGender === "male");
+  if (explicitOppositeGender) {
     return evidence("severe_mismatch", "structured_product_metadata", 0.99, [
       `product_gender:${productGender}`,
       `target_gender:${requestedGender}`,
     ]);
+  }
+  if (productGender === "unknown") {
+    return evidence(
+      "unknown",
+      "missing_product_gender_evidence",
+      0,
+      [
+        "product_gender:unknown",
+        `target_gender:${requestedGender}`,
+      ],
+      EVIDENCE_APPLICABILITY.UNKNOWN,
+    );
   }
   const matureMatch = text.match(MATURE_EXPRESSION_PATTERN);
   if (matureMatch && target.wantsYoung && !target.allowsTraditional) {

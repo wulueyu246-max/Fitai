@@ -158,6 +158,83 @@ test("Optional B: confirmed child hosiery remains a Hard Reject for an adult req
   );
 });
 
+test("unknown product gender is uncertainty, not an opposite-gender conflict", () => {
+  const result = evaluateProductAcceptance(
+    product("极简小号单肩包", {
+      category: "bag",
+      gender: "unknown",
+      original_gender: "unknown",
+      price: 159,
+    }),
+    optionalRequirement("bag"),
+    context({gender: "female", scene: "nightlife"}),
+  );
+
+  assert.equal(result.allowed, true);
+  assert.equal(result.acceptance.evidence.audience_fit.value, "unknown");
+  assert.equal(
+    result.acceptance.evidence.audience_fit.applicability,
+    EVIDENCE_APPLICABILITY.UNKNOWN,
+  );
+  assert.equal(
+    result.acceptance.hard_reasons.includes("AUDIENCE_SEVERE_MISMATCH"),
+    false,
+  );
+});
+
+test("explicit opposite product gender remains a hard conflict", () => {
+  const femaleRequestMaleProduct = evaluateProductAcceptance(
+    product("男士真皮单肩包", {
+      category: "bag",
+      gender: "male",
+      original_gender: "male",
+    }),
+    optionalRequirement("bag"),
+    context({gender: "female", scene: "nightlife"}),
+  );
+  const maleRequestFemaleProduct = evaluateProductAcceptance(
+    product("女士真皮单肩包", {
+      category: "bag",
+      gender: "female",
+      original_gender: "female",
+    }),
+    requirement("bag", {gender: "male", scene: "date"}),
+    context({gender: "male", scene: "date"}),
+  );
+
+  for (const result of [femaleRequestMaleProduct, maleRequestFemaleProduct]) {
+    assert.equal(result.allowed, false);
+    assert.equal(result.acceptance.result, "HARD_REJECT");
+    assert.deepEqual(result.acceptance.hard_reasons, [
+      "AUDIENCE_SEVERE_MISMATCH",
+    ]);
+  }
+});
+
+test("unisex product remains compatible with male and female requests", () => {
+  for (const gender of ["female", "male"]) {
+    const request = gender === "female"
+      ? optionalRequirement("bag")
+      : requirement("bag", {gender: "male", scene: "date"});
+    const result = evaluateProductAcceptance(
+      product("男女同款极简单肩包", {
+        category: "bag",
+        gender: "unisex",
+        original_gender: "unisex",
+      }),
+      request,
+      context({gender, scene: gender === "female" ? "nightlife" : "date"}),
+    );
+
+    assert.equal(result.allowed, true);
+    assert.notEqual(result.acceptance.result, "HARD_REJECT");
+    assert.equal(
+      result.acceptance.hard_reasons.includes("AUDIENCE_SEVERE_MISMATCH"),
+      false,
+    );
+  }
+});
+
 test("Optional C: a valid bag is not rejected for missing clothing-level expression evidence", () => {
   const result = evaluateProductAcceptance(
     product("女士黑色小号单肩包", {
