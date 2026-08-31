@@ -1616,7 +1616,7 @@ function buildMessages(groups, context) {
       content: [
         "Each selected_products entry must include the source requirement_index and product_id.",
         "All user-facing natural-language values MUST be written in Simplified Chinese (zh-CN). English is allowed only for internal enum values and identifiers.",
-        "Never select underwear, bras, sleepwear, homewear, adult products, shapewear, or swimwear unless explicit_user_search is true. Socks or hosiery are allowed only when the concrete outfit_blueprint requires them.",
+        "Never select underwear, bras, sleepwear, homewear, adult products, shapewear, or swimwear unless explicit_user_search is true. Socks or hosiery are allowed only when a concrete outfit_blueprint or an explicit Styling Completion requirement requests them.",
         "Prioritize top, bottom, shoes, outerwear, dress, and bag over accessory, underwear, and homewear.",
         "For female date, sweet, elegant, premium, or romantic dress requirements, rank visible tailoring, a defined waistline, considered skirt shape, and refined feminine design details above generic solid-color basic dresses. Do not apply this preference to explicitly neutral or unisex intent.",
         "For hats, bags, and accessories, exclude maternity, household, protective, storage, medical, workwear, and other non-fashion utility products even when their marketplace category superficially matches.",

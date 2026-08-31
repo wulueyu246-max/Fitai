@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  STYLING_COMPLETION_AUTHORITY,
   buildTaobaoSearchPlan,
   buildSearchKeywords,
   matchesTargetCategory,
@@ -418,6 +419,39 @@ test("low-value products are allowed only for an explicit matching search", () =
     explicit_user_search: false,
     user_search_keyword: "男士内裤",
   }));
+});
+
+test("a diagnosed styling-completion legwear requirement is distinct from user or Blueprint authority", () => {
+  const input = {
+    category: "accessory",
+    search_subcategory: "socks",
+    gender: "female",
+    item_name: "连裤袜",
+    style_role: "styling_completion",
+    search_keywords: ["女 连裤袜", "女 连裤袜 精致"],
+    negative_keywords: [],
+    styling_completion_recommended: true,
+    blueprint_required: false,
+    explicit_user_search: false,
+  };
+  const untrusted = normalizeProductRequirement(input);
+  const requirement = normalizeProductRequirement(input, {
+    [STYLING_COMPLETION_AUTHORITY]: true,
+  });
+
+  assert.equal(untrusted.styling_completion_recommended, false);
+  assert.notEqual(
+    productQualityBlock(product("untrusted-hosiery", "轻薄黑色连裤袜"), untrusted),
+    null,
+  );
+  assert.equal(requirement.styling_completion_recommended, true);
+  assert.equal(requirement.styling_completion_required, false);
+  assert.equal(requirement.blueprint_required, false);
+  assert.equal(requirement.explicit_user_search, false);
+  assert.equal(
+    productQualityBlock(product("completion-hosiery", "轻薄黑色连裤袜"), requirement),
+    null,
+  );
 });
 
 test("primary outfit categories sort before accessories", () => {

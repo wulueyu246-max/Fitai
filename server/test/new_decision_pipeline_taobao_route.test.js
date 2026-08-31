@@ -137,7 +137,7 @@ test("/outfit executes the native Taobao decision pipeline without leaking crede
     assert.equal(trace.query_plans.every((entry) =>
       entry.query_plan_version === "concept_search_query_planner.v2"), true);
     assert.equal(calls.length >= 18, true);
-    assert.equal(calls.every((query) => /^女\s/u.test(query)), true);
+    assert.equal(calls.every((query) => /^女(?:士)?\s/u.test(query)), true);
 
     for (const secret of [APP_SECRET_CANARY, PID_CANARY, TOKEN_CANARY,
       "CANARY_SIGN"]) {

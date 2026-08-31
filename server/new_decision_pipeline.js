@@ -6,6 +6,10 @@ const {
 } = require("./look_concept_compiler");
 const {ProductProviderError} = require("./product_provider");
 const {canonicalProductIdentity} = require("./product_acceptance_gate");
+const {
+  LOOK_STYLING_COMPLETION_VERSION,
+  completePortfolioStyling,
+} = require("./look_styling_completion");
 
 const NEW_DECISION_PIPELINE_VERSION = "new_decision_pipeline.v1";
 const FINAL_PORTFOLIO_VALIDATOR_VERSION = "final_portfolio_validator.v1";
@@ -68,6 +72,9 @@ const PUBLIC_PRODUCT_FIELDS = Object.freeze([
   "product_acceptance_penalty", "product_acceptance_evidence",
   "product_acceptance_trace", "ai_rerank_fallback_reason",
   "outfit_product_acceptance_penalty",
+  "styling_slot", "styling_completion_slot",
+  "styling_completion_selected", "styling_completion_score_delta",
+  "styling_completion_version",
 ]);
 
 function publicUrl(value) {
@@ -358,7 +365,111 @@ function providerContext(decisionContext, compiled) {
   };
 }
 
-function buildResponse({decisionContext, compiled, validation, products, trace}) {
+function publicCompletionForLook(result = {}) {
+  const diagnosis = result.diagnosis || {};
+  return Object.freeze({
+    version: result.version || LOOK_STYLING_COMPLETION_VERSION,
+    action: result.completion_action || "NONE",
+    required_optional_slots: Object.freeze([
+      ...(diagnosis.required_optional_slots || []),
+    ]),
+    recommended_optional_slots: Object.freeze([
+      ...(diagnosis.recommended_optional_slots || []),
+    ]),
+    unnecessary_slots: Object.freeze([
+      ...(diagnosis.unnecessary_slots || []),
+    ]),
+    diagnosis: diagnosis.dimensions || null,
+    before_score: Number.isFinite(Number(result.before_score))
+      ? Number(result.before_score) : null,
+    after_score: Number.isFinite(Number(result.after_score))
+      ? Number(result.after_score) : null,
+    score_delta: Number.isFinite(Number(result.score_delta))
+      ? Number(result.score_delta) : 0,
+    selected_optional_candidate_ids: Object.freeze([
+      ...(result.selected_optional_candidate_ids || []),
+    ]),
+    core_unchanged: result.core_unchanged !== false,
+  });
+}
+
+function publicCandidatePipelineSummary(trace = null) {
+  if (!trace || typeof trace !== "object") return null;
+  const count = (key) => Array.isArray(trace[key]) ? trace[key].length : 0;
+  return Object.freeze({
+    request_id: trace.request_id || null,
+    provider: trace.provider || null,
+    relevance_executed: trace.relevance_executed === true,
+    reranker_executed: trace.reranker_executed === true,
+    strategy_executed: trace.strategy_executed === true,
+    reranker_status: trace.reranker_status || null,
+    raw_candidate_count: count("raw_candidates"),
+    relevance_pass_count: count("relevance_pass"),
+    gate_pass_count: count("gate_pass"),
+    gate_reject_count: count("gate_reject"),
+    reranker_keep_count: count("reranker_keep"),
+    query_plans: Object.freeze((trace.query_plans || []).map((entry) =>
+      Object.freeze({
+        look_id: entry.look_id,
+        concept_id: entry.concept_id,
+        slot: entry.slot,
+        query_plan_version: entry.query_plan_version,
+        commerce_queries: Object.freeze([...(entry.commerce_queries || [])]),
+      }))),
+  });
+}
+
+function publicStylingCompletionTrace(trace = null) {
+  if (!trace || typeof trace !== "object") return null;
+  return Object.freeze({
+    version: LOOK_STYLING_COMPLETION_VERSION,
+    status: trace.status || "NONE",
+    required_optional_slots: Object.freeze([
+      ...(trace.required_optional_slots || []),
+    ]),
+    recommended_optional_slots: Object.freeze([
+      ...(trace.recommended_optional_slots || []),
+    ]),
+    optional_retrieval_attempted: trace.optional_retrieval_attempted === true,
+    optional_retrieval_provider: trace.optional_retrieval_provider || "NONE",
+    optional_candidate_count: Number(trace.optional_candidate_count || 0),
+    selected_optional_count: Number(trace.selected_optional_count || 0),
+    selected_optional_candidate_ids: Object.freeze([
+      ...(trace.selected_optional_candidate_ids || []),
+    ]),
+    core_unchanged: trace.core_unchanged !== false,
+    validation_errors: Object.freeze([...(trace.validation_errors || [])]),
+    requirements: Object.freeze((trace.requirements || []).map((requirement) =>
+      Object.freeze({
+        look_id: requirement.look_id,
+        concept_id: requirement.concept_id,
+        category: requirement.category,
+        search_subcategory: requirement.search_subcategory,
+        styling_completion_slot: requirement.styling_completion_slot,
+        styling_completion_parent_look_id:
+          requirement.styling_completion_parent_look_id,
+        styling_completion_required:
+          requirement.styling_completion_required === true,
+        styling_completion_recommended:
+          requirement.styling_completion_recommended === true,
+        query_plan_version: requirement.query_plan_version,
+        search_keywords: Object.freeze([...(requirement.search_keywords || [])]),
+      }))),
+    optional_candidate_pipeline_trace: publicCandidatePipelineSummary(
+      trace.optional_candidate_pipeline_trace,
+    ),
+    results: Object.freeze((trace.results || []).map(publicCompletionForLook)),
+  });
+}
+
+function buildResponse({
+  decisionContext,
+  compiled,
+  validation,
+  products,
+  trace,
+  stylingCompletion,
+}) {
   const brain = decisionContext.intent?.user_intent_brain || {};
   const style = String(brain.explicit_style?.value || "").trim();
   const bodySummary = String(
@@ -371,11 +482,21 @@ function buildResponse({decisionContext, compiled, validation, products, trace})
     acceptedLookIds.has(product.look_id)).map(publicProductForResponse);
   const acceptedRequirements = compiled.requirements.filter((requirement) =>
     acceptedLookIds.has(requirement.look_id));
-  const publicLooks = Object.freeze(validation.looks.map(publicLookForResponse));
+  const completionByLook = new Map(
+    (stylingCompletion?.results || []).map((result) => [result.look_id, result]),
+  );
+  const publicLooks = Object.freeze(validation.looks.map((look) =>
+    publicLookForResponse({
+      ...look,
+      styling_completion: publicCompletionForLook(
+        completionByLook.get(look.look_id) || {},
+      ),
+    })));
   const publicValidation = Object.freeze({
     ...validation,
     looks: publicLooks,
   });
+  const publicStylingCompletion = publicStylingCompletionTrace(stylingCompletion);
   return Object.freeze({
     request_id: decisionContext.request_id,
     decision_context_id: decisionContext.decision_context_id,
@@ -403,6 +524,7 @@ function buildResponse({decisionContext, compiled, validation, products, trace})
       compiled_concept_count: compiled.looks.length,
       portfolio_validation: publicValidation,
       candidate_pipeline_trace: trace || null,
+      styling_completion: publicStylingCompletion,
     }),
     styling_strategy: Object.freeze({
       source: "BodyFitIntelligence",
@@ -412,7 +534,9 @@ function buildResponse({decisionContext, compiled, validation, products, trace})
       top: "See concept-backed final Looks",
       bottom: "See concept-backed final Looks",
       shoes: "See concept-backed final Looks",
-      accessories: "Selected only when compiled by the concept contract",
+      accessories: publicStylingCompletion?.selected_optional_count > 0
+        ? "Selected dynamically after the immutable Core Look"
+        : "No quality-safe optional styling item improved the Core Look",
       summary: `${validation.looks.length} candidate-backed concept Looks`,
       products: Object.freeze(acceptedProducts),
     }),
@@ -474,19 +598,54 @@ async function executeNewDecisionPipeline({
     );
   }
 
-  const validation = validateFinalPortfolio({
+  const coreTrace = productProvider.lastPipelineTrace || null;
+  const coreValidation = validateFinalPortfolio({
     decisionContext,
     compiled,
     products,
   });
-  if (validation.status !== "PASS") {
+  if (coreValidation.status !== "PASS") {
     throw new NewDecisionPipelineError("Final concept portfolio is invalid", {
       code: "NEW_DECISION_PORTFOLIO_INVALID",
       stage: "PORTFOLIO_VALIDATOR",
-      details: validation,
+      details: coreValidation,
     });
   }
-  const trace = productProvider.lastPipelineTrace || null;
+
+  const completion = await completePortfolioStyling({
+    decisionContext,
+    compiled,
+    coreValidation,
+    coreProducts: products,
+    productProvider,
+    providerContext: providerContext(decisionContext, compiled),
+    coreTrace,
+    logger,
+  });
+  let completedProducts = completion.products;
+  let stylingCompletion = completion.trace;
+  let validation = validateFinalPortfolio({
+    decisionContext,
+    compiled,
+    products: completedProducts,
+  });
+  if (validation.status !== "PASS") {
+    const completionValidationErrors = Object.freeze([...(validation.errors || [])]);
+    logger.warn?.("look_styling_completion_portfolio_reverted", {
+      request_id: decisionContext.request_id || undefined,
+      errors: completionValidationErrors,
+    });
+    completedProducts = products;
+    validation = coreValidation;
+    stylingCompletion = Object.freeze({
+      ...completion.trace,
+      status: "OPTIONAL_VALIDATION_FAILED_CORE_RETAINED",
+      selected_optional_count: 0,
+      selected_optional_candidate_ids: Object.freeze([]),
+      core_unchanged: true,
+      validation_errors: completionValidationErrors,
+    });
+  }
   logger.info?.("new_decision_pipeline_summary", {
     request_id: decisionContext.request_id,
     concept_count: compiled.looks.length,
@@ -499,8 +658,9 @@ async function executeNewDecisionPipeline({
     decisionContext,
     compiled,
     validation,
-    products,
-    trace,
+    products: completedProducts,
+    trace: coreTrace,
+    stylingCompletion,
   });
 }
 

@@ -1,5 +1,10 @@
 const {resolveIntentPriorityScore} = require("./intent_priority");
 
+// This symbol is deliberately not representable in JSON. Only the internal
+// Styling Completion orchestration path can grant this authority; callers
+// cannot promote an ordinary requirement with similarly named fields.
+const STYLING_COMPLETION_AUTHORITY = Symbol("fitai.styling_completion_authority");
+
 const SUPPORTED_PRODUCT_CATEGORIES = Object.freeze([
   "top",
   "bottom",
@@ -372,6 +377,10 @@ function normalizeProductRequirement(input = {}, context = {}) {
     "market_soft_signals",
     12,
   );
+  const trustedStylingCompletion =
+    context?.[STYLING_COMPLETION_AUTHORITY] === true &&
+    String(input.style_role || input.styleRole || context.style_role || "")
+      .trim().toLowerCase() === "styling_completion";
   return {
     request_id: optionalText(
       input.request_id || input.requestId || context.request_id || context.requestId,
@@ -397,6 +406,10 @@ function normalizeProductRequirement(input = {}, context = {}) {
     ),
     blueprint_required: input.blueprint_required === true ||
       context.blueprint_required === true,
+    styling_completion_required: trustedStylingCompletion &&
+      input.styling_completion_required === true,
+    styling_completion_recommended: trustedStylingCompletion &&
+      input.styling_completion_recommended === true,
     product_type: optionalText(
       input.product_type || input.productType || itemName,
       "product_type",
@@ -812,7 +825,9 @@ function productQualityBlock(product, requirement = {}) {
     };
   }
   if (explicitlyRequestsLowValueProduct(requirement) ||
-      (requirement.blueprint_required === true &&
+      ((requirement.blueprint_required === true ||
+        requirement.styling_completion_required === true ||
+        requirement.styling_completion_recommended === true) &&
        requirement.search_subcategory === "socks")) return null;
   for (const group of LOW_VALUE_PRODUCT_GROUPS) {
     const blockedKeyword = group.terms.find((term) => evidence.includes(normalizeText(term)));
@@ -1003,6 +1018,7 @@ function uniqueStrings(values) {
 }
 
 module.exports = {
+  STYLING_COMPLETION_AUTHORITY,
   CATEGORY_TERMS,
   LOW_QUALITY_TITLE_TERMS,
   LOW_VALUE_PRODUCT_GROUPS,
