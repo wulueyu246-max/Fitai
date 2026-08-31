@@ -87,43 +87,86 @@ function evidenceText(product = {}) {
   return [
     product.title,
     product.name,
-    product.category,
-    product.subcategory,
+    valueOf(product.category_evidence),
+    valueOf(product.category),
+    valueOf(product.subcategory_evidence),
+    valueOf(product.subcategory),
     product.search_subcategory,
-    product.color,
+    valueOf(product.candidate_enrichment?.color_evidence),
+    valueOf(product.color),
     product.color_label,
-    product.style,
+    valueOf(product.candidate_enrichment?.style_evidence),
+    valueOf(product.style),
     product.style_tags,
     product.aesthetic_tags,
-    product.silhouette,
+    valueOf(product.candidate_enrichment?.silhouette_evidence),
+    valueOf(product.silhouette),
     product.silhouette_tags,
     product.detail_tags,
-    product.material,
-    product.fit,
-    product.footwear,
+    valueOf(product.candidate_enrichment?.material_evidence),
+    valueOf(product.material),
+    valueOf(product.candidate_enrichment?.fit_evidence),
+    valueOf(product.fit),
+    valueOf(product.candidate_enrichment?.footwear_evidence),
+    valueOf(product.footwear),
     product.occasion_tags,
     product.tags,
   ].flat(Infinity).filter(Boolean).join(" ").toLowerCase();
 }
 
+function normalizedTaxonomyValue(value) {
+  const resolved = valueOf(value, "");
+  return String(resolved === "unknown" ? "" : resolved || "")
+    .trim().toLowerCase();
+}
+
+function optionalProductTaxonomy(product = {}) {
+  const enrichment = product.candidate_enrichment;
+  if (enrichment && typeof enrichment === "object") {
+    return Object.freeze({
+      category: normalizedTaxonomyValue(
+        enrichment.category_evidence || enrichment.normalized_category,
+      ),
+      subcategory: normalizedTaxonomyValue(enrichment.subcategory),
+      authoritative: true,
+    });
+  }
+  return Object.freeze({
+    category: normalizedTaxonomyValue(
+      product.category_evidence || product.category,
+    ),
+    subcategory: normalizedTaxonomyValue(
+      product.subcategory_evidence || product.subcategory ||
+        product.search_subcategory,
+    ),
+    authoritative: false,
+  });
+}
+
 function completionSlot(product = {}) {
-  const explicit = String(
-    product.styling_completion_slot || product.styling_slot || product.slot || "",
-  ).trim().toLowerCase();
-  if (OPTIONAL_STYLING_SLOTS.includes(explicit)) return explicit;
-  const category = String(product.category || "").trim().toLowerCase();
-  const subcategory = String(
-    product.search_subcategory || product.subcategory || "",
-  ).trim().toLowerCase();
+  const {category, subcategory, authoritative} = optionalProductTaxonomy(product);
   if (category === "bag" || subcategory === "bag") return "bag";
+  if (subcategory === "hosiery") return "hosiery";
   if (subcategory === "socks") {
     return /(?:丝袜|连裤袜|stocking|hosiery|tights)/iu.test(evidenceText(product))
       ? "hosiery" : "socks";
   }
   if (subcategory === "belt") return "belt";
   if (category === "outerwear") return "outerwear";
-  if (category === "hat" || subcategory === "hat") return "headwear";
+  if (category === "hat" || ["hat", "headwear"].includes(subcategory)) {
+    return "headwear";
+  }
+  if (subcategory === "jewelry") return "accessory";
   if (category === "accessory") return "accessory";
+  // An EnrichedCandidate is authoritative product evidence. If it cannot
+  // identify an Optional family, never let the requested slot manufacture
+  // that fact. Legacy/test fixtures without enrichment retain their explicit
+  // slot compatibility below.
+  if (authoritative) return "";
+  const explicit = String(
+    product.styling_completion_slot || product.styling_slot || product.slot || "",
+  ).trim().toLowerCase();
+  if (OPTIONAL_STYLING_SLOTS.includes(explicit)) return explicit;
   return "";
 }
 
@@ -1016,9 +1059,16 @@ function annotateOptionalCandidates(candidates, requirements) {
   return candidates.map((candidate) => {
     const requirement = bySyntheticLook.get(String(candidate.look_id || ""));
     if (!requirement) return candidate;
+    const actualSlot = completionSlot(candidate);
+    const {
+      styling_completion_slot: ignoredRequestedSlot,
+      styling_slot: ignoredStylingSlot,
+      ...productFacts
+    } = candidate;
     return Object.freeze({
-      ...candidate,
-      styling_completion_slot: requirement.styling_completion_slot,
+      ...productFacts,
+      ...(actualSlot ? {styling_completion_slot: actualSlot} : {}),
+      styling_completion_requested_slot: requirement.styling_completion_slot,
       styling_completion_parent_look_id:
         requirement.styling_completion_parent_look_id,
     });

@@ -20,6 +20,7 @@ const {
   TAOBAO_MATERIAL_SEARCH_METHOD,
   TaobaoApiError,
 } = require("../taobao_client");
+const {STYLING_COMPLETION_AUTHORITY} = require("../product_relevance");
 const {TaobaoService} = require("../taobao_service");
 
 function taobaoItem(overrides = {}) {
@@ -738,6 +739,121 @@ test("builds a twenty-item quality-filtered pool and sends only four to AI", asy
   assert.equal(capturedGroups[0].candidates.length, 4);
   assert.equal(products.length, 4);
   assert.ok(products.every((product) => product.source === "taobao"));
+});
+
+test("trusted styling completion executes typed Q1 and Q2 verbatim and traces Q3 conditionally", async () => {
+  const q1 = "女士 单鞋";
+  const q2 = "女士 单鞋 低跟";
+  const q3 = "女士 鞋";
+  const requirement = {
+    request_id: "styling-query-contract",
+    look_id: "styling-query-look",
+    category: "shoes",
+    gender: "female",
+    style_role: "styling_completion",
+    styling_completion_recommended: true,
+    item_name: "女性化低跟单鞋",
+    query_plan_version: "styling_completion_query.v1",
+    commerce_query_plan: {
+      version: "styling_completion_query.v1",
+      query_candidates: [
+        {query_id: "Q1", query: q1},
+        {query_id: "Q2", query: q2},
+      ],
+      fallback_query: {query_id: "Q3", query: q3},
+    },
+  };
+  const makeProvider = (calls, logs, responseQuery) => new TaobaoProductProvider({
+    pid: "mm_100_200_300",
+    adzoneId: "300",
+    client: {
+      call: async (method, params) => {
+        calls.push(params.q);
+        if (params.q !== responseQuery) return response(method, []);
+        return response(method, [taobaoItem({
+          item_basic_info: {
+            item_id: `styling-${calls.length}`,
+            title: "女士女性化低跟单鞋",
+            category_name: "女鞋",
+            pict_url: `//img.example.com/styling-${calls.length}.jpg`,
+          },
+        })]);
+      },
+    },
+    logger: {info: (...args) => logs.push(args), warn() {}, error() {}},
+  });
+
+  const successfulCalls = [];
+  const successfulLogs = [];
+  const successfulProvider = makeProvider(successfulCalls, successfulLogs, q1);
+  await successfulProvider.recommendForQueries([requirement], {
+    requestId: "styling-query-success",
+    decision_pipeline: "new_decision_pipeline.v1",
+    [STYLING_COMPLETION_AUTHORITY]: true,
+  });
+  assert.deepEqual(successfulCalls, [q1, q2]);
+  const successTrace = successfulLogs.find(([name]) =>
+    name === "search_expansion_summary")[1];
+  assert.deepEqual(successTrace.styling_completion_query_trace, [
+    {query_id: "Q1", query: q1, executed: true, result_count: 1},
+    {query_id: "Q2", query: q2, executed: true, result_count: 0},
+    {query_id: "Q3", query: q3, executed: false, result_count: 0},
+  ]);
+  assert.equal(successTrace.fallback_level, 1);
+
+  const fallbackCalls = [];
+  const fallbackLogs = [];
+  const fallbackProvider = makeProvider(fallbackCalls, fallbackLogs, q3);
+  await fallbackProvider.recommendForQueries([requirement], {
+    requestId: "styling-query-fallback",
+    decision_pipeline: "new_decision_pipeline.v1",
+    [STYLING_COMPLETION_AUTHORITY]: true,
+  });
+  assert.deepEqual(fallbackCalls, [q1, q2, q3]);
+  const fallbackTrace = fallbackLogs.find(([name]) =>
+    name === "search_expansion_summary")[1];
+  assert.equal(fallbackTrace.fallback_level, 2);
+  assert.equal(fallbackTrace.fallback_reason, "INTENT_AND_HIGH_RECALL_ZERO");
+  assert.equal(fallbackTrace.styling_completion_query_trace.at(-1).query_id, "Q3");
+  assert.equal(fallbackTrace.styling_completion_query_trace.at(-1).executed, true);
+});
+
+test("candidate pipeline exposes a safe product acceptance trace", async () => {
+  const requirement = {
+    look_id: "acceptance-trace-look",
+    category: "shoes",
+    gender: "female",
+    item_name: "女性化低跟单鞋",
+  };
+  const result = await runSharedCandidatePipeline({
+    requirements: [requirement],
+    groups: [{
+      requirement,
+      candidates: [{
+        product_id: "acceptance-trace-shoe",
+        source: "taobao",
+        title: "女士女性化低跟单鞋",
+        category: "shoes",
+        gender: "female",
+        original_gender: "female",
+        price: 199,
+        image_url: "https://img.example.com/acceptance-trace.jpg",
+        relevance_score: 90,
+      }],
+    }],
+    context: {gender: "female"},
+    reranker: {async rerank({groups}) {
+      return groups.flatMap((group) => group.candidates);
+    }},
+    logger: {info() {}, warn() {}, error() {}},
+  });
+  const trace = result.trace.gate_pass[0].product_acceptance_trace;
+  assert.ok(trace);
+  assert.ok(Array.isArray(trace.hard_reasons));
+  assert.ok(Array.isArray(trace.soft_reasons));
+  assert.equal(typeof trace.penalty, "number");
+  assert.equal(typeof trace.evidence, "object");
+  assert.doesNotMatch(JSON.stringify(trace), /https?:\/\//u);
 });
 
 test("Candidate Refill never promotes a Soft Reject into the selectable pool", async () => {

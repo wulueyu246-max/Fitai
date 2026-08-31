@@ -139,6 +139,35 @@ test("/outfit executes the native Taobao decision pipeline without leaking crede
     assert.equal(calls.length >= 18, true);
     assert.equal(calls.every((query) => /^女(?:士)?\s/u.test(query)), true);
 
+    const completionTrace = payload.decision_pipeline.styling_completion;
+    assert.ok(completionTrace);
+    assert.equal(completionTrace.core_unchanged, true);
+    assert.equal(completionTrace.requirements.every((requirement) =>
+      requirement.query_plan_version === "styling_completion_query.v1" &&
+        requirement.search_keywords.length === 2), true);
+    if (completionTrace.optional_retrieval_attempted) {
+      const optionalPipeline = completionTrace.optional_candidate_pipeline_trace;
+      assert.ok(optionalPipeline);
+      assert.equal(Array.isArray(optionalPipeline.candidates), true);
+      assert.equal(optionalPipeline.candidates.length > 0, true);
+      assert.equal(optionalPipeline.candidates.every((candidate) =>
+        typeof candidate.slot === "string" &&
+          typeof candidate.query === "string" &&
+          ["PASS", "REJECT"].includes(candidate.relevance_result) &&
+          typeof candidate.gate_result === "string" &&
+          Array.isArray(candidate.gate_reasons) &&
+          Object.hasOwn(candidate, "applicability") &&
+          typeof candidate.final_disposition === "string"), true);
+      assert.equal(optionalPipeline.candidates.every((candidate) =>
+        candidate.stages.includes("GATE_REJECT")
+          ? candidate.gate_result === "REJECT"
+          : candidate.stages.includes("GATE_PASS")
+            ? candidate.gate_result === "PASS"
+            : candidate.gate_result === "NOT_EVALUATED"), true);
+      assert.equal(completionTrace.results.every((result) =>
+        Array.isArray(result.rejected_candidates)), true);
+    }
+
     for (const secret of [APP_SECRET_CANARY, PID_CANARY, TOKEN_CANARY,
       "CANARY_SIGN"]) {
       assert.equal(serialized.includes(secret), false);

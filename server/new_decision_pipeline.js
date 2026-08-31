@@ -389,11 +389,155 @@ function publicCompletionForLook(result = {}) {
     selected_optional_candidate_ids: Object.freeze([
       ...(result.selected_optional_candidate_ids || []),
     ]),
+    rejected_candidates: Object.freeze((result.rejected_candidates || []).map(
+      (entry) => Object.freeze({
+        candidate_id: String(entry?.candidate_id || ""),
+        slot: String(entry?.slot || ""),
+        reason: String(entry?.reason || "UNKNOWN"),
+        score_delta: Number.isFinite(Number(entry?.score_delta))
+          ? Number(entry.score_delta) : null,
+      }),
+    )),
     core_unchanged: result.core_unchanged !== false,
   });
 }
 
-function publicCandidatePipelineSummary(trace = null) {
+function publicEvidenceValue(value) {
+  if (["string", "number", "boolean"].includes(typeof value) || value == null) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return Object.freeze(value.slice(0, 20).map((entry) =>
+      ["string", "number", "boolean"].includes(typeof entry)
+        ? entry : String(entry ?? "").slice(0, 240)));
+  }
+  return String(value).slice(0, 240);
+}
+
+function publicEvidenceRecord(entry = {}) {
+  if (!entry || typeof entry !== "object") return null;
+  return Object.freeze({
+    value: publicEvidenceValue(entry.value),
+    applicability: ["APPLICABLE", "NOT_APPLICABLE", "UNKNOWN"].includes(
+      entry.applicability,
+    ) ? entry.applicability : "UNKNOWN",
+    source: String(entry.source || "unknown").slice(0, 80),
+    confidence: Number.isFinite(Number(entry.confidence))
+      ? Number(entry.confidence) : 0,
+    evidence: Object.freeze((entry.evidence || []).slice(0, 12).map((value) =>
+      String(value ?? "").replace(/https?:\/\/\S+/giu, "[URL_REDACTED]")
+        .slice(0, 240))),
+  });
+}
+
+function publicAcceptanceEvidence(evidence = null) {
+  if (!evidence || typeof evidence !== "object") return null;
+  return Object.freeze(Object.fromEntries(Object.entries(evidence).map(
+    ([dimension, entry]) => [dimension, publicEvidenceRecord(entry)],
+  )));
+}
+
+function publicEnrichmentTaxonomy(enrichment = null) {
+  if (!enrichment || typeof enrichment !== "object") return null;
+  return Object.freeze({
+    category: publicEvidenceRecord(
+      enrichment.category_evidence || enrichment.normalized_category,
+    ),
+    subcategory: publicEvidenceRecord(enrichment.subcategory),
+  });
+}
+
+function traceCandidateKey(entry = {}) {
+  return [entry.look_id, entry.slot, entry.candidate_id].map((value) =>
+    String(value || "")).join(":");
+}
+
+function acceptanceReasonCodes(entry = {}) {
+  const trace = entry.product_acceptance_trace || {};
+  const explicit = [
+    ...(trace.hard_reasons || []),
+    ...(trace.soft_reasons || []),
+  ];
+  if (explicit.length > 0) return [...new Set(explicit.map(String))];
+  const evidence = entry.product_acceptance_evidence || {};
+  return Object.entries(evidence).flatMap(([dimension, item]) =>
+    ["mismatch", "severe_mismatch", "unsupported", "anomaly_risk", "low"]
+      .includes(item?.value)
+      ? [`${dimension.toUpperCase()}:${String(item.value).toUpperCase()}`] : []);
+}
+
+function publicCandidateTimeline(trace, {selectedIds = [], completionRejects = []} = {}) {
+  const selected = new Set(selectedIds.map(String));
+  const completionRejected = new Map(completionRejects.map((entry) => [
+    String(entry?.candidate_id || ""),
+    String(entry?.reason || "COMPLETION_REJECTED"),
+  ]));
+  const stages = [
+    ["raw_candidates", "RAW"],
+    ["relevance_pass", "RELEVANCE_PASS"],
+    ["gate_reject", "GATE_REJECT"],
+    ["gate_pass", "GATE_PASS"],
+    ["reranker_keep", "RERANKER_KEEP"],
+    ["strategy_selected", "STRATEGY_SELECTED"],
+  ];
+  const candidates = new Map();
+  for (const [collection, stage] of stages) {
+    for (const entry of trace?.[collection] || []) {
+      const key = traceCandidateKey(entry);
+      const current = candidates.get(key) || {entry, stages: new Set()};
+      current.entry = entry;
+      current.stages.add(stage);
+      candidates.set(key, current);
+    }
+  }
+  return Object.freeze([...candidates.values()].map(({entry, stages: seen}) => {
+    const id = String(entry.candidate_id || "");
+    const relevancePass = seen.has("RELEVANCE_PASS");
+    const gatePass = seen.has("GATE_PASS");
+    const gateReject = seen.has("GATE_REJECT");
+    const completionReason = completionRejected.get(id);
+    const finalDisposition = selected.has(id) ? "SELECTED_OPTIONAL"
+      : completionReason ? `COMPLETION_REJECTED:${completionReason}`
+        : seen.has("STRATEGY_SELECTED") ? "STRATEGY_SELECTED"
+          : seen.has("RERANKER_KEEP") ? "RERANKER_KEEP_NOT_SELECTED"
+            : gateReject ? "GATE_REJECTED"
+              : gatePass ? "GATE_PASS_NOT_SELECTED"
+                : relevancePass ? "RELEVANCE_ONLY" : "RELEVANCE_REJECTED";
+    return Object.freeze({
+      look_id: String(entry.look_id || ""),
+      slot: String(entry.slot || ""),
+      candidate_id: id,
+      title: String(entry.title || "").slice(0, 240),
+      price: Number.isFinite(Number(entry.price)) ? Number(entry.price) : null,
+      brand: String(entry.brand || "").slice(0, 120),
+      category: String(entry.category || ""),
+      taxonomy: publicEnrichmentTaxonomy(entry.candidate_enrichment),
+      source: String(entry.source || "unknown"),
+      query: String(entry.search_keyword || "").slice(0, 240),
+      commerce_queries: Object.freeze([...(entry.commerce_queries || [])]
+        .map((value) => String(value).slice(0, 240))),
+      relevance_result: relevancePass ? "PASS" : "REJECT",
+      relevance_score: Number.isFinite(Number(entry.relevance_score))
+        ? Number(entry.relevance_score) : null,
+      // Candidate Gate stage and Product Acceptance are separate decisions.
+      // A candidate may pass Acceptance yet fail another upstream hard
+      // constraint, so never expose the Acceptance result as the Gate result.
+      gate_result: gatePass ? "PASS" : gateReject ? "REJECT" : "NOT_EVALUATED",
+      gate_reasons: Object.freeze([...new Set([
+        entry.reason,
+        ...acceptanceReasonCodes(entry),
+      ].filter(Boolean).map(String))]),
+      acceptance_result: entry.product_acceptance_result || null,
+      acceptance_penalty: Number.isFinite(Number(entry.product_acceptance_penalty))
+        ? Number(entry.product_acceptance_penalty) : null,
+      applicability: publicAcceptanceEvidence(entry.product_acceptance_evidence),
+      stages: Object.freeze([...seen]),
+      final_disposition: finalDisposition,
+    });
+  }));
+}
+
+function publicCandidatePipelineSummary(trace = null, completion = {}) {
   if (!trace || typeof trace !== "object") return null;
   const count = (key) => Array.isArray(trace[key]) ? trace[key].length : 0;
   return Object.freeze({
@@ -408,6 +552,7 @@ function publicCandidatePipelineSummary(trace = null) {
     gate_pass_count: count("gate_pass"),
     gate_reject_count: count("gate_reject"),
     reranker_keep_count: count("reranker_keep"),
+    candidates: publicCandidateTimeline(trace, completion),
     query_plans: Object.freeze((trace.query_plans || []).map((entry) =>
       Object.freeze({
         look_id: entry.look_id,
@@ -421,6 +566,8 @@ function publicCandidatePipelineSummary(trace = null) {
 
 function publicStylingCompletionTrace(trace = null) {
   if (!trace || typeof trace !== "object") return null;
+  const completionRejects = (trace.results || []).flatMap((result) =>
+    result.rejected_candidates || []);
   return Object.freeze({
     version: LOOK_STYLING_COMPLETION_VERSION,
     status: trace.status || "NONE",
@@ -457,6 +604,10 @@ function publicStylingCompletionTrace(trace = null) {
       }))),
     optional_candidate_pipeline_trace: publicCandidatePipelineSummary(
       trace.optional_candidate_pipeline_trace,
+      {
+        selectedIds: trace.selected_optional_candidate_ids || [],
+        completionRejects,
+      },
     ),
     results: Object.freeze((trace.results || []).map(publicCompletionForLook)),
   });

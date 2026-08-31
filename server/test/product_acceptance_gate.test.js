@@ -5,6 +5,7 @@ const test = require("node:test");
 
 const {
   canonicalProductIdentity,
+  EVIDENCE_APPLICABILITY,
   evaluateProductAcceptance,
 } = require("../product_acceptance_gate");
 const {
@@ -67,6 +68,220 @@ function product(title, overrides = {}) {
     ...overrides,
   };
 }
+
+function optionalRequirement(slot, overrides = {}) {
+  const definitions = {
+    hosiery: {
+      category: "accessory",
+      search_subcategory: "socks",
+      item_name: "连裤袜",
+    },
+    bag: {
+      category: "bag",
+      search_subcategory: "bag",
+      item_name: "单肩包",
+    },
+    accessory: {
+      category: "accessory",
+      search_subcategory: "jewelry",
+      item_name: "项链",
+    },
+    headwear: {
+      category: "hat",
+      search_subcategory: "hat",
+      item_name: "时尚帽子",
+    },
+  };
+  return requirement(definitions[slot].category, {
+    ...definitions[slot],
+    gender: "female",
+    scene: "nightlife",
+    style_role: "styling_completion",
+    styling_completion_required: false,
+    styling_completion_recommended: true,
+    ...overrides,
+  });
+}
+
+test("Optional A: ordinary hosiery is not Soft Rejected for absent whole-Look expression evidence", () => {
+  const ctx = context({
+    raw: "今晚出去玩，年轻一点，有设计感，别太正式",
+    gender: "female",
+    scene: "nightlife",
+    desired: ["年轻", "有设计感"],
+  });
+  const result = evaluateProductAcceptance(
+    product("女士轻薄黑色连裤袜", {
+      category: "accessory",
+      gender: "female",
+      price: 39,
+    }),
+    optionalRequirement("hosiery"),
+    ctx,
+  );
+
+  assert.equal(result.allowed, true);
+  assert.notEqual(result.acceptance.result, "SOFT_REJECT");
+  assert.equal(result.acceptance.penalty, 2);
+  assert.equal(
+    result.acceptance.evidence.contemporary_fit.applicability,
+    EVIDENCE_APPLICABILITY.NOT_APPLICABLE,
+  );
+  assert.equal(
+    result.acceptance.evidence.desired_impression_fit.applicability,
+    EVIDENCE_APPLICABILITY.NOT_APPLICABLE,
+  );
+  assert.equal(
+    result.acceptance.evidence.visual_quality.applicability,
+    EVIDENCE_APPLICABILITY.UNKNOWN,
+  );
+});
+
+test("Optional B: confirmed child hosiery remains a Hard Reject for an adult request", () => {
+  const result = evaluateProductAcceptance(
+    product("女童儿童舞蹈连裤袜", {
+      category: "accessory",
+      gender: "female",
+    }),
+    optionalRequirement("hosiery"),
+    context({gender: "female", scene: "nightlife"}),
+  );
+
+  assert.equal(result.allowed, false);
+  assert.equal(result.acceptance.result, "HARD_REJECT");
+  assert.deepEqual(result.acceptance.hard_reasons, [
+    "AUDIENCE_SEVERE_MISMATCH",
+  ]);
+  assert.equal(
+    result.acceptance.evidence.audience_fit.applicability,
+    EVIDENCE_APPLICABILITY.APPLICABLE,
+  );
+});
+
+test("Optional C: a valid bag is not rejected for missing clothing-level expression evidence", () => {
+  const result = evaluateProductAcceptance(
+    product("女士黑色小号单肩包", {
+      category: "bag",
+      gender: "female",
+      price: 159,
+    }),
+    optionalRequirement("bag"),
+    context({
+      raw: "今晚出去玩，年轻一点，有设计感，别太正式",
+      gender: "female",
+      scene: "nightlife",
+      desired: ["年轻", "有设计感"],
+    }),
+  );
+
+  assert.equal(result.allowed, true);
+  assert.notEqual(result.acceptance.result, "SOFT_REJECT");
+  assert.equal(
+    result.acceptance.evidence.contemporary_fit.applicability,
+    EVIDENCE_APPLICABILITY.NOT_APPLICABLE,
+  );
+  assert.equal(
+    result.acceptance.evidence.desired_impression_fit.applicability,
+    EVIDENCE_APPLICABILITY.NOT_APPLICABLE,
+  );
+});
+
+test("Optional D: a formal Look may reject an explicitly exaggerated street hat", () => {
+  const result = evaluateProductAcceptance(
+    product("女士夸张街头涂鸦超大棒球帽", {
+      category: "hat",
+      gender: "female",
+      price: 129,
+    }),
+    optionalRequirement("headwear", {
+      scene: "formal_event",
+      style: "formal",
+    }),
+    context({
+      raw: "正式晚宴，保持克制优雅",
+      gender: "female",
+      scene: "formal_event",
+      desired: ["正式", "优雅"],
+      explicitStyle: "formal",
+    }),
+  );
+
+  assert.equal(result.allowed, true);
+  assert.equal(result.acceptance.result, "SOFT_REJECT");
+  assert.equal(result.acceptance.evidence.occasion_fit.value, "mismatch");
+  assert.equal(
+    result.acceptance.evidence.occasion_fit.applicability,
+    EVIDENCE_APPLICABILITY.APPLICABLE,
+  );
+});
+
+test("Optional E: ordinary jewelry need not independently carry the whole-Look impression", () => {
+  const result = evaluateProductAcceptance(
+    product("女士淡水珍珠项链", {
+      category: "accessory",
+      gender: "female",
+      price: 99,
+    }),
+    optionalRequirement("accessory"),
+    context({
+      raw: "今晚出去玩，年轻一点，有设计感，别太正式",
+      gender: "female",
+      scene: "nightlife",
+      desired: ["年轻", "有设计感"],
+    }),
+  );
+
+  assert.equal(result.allowed, true);
+  assert.notEqual(result.acceptance.result, "SOFT_REJECT");
+  assert.equal(
+    result.acceptance.evidence.desired_impression_fit.applicability,
+    EVIDENCE_APPLICABILITY.NOT_APPLICABLE,
+  );
+});
+
+test("core top/bottom/shoes acceptance decisions remain unchanged by Optional applicability", () => {
+  const ctx = context({
+    raw: "今晚出去玩，年轻一点，有设计感，别太正式",
+    gender: "female",
+    scene: "nightlife",
+    desired: ["年轻", "有设计感"],
+  });
+  const cases = [
+    ["top", "女士纯色短袖上衣"],
+    ["bottom", "女士纯色直筒裤"],
+    ["shoes", "女士纯色休闲鞋"],
+  ];
+
+  for (const [category, title] of cases) {
+    const coreRequirement = requirement(category, {
+      gender: "female",
+      scene: "nightlife",
+    });
+    const baseline = evaluateProductAcceptance(
+      product(title, {category, gender: "female"}),
+      coreRequirement,
+      ctx,
+    );
+    const untrustedCompletionMarkers = evaluateProductAcceptance(
+      product(title, {category, gender: "female"}),
+      {
+        ...coreRequirement,
+        style_role: "styling_completion",
+        styling_completion_required: false,
+        styling_completion_recommended: false,
+      },
+      ctx,
+    );
+
+    assert.equal(baseline.acceptance.result, "SOFT_REJECT");
+    assert.equal(baseline.acceptance.penalty, 18);
+    assert.deepEqual(untrustedCompletionMarkers, baseline);
+    assert.equal(
+      baseline.acceptance.evidence.contemporary_fit.applicability,
+      EVIDENCE_APPLICABILITY.APPLICABLE,
+    );
+  }
+});
 
 test("A: young male date prefers contemporary casual footwear evidence", () => {
   const ctx = context();

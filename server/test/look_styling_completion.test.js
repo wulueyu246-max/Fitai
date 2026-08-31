@@ -940,6 +940,51 @@ test("a diagnosed hosiery requirement remains distinct and survives the shared p
     item.candidate_id === candidate.candidate_id), true);
 });
 
+test("an ordinary sock product fact cannot be rewritten into hosiery by the request slot", () => {
+  const look = goldenCoreLook();
+  const plainSockFromHosierySearch = product(
+    "plain-sock-from-hosiery-query",
+    "accessory",
+    "女士白色纯棉中筒袜",
+    {
+      slot: "hosiery",
+      styling_completion_slot: "hosiery",
+      subcategory: "socks",
+      search_subcategory: "socks",
+      candidate_enrichment: {
+        normalized_category: {
+          value: "accessory", source: "explicit_title_evidence", confidence: 0.95,
+          evidence: ["title:中筒袜"],
+        },
+        category_evidence: {
+          value: "accessory", source: "explicit_title_evidence", confidence: 0.95,
+          evidence: ["title:中筒袜"],
+        },
+        subcategory: {
+          value: "socks", source: "explicit_title_evidence", confidence: 0.95,
+          evidence: ["title:中筒袜"],
+        },
+      },
+    },
+  );
+  const result = selectStylingCompletion({
+    look,
+    diagnosis: {
+      completion_action: "PLAN",
+      required_optional_slots: ["hosiery"],
+      recommended_optional_slots: [],
+      max_optional_items: 1,
+    },
+    candidates: [plainSockFromHosierySearch],
+    decisionContext: decisionContext(),
+    contract: contract(),
+  });
+
+  assert.equal(result.completion_action, "NONE");
+  assert.deepEqual(result.selected_optional_candidate_ids, []);
+  assert.equal(result.core_unchanged, true);
+});
+
 test("portfolio completion uses one real-Taobao optional retrieval without replacing the Core Look", async () => {
   const look = goldenCoreLook();
   const lookContract = contract();

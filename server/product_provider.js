@@ -7,6 +7,7 @@ const {
   signTaobaoRequest,
 } = require("./taobao_client");
 const {
+  STYLING_COMPLETION_AUTHORITY,
   SUPPORTED_PRODUCT_CATEGORIES,
   authoritativeProductGender,
   buildTaobaoSearchPlan,
@@ -1001,6 +1002,7 @@ function candidateTraceRecord(product, requirement = {}, stage, reason = "") {
       Number(product?.product_acceptance_penalty),
     ) ? Number(product.product_acceptance_penalty) : null,
     product_acceptance_evidence: product?.product_acceptance_evidence || null,
+    product_acceptance_trace: safeProductAcceptanceTrace(product),
     ai_rerank_fallback: product?.ai_rerank_fallback === true,
     ai_rerank_fallback_reason: product?.ai_rerank_fallback_reason || null,
     reranker_score: Number.isFinite(Number(
@@ -1014,6 +1016,46 @@ function candidateTraceRecord(product, requirement = {}, stage, reason = "") {
     raw_product_ref: product?.raw_product_ref || null,
     candidate_enrichment: product?.candidate_enrichment || null,
   });
+}
+
+// Candidate pipeline traces are persisted and may be returned to diagnostics.
+// Keep the useful acceptance decision and evidence while excluding the richer
+// product object (including URLs, raw payloads, or any future secret-bearing
+// fields) that may have been attached to the candidate.
+function safeProductAcceptanceTrace(product = {}) {
+  const trace = product?.product_acceptance_trace;
+  if (!trace || typeof trace !== "object" || Array.isArray(trace)) return null;
+  const evidence = trace.evidence && typeof trace.evidence === "object" &&
+      !Array.isArray(trace.evidence)
+    ? Object.fromEntries(Object.entries(trace.evidence).map(([key, item]) => [
+      String(key).slice(0, 80),
+      Object.freeze({
+        value: redactTraceText(item?.value, 80),
+        source: redactTraceText(item?.source || "unknown", 80),
+        confidence: Number.isFinite(Number(item?.confidence))
+          ? Math.max(0, Math.min(1, Number(item.confidence))) : 0,
+        evidence: Object.freeze((Array.isArray(item?.evidence)
+          ? item.evidence : []).map((entry) => redactTraceText(entry, 240))),
+        applicability: redactTraceText(item?.applicability, 80),
+      }),
+    ]))
+    : {};
+  return Object.freeze({
+    version: redactTraceText(trace.version, 80) || null,
+    result: redactTraceText(trace.result, 80) || null,
+    hard_reasons: Object.freeze((Array.isArray(trace.hard_reasons)
+      ? trace.hard_reasons : []).map((entry) => redactTraceText(entry, 120))),
+    soft_reasons: Object.freeze((Array.isArray(trace.soft_reasons)
+      ? trace.soft_reasons : []).map((entry) => redactTraceText(entry, 120))),
+    penalty: Number.isFinite(Number(trace.penalty)) ? Number(trace.penalty) : null,
+    evidence: Object.freeze(evidence),
+  });
+}
+
+function redactTraceText(value, limit) {
+  return String(value || "")
+    .replace(/(?:https?:)?\/\/\S+/giu, "[URL_REDACTED]")
+    .slice(0, limit);
 }
 
 function requirementPipelineKey(requirement = {}) {
@@ -1919,14 +1961,23 @@ class TaobaoProductProvider extends ProductProvider {
       requirement.commerce_query_plan || {};
     const queryPlanVersion = String(requirement.query_plan_version ||
       commerceQueryPlan.version || "");
-    const dynamicConceptQueries = new Set([
+    const conceptQueryPlan = new Set([
       "concept_search_query_planner.v1",
       "concept_search_query_planner.v2",
-    ]).has(queryPlanVersion)
+    ]).has(queryPlanVersion);
+    const stylingCompletionQueries = isTrustedStylingCompletionPlan(
+      requirement,
+      filters,
+    ) ? stylingCompletionQueryTexts(commerceQueryPlan) : [];
+    // The optional plan is trusted only when both typed entries are present.
+    // This keeps malformed or untrusted plans on the normal Blueprint search
+    // path and, importantly, never makes Q3 an unconditional fallback.
+    const trustedStylingCompletionQueryPlan = stylingCompletionQueries.length === 2;
+    const dynamicConceptQueries = conceptQueryPlan
       ? requirementSearchKeywords(requirement).slice(0, 4)
-      : [];
-    const dynamicFallbackQuery = queryPlanVersion ===
-        "concept_search_query_planner.v2"
+      : stylingCompletionQueries;
+    const dynamicFallbackQuery = (queryPlanVersion ===
+        "concept_search_query_planner.v2" || trustedStylingCompletionQueryPlan)
       ? String(commerceQueryPlan?.fallback_query?.query || "").trim()
       : "";
     const translatedSearchPlan = dynamicConceptQueries.length >= 2
@@ -1985,6 +2036,14 @@ class TaobaoProductProvider extends ProductProvider {
     let queryFallbackLevel = 0;
     let queryFallbackReason = null;
     const executedQueries = [];
+    const stylingCompletionQueryTrace = trustedStylingCompletionQueryPlan
+      ? stylingCompletionQueries.map((query, index) => ({
+        query_id: index === 0 ? "Q1" : "Q2",
+        query,
+        executed: false,
+        result_count: 0,
+      }))
+      : null;
     if (dynamicConceptQueries.length >= 2) {
       const perQueryLimit = Math.max(5, Math.min(
         8,
@@ -2003,6 +2062,10 @@ class TaobaoProductProvider extends ProductProvider {
         }, metrics),
       ));
       executedQueries.push(...dynamicConceptQueries);
+      stylingCompletionQueryTrace?.forEach((entry, index) => {
+        entry.executed = true;
+        entry.result_count = plannedBatches[index].length;
+      });
       const successfulQueries = dynamicConceptQueries.filter(
         (_query, index) => plannedBatches[index].length > 0,
       );
@@ -2010,7 +2073,8 @@ class TaobaoProductProvider extends ProductProvider {
       products = uniqueProducts(plannedBatches.flat())
         .sort((left, right) =>
           Number(right.relevance_score || 0) - Number(left.relevance_score || 0));
-      if (queryPlanVersion === "concept_search_query_planner.v2") {
+      if (queryPlanVersion === "concept_search_query_planner.v2" ||
+          trustedStylingCompletionQueryPlan) {
         const highRecallCount = plannedBatches[0]?.length || 0;
         const intentCount = plannedBatches[1]?.length || 0;
         if (intentCount === 0 && highRecallCount > 0) {
@@ -2036,7 +2100,25 @@ class TaobaoProductProvider extends ProductProvider {
             .sort((left, right) =>
               Number(right.relevance_score || 0) -
               Number(left.relevance_score || 0));
+          if (stylingCompletionQueryTrace) {
+            stylingCompletionQueryTrace.push({
+              query_id: "Q3",
+              query: dynamicFallbackQuery,
+              executed: true,
+              result_count: fallbackProducts.length,
+            });
+          }
         }
+      }
+      if (stylingCompletionQueryTrace && !stylingCompletionQueryTrace.some(
+        (entry) => entry.query_id === "Q3",
+      ) && dynamicFallbackQuery) {
+        stylingCompletionQueryTrace.push({
+          query_id: "Q3",
+          query: dynamicFallbackQuery,
+          executed: false,
+          result_count: 0,
+        });
       }
     } else if (searchPlan.exact) {
       products = await this.#search({
@@ -2087,6 +2169,8 @@ class TaobaoProductProvider extends ProductProvider {
       executed_queries: executedQueries,
       fallback_level: queryFallbackLevel,
       fallback_reason: queryFallbackReason,
+      query_plan_version: queryPlanVersion || null,
+      styling_completion_query_trace: stylingCompletionQueryTrace,
       candidate_count: products.length,
     });
     if (metrics) {
@@ -2094,6 +2178,8 @@ class TaobaoProductProvider extends ProductProvider {
       metrics.funnel.query_fallback_level = queryFallbackLevel;
       metrics.funnel.query_fallback_reason = queryFallbackReason;
       metrics.funnel.executed_queries = executedQueries;
+      metrics.funnel.styling_completion_query_trace =
+        stylingCompletionQueryTrace;
       metrics.funnel.raw_count = Number(metrics.taobaoCount || 0);
       metrics.funnel.valid_count = products.length;
       const gateAssessments = products.map((product) =>
@@ -2250,6 +2336,12 @@ class TaobaoProductProvider extends ProductProvider {
   }
 
   async #refillCandidatePool({requirement, context, round, executed}) {
+    // Optional styling completion owns a strict Q1/Q2/Q3 ladder. Once its
+    // bounded initial calls have run, the plan's Q3 may not be reissued by
+    // generic Candidate Refill (which is allowed to broaden core searches).
+    if (isTrustedStylingCompletionPlan(requirement, context)) {
+      return {candidates: [], queries: [], returned_count: 0};
+    }
     const planned = buildCandidateRefillQueries(requirement, round)
       .filter((entry) => {
         const key = `${requirementPipelineKey(requirement)}:${entry.query}:` +
@@ -3125,6 +3217,29 @@ function requirementSearchKeywords(requirement = {}) {
     requirement?.item_name,
     requirement?.itemName,
   ].map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 1);
+}
+
+function stylingCompletionQueryTexts(queryPlan = {}) {
+  const candidates = Array.isArray(queryPlan?.query_candidates)
+    ? queryPlan.query_candidates : [];
+  // Resolve by typed IDs, not array position. Do not deduplicate: Q1 and Q2
+  // are independent bounded client calls even when their text is identical.
+  return ["Q1", "Q2"].map((queryId) => {
+    const entry = candidates.find((candidate) =>
+      String(candidate?.query_id || "") === queryId);
+    return typeof entry?.query === "string" ? entry.query : "";
+  });
+}
+
+function isTrustedStylingCompletionPlan(requirement = {}, context = {}) {
+  const plan = requirement?.commerce_query_plan ||
+    context?.commerce_query_plan || {};
+  const version = String(requirement?.query_plan_version || plan.version || "");
+  return version === "styling_completion_query.v1" &&
+    context?.[STYLING_COMPLETION_AUTHORITY] === true &&
+    String(requirement?.style_role || requirement?.styleRole ||
+      context?.style_role || "").trim().toLowerCase() === "styling_completion" &&
+    stylingCompletionQueryTexts(plan).every(Boolean);
 }
 
 function buildCandidateRefillQueries(requirement = {}, round = 1) {

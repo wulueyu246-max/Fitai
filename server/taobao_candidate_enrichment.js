@@ -257,14 +257,31 @@ function deepFreeze(value) {
 function enrichTaobaoCandidate(rawProduct, {visionObservation = null} = {}) {
   const raw = objectValue(rawProduct);
   const observedAt = raw.observed_at || new Date().toISOString();
-  const title = String(raw.text?.title || "").trim();
-  const categoryText = [
+  const title = String(raw.text?.title || raw.title || "").trim();
+  const categoryName = safeText(firstDefined(
     raw.category?.category_name,
+    raw.category_name,
+    raw.categoryName,
+  ));
+  const levelOneCategoryName = safeText(firstDefined(
     raw.category?.level_one_category_name,
+    raw.level_one_category_name,
+    raw.levelOneCategoryName,
+  ));
+  const categoryText = [
+    categoryName,
+    levelOneCategoryName,
     title,
   ].filter(Boolean).join(" ");
-  const normalizedCategory = normalizeProductCategory(categoryText) || "unknown";
-  const subcategory = inferSubcategory(title, normalizedCategory);
+  const vision = normalizeVisionObservation(visionObservation, observedAt);
+  const taxonomy = inferProductTaxonomy(
+    raw,
+    title,
+    categoryText,
+    observedAt,
+    visionObservation,
+  );
+  const normalizedCategory = taxonomy.category.value;
   const gender = inferGender(title, categoryText);
   const style = inferTokens(title, STYLE_PATTERNS);
   const occasion = inferTokens(title, OCCASION_PATTERNS);
@@ -276,7 +293,6 @@ function enrichTaobaoCandidate(rawProduct, {visionObservation = null} = {}) {
     : [];
   const material = inferTokens(title, MATERIAL_PATTERNS);
   const bodyFit = inferBodyFit(title);
-  const vision = normalizeVisionObservation(visionObservation, observedAt);
   const quality = inferQuality(raw, title, vision);
   const rawRef = deepFreeze({
     source: raw.source || "taobao",
@@ -284,23 +300,16 @@ function enrichTaobaoCandidate(rawProduct, {visionObservation = null} = {}) {
     observed_at: observedAt,
     schema_version: raw.schema_version || RAW_TAOBAO_PRODUCT_SCHEMA_VERSION,
   });
+  const categoryEvidence = taxonomy.category;
   return deepFreeze({
     schema_version: "enriched_candidate_v1",
     raw_product_ref: rawRef,
-    normalized_category: evidenceValue(
-      normalizedCategory,
-      normalizedCategory === "unknown" ? "unknown" : "title_nlp",
-      normalizedCategory === "unknown" ? 0 : 0.9,
-      normalizedCategory === "unknown" ? [] : [categoryText],
-      observedAt,
-    ),
-    subcategory: evidenceValue(
-      subcategory || "unknown",
-      subcategory ? "title_nlp" : "unknown",
-      subcategory ? 0.86 : 0,
-      subcategory ? [title] : [],
-      observedAt,
-    ),
+    // `normalized_category` remains the compatibility field.  The explicit
+    // alias makes the evidence contract discoverable without allowing a
+    // request slot to masquerade as an observed product fact.
+    normalized_category: categoryEvidence,
+    category_evidence: categoryEvidence,
+    subcategory: taxonomy.subcategory,
     gender_evidence: evidenceValue(
       gender.value,
       gender.source,
@@ -396,6 +405,137 @@ function inferSubcategory(title, category) {
   return inferTokens(title, rules)[0] || "";
 }
 
+function inferProductTaxonomy(
+  raw,
+  title,
+  categoryText,
+  observedAt,
+  visionObservation = null,
+) {
+  const facts = [
+    {field: "title", text: title},
+    {
+      field: "category_name",
+      text: safeText(firstDefined(
+        raw.category?.category_name,
+        raw.category_name,
+        raw.categoryName,
+      )) || "",
+    },
+    {
+      field: "level_one_category_name",
+      text: safeText(firstDefined(
+        raw.category?.level_one_category_name,
+        raw.level_one_category_name,
+        raw.levelOneCategoryName,
+      )) || "",
+    },
+  ].filter((entry) => entry.text);
+
+  const visionFacts = extractVisionTaxonomyFacts(visionObservation);
+  const candidates = OPTIONAL_TAXONOMY_PATTERNS.map((rule, ruleIndex) => {
+    const matches = facts.flatMap((entry) => {
+      const match = entry.text.match(rule.pattern);
+      return match ? [{
+        field: entry.field,
+        token: match[0],
+      }] : [];
+    });
+    for (const fact of visionFacts) {
+      const match = fact.text.match(rule.pattern);
+      if (match) {
+        matches.push({
+          field: "vision",
+          token: match[0],
+          confidence: fact.confidence,
+          evidence: fact.evidence,
+        });
+      }
+    }
+    if (matches.length === 0) return null;
+    const titleBacked = matches.some((entry) => entry.field === "title");
+    const apiBacked = matches.some((entry) => entry.field === "category_name" ||
+      entry.field === "level_one_category_name");
+    const visionBacked = matches.some((entry) => entry.field === "vision");
+    const sourceCount = [titleBacked, apiBacked, visionBacked].filter(Boolean).length;
+    const source = sourceCount > 1
+      ? "mixed_product_fact_evidence"
+      : titleBacked ? "explicit_title_evidence"
+        : apiBacked ? "api_category_evidence" : "vision";
+    const confidence = sourceCount > 1
+      ? 0.98
+      : titleBacked ? 0.95
+        : apiBacked ? 0.9
+          : Math.max(...matches.map((entry) => entry.confidence || 0.72));
+    const evidence = [...new Set(matches.flatMap((entry) => {
+      const values = [`${entry.field}:${entry.token}`];
+      if (entry.field === "vision") {
+        values.push(...entry.evidence.map((item) => `vision:${item}`));
+      }
+      return values;
+    }))];
+    return {
+      rule,
+      ruleIndex,
+      // A duplicated API category field must not outweigh one explicit title
+      // fact.  Rank evidence sources first, then use the number of agreeing
+      // observations as a tie-breaker.
+      score: (titleBacked ? 3 : apiBacked ? 2 : 1) * 100 + matches.length,
+      category: evidenceValue(rule.category, source, confidence, evidence, observedAt),
+      subcategory: evidenceValue(rule.subcategory, source, confidence, evidence, observedAt),
+    };
+  }).filter(Boolean).sort((left, right) => right.score - left.score || left.ruleIndex - right.ruleIndex);
+
+  if (candidates.length > 0) {
+    return {
+      category: candidates[0].category,
+      subcategory: candidates[0].subcategory,
+    };
+  }
+
+  const normalizedCategory = normalizeProductCategory(categoryText) || "unknown";
+  const subcategory = inferSubcategory(title, normalizedCategory);
+  return {
+    category: evidenceValue(
+      normalizedCategory,
+      normalizedCategory === "unknown" ? "unknown" : "product_text_normalization",
+      normalizedCategory === "unknown" ? 0 : 0.9,
+      normalizedCategory === "unknown" ? [] : [categoryText],
+      observedAt,
+    ),
+    subcategory: evidenceValue(
+      subcategory || "unknown",
+      subcategory ? "explicit_title_evidence" : "unknown",
+      subcategory ? 0.86 : 0,
+      subcategory ? [`title:${title}`] : [],
+      observedAt,
+    ),
+  };
+}
+
+function extractVisionTaxonomyFacts(observation) {
+  if (!observation || typeof observation !== "object") return [];
+  const fields = [
+    "category", "subcategory", "visible_category", "product_category",
+    "product_subcategory", "item_type", "object",
+  ];
+  return fields.flatMap((field) => {
+    const candidate = observation[field];
+    if (candidate == null) return [];
+    const value = candidate && typeof candidate === "object" && !Array.isArray(candidate)
+      ? candidate.value : candidate;
+    const text = safeText(value);
+    if (!text) return [];
+    const confidenceValue = candidate && typeof candidate === "object"
+      ? Number(candidate.confidence) : NaN;
+    const confidence = Number.isFinite(confidenceValue)
+      ? Math.max(0, Math.min(confidenceValue, 1)) : 0.72;
+    const evidence = candidate && typeof candidate === "object" && Array.isArray(candidate.evidence)
+      ? candidate.evidence.map(String).slice(0, 10) : [text];
+    return [{field, text, confidence, evidence}];
+  });
+}
+
 function inferBodyFit(title) {
   const values = [];
   const evidence = [];
@@ -457,6 +597,86 @@ const SUBCATEGORY_PATTERNS = [
   {value: "shirt", pattern: /衬衫/iu},
   {value: "knitwear", pattern: /针织|毛衣/iu},
   {value: "t_shirt", pattern: /T恤|短袖/iu},
+];
+// These rules describe observable product identity only.  They deliberately
+// exclude raw.query and all request/requirement fields: a hosiery search may
+// retrieve jewelry, but that does not turn the jewelry into hosiery.
+const OPTIONAL_TAXONOMY_PATTERNS = [
+  {
+    category: "accessory",
+    subcategory: "hosiery",
+    pattern: /连裤袜|裤袜|丝袜|打底袜|stockings?|hosiery|tights?/iu,
+  },
+  {
+    category: "accessory",
+    subcategory: "socks",
+    pattern: /袜子|短袜|中筒袜|长筒袜|长袜|过膝袜|船袜|棉袜|袜品|袜类|socks?/iu,
+  },
+  {
+    category: "bag",
+    subcategory: "shoulder_bag",
+    pattern: /单肩包|腋下包|shoulder bag/iu,
+  },
+  {
+    category: "bag",
+    subcategory: "crossbody_bag",
+    pattern: /斜挎包|crossbody/iu,
+  },
+  {
+    category: "bag",
+    subcategory: "tote_bag",
+    pattern: /托特包|tote/iu,
+  },
+  {
+    category: "bag",
+    subcategory: "backpack",
+    pattern: /双肩包|背包|backpack/iu,
+  },
+  {
+    category: "bag",
+    subcategory: "handbag",
+    pattern: /手提包|手袋|handbags?/iu,
+  },
+  {
+    category: "bag",
+    subcategory: "bag",
+    pattern: /包包|女包|男包|箱包|包袋|手包|皮具|(^|[^a-z])bags?([^a-z]|$)/iu,
+  },
+  {
+    category: "hat",
+    subcategory: "beret",
+    pattern: /贝雷帽|beret/iu,
+  },
+  {
+    category: "hat",
+    subcategory: "baseball_cap",
+    pattern: /棒球帽|鸭舌帽|baseball cap/iu,
+  },
+  {
+    category: "hat",
+    subcategory: "bucket_hat",
+    pattern: /渔夫帽|bucket hat/iu,
+  },
+  {
+    category: "hat",
+    subcategory: "beanie",
+    pattern: /针织帽|毛线帽|beanie/iu,
+  },
+  {
+    category: "hat",
+    subcategory: "headwear",
+    pattern: /帽子|礼帽|遮阳帽|帽类|头饰|headwear|hats?|(^|[^a-z])cap([^a-z]|$)/iu,
+  },
+  {
+    category: "accessory",
+    subcategory: "jewelry",
+    pattern: /珠宝|首饰|饰品|项链|吊坠|耳环|耳饰|耳钉|手链|手镯|戒指|胸针|脚链|jewelry|necklace|pendant|earrings?|bracelet|brooch/iu,
+  },
+  {
+    category: "accessory",
+    subcategory: "accessory",
+    pattern: /配饰|accessor(?:y|ies)/iu,
+  },
 ];
 const STYLE_PATTERNS = [
   {value: "sweet", pattern: /甜美|甜妹|蝴蝶结|荷叶边/iu},

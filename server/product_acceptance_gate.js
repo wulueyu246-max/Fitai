@@ -8,6 +8,11 @@ const {
 } = require("./product_relevance");
 
 const PRODUCT_ACCEPTANCE_VERSION = "real_product_acceptance_gate_v1";
+const EVIDENCE_APPLICABILITY = Object.freeze({
+  APPLICABLE: "APPLICABLE",
+  NOT_APPLICABLE: "NOT_APPLICABLE",
+  UNKNOWN: "UNKNOWN",
+});
 
 // These are general product-taxonomy signals. They are deliberately not brand,
 // merchant, candidate-id, or exact-listing blacklists.
@@ -28,6 +33,8 @@ const YOUNG_TARGET_PATTERN = /(?:年轻|少年感|少女感|减龄|青春|活力
 const DESIGN_TARGET_PATTERN = /(?:设计感|有特点|特别|小众|表达|大胆|时髦|design|statement|niche)/iu;
 const CLEAN_TARGET_PATTERN = /(?:干净|利落|克制|简约|clean|polished|minimal)/iu;
 const NON_OFFICE_TARGET_PATTERN = /(?:不要像上班|别像上班|不.?职业|不.?商务|别太正式|不要太正式|relaxed|casual|non.?office)/iu;
+const FORMAL_TARGET_PATTERN = /(?:正式|商务|礼服|典礼|婚礼|晚宴|formal|business|ceremonial)/iu;
+const EXAGGERATED_STREET_HEADWEAR_PATTERN = /(?:夸张|街头|嘻哈|涂鸦|超大|oversized|street|graffiti|hip.?hop)/iu;
 
 const CATEGORY_PRICE_FLOOR = Object.freeze({
   top: 8,
@@ -40,13 +47,59 @@ const CATEGORY_PRICE_FLOOR = Object.freeze({
   socks: 1,
 });
 
-function evidence(value, source, confidence, facts = []) {
+function evidence(
+  value,
+  source,
+  confidence,
+  facts = [],
+  applicability = EVIDENCE_APPLICABILITY.APPLICABLE,
+) {
   return Object.freeze({
     value,
     source: String(source || "unknown"),
     confidence: clamp01(confidence),
     evidence: Object.freeze(unique(facts)),
+    applicability: Object.values(EVIDENCE_APPLICABILITY).includes(applicability)
+      ? applicability : EVIDENCE_APPLICABILITY.UNKNOWN,
   });
+}
+
+function stylingCompletionSlot(requirement = {}) {
+  const trustedCompletion =
+    String(requirement.style_role || requirement.styleRole || "")
+      .trim().toLowerCase() === "styling_completion" &&
+    (requirement.styling_completion_required === true ||
+      requirement.styling_completion_recommended === true);
+  if (!trustedCompletion) return "";
+  const category = normalizeProductCategory(requirement.category) ||
+    String(requirement.category || "").trim().toLowerCase();
+  const subcategory = String(
+    requirement.search_subcategory || requirement.searchSubcategory || "",
+  ).trim().toLowerCase();
+  const productType = String(
+    requirement.item_name || requirement.itemName ||
+      requirement.product_type || requirement.productType || "",
+  ).trim().toLowerCase();
+  if (subcategory === "socks") {
+    return /(?:丝袜|连裤袜|stocking|hosiery|tights)/iu.test(productType)
+      ? "hosiery" : "socks";
+  }
+  if (category === "bag") return "bag";
+  if (category === "hat") return "headwear";
+  if (category === "outerwear") return "outerwear";
+  if (subcategory === "belt") return "belt";
+  if (category === "accessory") return "accessory";
+  return "";
+}
+
+function notApplicableEvidence(reason, slot) {
+  return evidence(
+    "not_applicable",
+    "styling_completion_role",
+    1,
+    [`optional_slot:${slot}`, reason],
+    EVIDENCE_APPLICABILITY.NOT_APPLICABLE,
+  );
 }
 
 function unique(values) {
@@ -217,7 +270,7 @@ function audienceFit(product, target, text, vision) {
   ]);
 }
 
-function contemporaryFit(target, text) {
+function contemporaryFit(target, text, {optionalSlot = ""} = {}) {
   const traditional = text.match(TRADITIONAL_FOOTWEAR_PATTERN) ||
     text.match(MATURE_EXPRESSION_PATTERN);
   const contemporary = text.match(CONTEMPORARY_PATTERN);
@@ -234,15 +287,27 @@ function contemporaryFit(target, text) {
     ]);
   }
   if (target.wantsYoung || target.wantsDesign) {
+    if (optionalSlot) {
+      return notApplicableEvidence(
+        "OPTIONAL_SUPPORT_ITEM_NEED_NOT_CARRY_CONTEMPORARY_EXPRESSION",
+        optionalSlot,
+      );
+    }
     return evidence("unsupported", "missing_product_evidence", 0.66, [
       "target_expression:contemporary",
       "product_contemporary_evidence:missing",
     ]);
   }
-  return evidence("unknown", "unknown", 0, []);
+  return evidence(
+    "unknown",
+    "unknown",
+    0,
+    [],
+    EVIDENCE_APPLICABILITY.UNKNOWN,
+  );
 }
 
-function occasionFit(target, text) {
+function occasionFit(target, text, {optionalSlot = ""} = {}) {
   const work = text.match(WORK_UTILITY_PATTERN) ||
     (target.wantsNonOffice ? text.match(BUSINESS_PATTERN) : null);
   const outdoor = text.match(OUTDOOR_TECHNICAL_PATTERN);
@@ -265,18 +330,36 @@ function occasionFit(target, text) {
       `target_scene:${target.scene || "unspecified"}`,
     ]);
   }
+  if (optionalSlot === "headwear" && FORMAL_TARGET_PATTERN.test(target.targetText) &&
+      EXAGGERATED_STREET_HEADWEAR_PATTERN.test(text)) {
+    return evidence("mismatch", "explicit_product_text", 0.9, [
+      "optional_slot:headwear",
+      "target_scene:formal",
+      "product_expression:exaggerated_street",
+    ]);
+  }
   const enrichment = String(text || "");
   if (target.scene && enrichment.includes(target.scene)) {
     return evidence("match", "explicit_product_text", 0.76, [
       `target_scene:${target.scene}`,
     ]);
   }
-  return evidence("compatible_or_unknown", "insufficient_product_evidence", 0.35, [
-    `target_scene:${target.scene || "unspecified"}`,
-  ]);
+  if (optionalSlot) {
+    return notApplicableEvidence(
+      "OPTIONAL_ITEM_HAS_NO_OBSERVABLE_SCENE_CONFLICT",
+      optionalSlot,
+    );
+  }
+  return evidence(
+    "compatible_or_unknown",
+    "insufficient_product_evidence",
+    0.35,
+    [`target_scene:${target.scene || "unspecified"}`],
+    EVIDENCE_APPLICABILITY.UNKNOWN,
+  );
 }
 
-function desiredImpressionFit(target, text, vision) {
+function desiredImpressionFit(target, text, vision, {optionalSlot = ""} = {}) {
   const matches = [];
   if (target.wantsDesign && DESIGN_DETAIL_PATTERN.test(text)) matches.push("design_detail");
   if (target.wantsClean && CLEAN_PATTERN.test(text)) matches.push("clean_expression");
@@ -297,12 +380,24 @@ function desiredImpressionFit(target, text, vision) {
     }
   }
   if (target.wantsDesign || target.wantsClean || target.wantsYoung) {
+    if (optionalSlot) {
+      return notApplicableEvidence(
+        "OPTIONAL_SUPPORT_ITEM_NEED_NOT_CARRY_WHOLE_LOOK_IMPRESSION",
+        optionalSlot,
+      );
+    }
     return evidence("unsupported", "missing_product_evidence", 0.7, [
       ...target.desired.map((value) => `target:${value}`),
       "matching_product_evidence:missing",
     ]);
   }
-  return evidence("unknown", "unknown", 0, []);
+  return evidence(
+    "unknown",
+    "unknown",
+    0,
+    [],
+    EVIDENCE_APPLICABILITY.UNKNOWN,
+  );
 }
 
 function visualQualityEvidence(product, vision) {
@@ -319,7 +414,13 @@ function visualQualityEvidence(product, vision) {
       enriched.evidence,
     );
   }
-  return evidence("unknown", "not_observed", 0, ["VISION_NOT_CONSUMED"]);
+  return evidence(
+    "unknown",
+    "not_observed",
+    0,
+    ["VISION_NOT_CONSUMED"],
+    EVIDENCE_APPLICABILITY.UNKNOWN,
+  );
 }
 
 function commerceQuality(product, text, vision) {
@@ -370,16 +471,28 @@ function productIdentityConfidence(product) {
 
 function acceptancePenalty(evidenceSet) {
   let penalty = 0;
-  if (evidenceSet.audience_fit.value === "mismatch") penalty += 22;
-  if (evidenceSet.contemporary_fit.value === "mismatch") penalty += 15;
-  if (evidenceSet.contemporary_fit.value === "unsupported") penalty += 7;
-  if (evidenceSet.occasion_fit.value === "mismatch") penalty += 18;
-  if (evidenceSet.desired_impression_fit.value === "mismatch") penalty += 18;
-  if (evidenceSet.desired_impression_fit.value === "unsupported") penalty += 9;
-  if (evidenceSet.visual_quality.value === "low") penalty += 12;
-  if (evidenceSet.visual_quality.value === "unknown") penalty += 2;
-  if (evidenceSet.commerce_quality.value === "anomaly_risk") penalty += 10;
-  if (evidenceSet.product_identity_confidence.value === "low") penalty += 14;
+  const applicable = (item) =>
+    item?.applicability !== EVIDENCE_APPLICABILITY.NOT_APPLICABLE;
+  if (applicable(evidenceSet.audience_fit) &&
+      evidenceSet.audience_fit.value === "mismatch") penalty += 22;
+  if (applicable(evidenceSet.contemporary_fit) &&
+      evidenceSet.contemporary_fit.value === "mismatch") penalty += 15;
+  if (applicable(evidenceSet.contemporary_fit) &&
+      evidenceSet.contemporary_fit.value === "unsupported") penalty += 7;
+  if (applicable(evidenceSet.occasion_fit) &&
+      evidenceSet.occasion_fit.value === "mismatch") penalty += 18;
+  if (applicable(evidenceSet.desired_impression_fit) &&
+      evidenceSet.desired_impression_fit.value === "mismatch") penalty += 18;
+  if (applicable(evidenceSet.desired_impression_fit) &&
+      evidenceSet.desired_impression_fit.value === "unsupported") penalty += 9;
+  if (applicable(evidenceSet.visual_quality) &&
+      evidenceSet.visual_quality.value === "low") penalty += 12;
+  if (applicable(evidenceSet.visual_quality) &&
+      evidenceSet.visual_quality.value === "unknown") penalty += 2;
+  if (applicable(evidenceSet.commerce_quality) &&
+      evidenceSet.commerce_quality.value === "anomaly_risk") penalty += 10;
+  if (applicable(evidenceSet.product_identity_confidence) &&
+      evidenceSet.product_identity_confidence.value === "low") penalty += 14;
   return Math.min(45, Math.round(penalty * 100) / 100);
 }
 
@@ -387,11 +500,17 @@ function evaluateProductAcceptance(product = {}, requirement = {}, context = {})
   const text = productText(product);
   const target = targetContext(requirement, context);
   const vision = visionEvidence(product);
+  const optionalSlot = stylingCompletionSlot(requirement);
   const evidenceSet = Object.freeze({
     audience_fit: audienceFit(product, target, text, vision),
-    contemporary_fit: contemporaryFit(target, text),
-    occasion_fit: occasionFit(target, text),
-    desired_impression_fit: desiredImpressionFit(target, text, vision),
+    contemporary_fit: contemporaryFit(target, text, {optionalSlot}),
+    occasion_fit: occasionFit(target, text, {optionalSlot}),
+    desired_impression_fit: desiredImpressionFit(
+      target,
+      text,
+      vision,
+      {optionalSlot},
+    ),
     visual_quality: visualQualityEvidence(product, vision),
     commerce_quality: commerceQuality(product, text, vision),
     product_identity_confidence: productIdentityConfidence(product),
@@ -481,6 +600,7 @@ function normalizedPublicUrl(value) {
 }
 
 module.exports = {
+  EVIDENCE_APPLICABILITY,
   PRODUCT_ACCEPTANCE_VERSION,
   canonicalProductIdentity,
   evaluateProductAcceptance,
