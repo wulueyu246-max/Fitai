@@ -62,6 +62,7 @@ const {
 const {isProductionRuntime} = require("./decision_context");
 const {
   attachEnrichmentToCandidate,
+  buildTaobaoImageProvenance,
   buildRawTaobaoProduct,
   enrichTaobaoCandidate,
 } = require("./taobao_candidate_enrichment");
@@ -1535,8 +1536,10 @@ function preserveCandidateContract(product, requirement = {}) {
   const candidateId = String(
     product?.candidate_id || product?.product_id || product?.id || "",
   );
+  const imageContract = candidateImageContract(product);
   return {
     ...product,
+    ...imageContract,
     ...(lookId ? {look_id: lookId} : {}),
     ...(conceptId ? {concept_id: conceptId} : {}),
     ...(slotKey ? {slot_key: slotKey} : {}),
@@ -1613,7 +1616,9 @@ function hasSemanticEnrichment(enrichment) {
 function restoreCandidateContract(product, sourceCandidates) {
   const source = sourceCandidates.get(candidatePipelineKey(product));
   if (!source) return null;
+  const restoredImage = candidateImageContract(product, source);
   return preserveCandidateContract({...product,
+    ...restoredImage,
     original_gender: source.original_gender,
     gender: source.original_gender,
     requested_gender: source.requested_gender,
@@ -1625,6 +1630,7 @@ function restoreCandidateContract(product, sourceCandidates) {
 }
 
 function candidateTraceRecord(product, requirement = {}, stage, reason = "") {
+  const imageContract = candidateImageContract(product);
   return Object.freeze({
     stage,
     reason: reason || undefined,
@@ -1649,6 +1655,10 @@ function candidateTraceRecord(product, requirement = {}, stage, reason = "") {
         (product?.occasion ? [product.occasion] : [])),
     ]),
     source: String(product?.source || "unknown"),
+    image_url: imageContract.image_url,
+    white_image: imageContract.white_image,
+    pict_url: imageContract.pict_url,
+    image_provenance: imageContract.image_provenance,
     search_keyword: String(product?.search_keyword || ""),
     commerce_queries: Object.freeze(requirementSearchKeywords(requirement)),
     relevance_score: Number.isFinite(Number(product?.relevance_score))
@@ -1678,8 +1688,8 @@ function candidateTraceRecord(product, requirement = {}, stage, reason = "") {
 
 // Candidate pipeline traces are persisted and may be returned to diagnostics.
 // Keep the useful acceptance decision and evidence while excluding the richer
-// product object (including URLs, raw payloads, or any future secret-bearing
-// fields) that may have been attached to the candidate.
+// product object (raw payloads or any future secret-bearing fields). The three
+// allowlisted public image URLs above are retained for human-review provenance.
 function safeProductAcceptanceTrace(product = {}) {
   const trace = product?.product_acceptance_trace;
   if (!trace || typeof trace !== "object" || Array.isArray(trace)) return null;
@@ -3658,7 +3668,10 @@ function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}, origi
     basic.pict_url,
     item.pict_url,
   );
-  const imageUrl = whiteImageUrl || primaryImageUrl;
+  const imageProvenance = buildTaobaoImageProvenance(buildRawTaobaoProduct(item, {
+    query: filters.keyword || "",
+  }));
+  const imageUrl = imageProvenance.image_url || whiteImageUrl || primaryImageUrl;
   const originalGender = authoritativeProductGender({
     gender: firstText(
       basic.gender,
@@ -3681,6 +3694,9 @@ function mapTaobaoProduct(item, {pid, fallbackCategory = "", filters = {}, origi
     gender: originalGender,
     price,
     image_url: imageUrl,
+    white_image: whiteImageUrl || null,
+    pict_url: primaryImageUrl || null,
+    image_provenance: imageProvenance,
     image_quality_hint: inferImageQualityHint({
       whiteImageUrl,
       imageUrl,
@@ -3792,6 +3808,64 @@ function normalizePublicImageUrl(value) {
   } catch (_) {
     return "";
   }
+}
+
+function candidateImageContract(product = {}, fallback = {}) {
+  const productRaw = product?.raw_product?.media || {};
+  const fallbackRaw = fallback?.raw_product?.media || {};
+  const existing = product?.image_provenance || {};
+  const fallbackExisting = fallback?.image_provenance || {};
+  const whiteImage = firstPublicImageUrl(
+    product?.white_image,
+    productRaw.white_image,
+    existing.white_image,
+    fallback?.white_image,
+    fallbackRaw.white_image,
+    fallbackExisting.white_image,
+  );
+  const pictUrl = firstPublicImageUrl(
+    product?.pict_url,
+    productRaw.pict_url,
+    existing.pict_url,
+    fallback?.pict_url,
+    fallbackRaw.pict_url,
+    fallbackExisting.pict_url,
+  );
+  const imageUrl = firstPublicImageUrl(
+    product?.image_url,
+    existing.image_url,
+    whiteImage,
+    pictUrl,
+    fallback?.image_url,
+    fallbackExisting.image_url,
+  );
+  const selectedField = imageUrl && imageUrl === whiteImage
+    ? "white_image" : imageUrl && imageUrl === pictUrl ? "pict_url" :
+      imageUrl ? "image_url" : null;
+  const source = String(product?.source || fallback?.source || "unknown");
+  return {
+    image_url: imageUrl || null,
+    white_image: whiteImage || null,
+    pict_url: pictUrl || null,
+    image_provenance: Object.freeze({
+      status: imageUrl ? "AVAILABLE" : "UNKNOWN",
+      source: imageUrl && source === "taobao" ? "taobao_raw_product" :
+        imageUrl ? String(existing.source || fallbackExisting.source || source) :
+          "unknown",
+      image_url: imageUrl || null,
+      white_image: whiteImage || null,
+      pict_url: pictUrl || null,
+      selected_field: selectedField,
+      confidence: imageUrl ? 1 : 0,
+      evidence: Object.freeze(imageUrl ? [
+        selectedField === "image_url" ? "candidate.image_url" :
+          `raw_product.media.${selectedField}`,
+      ] : []),
+      observed_at: product?.raw_product?.observed_at ||
+        existing.observed_at || fallback?.raw_product?.observed_at ||
+        fallbackExisting.observed_at || null,
+    }),
+  };
 }
 
 function isPublicHost(hostname) {

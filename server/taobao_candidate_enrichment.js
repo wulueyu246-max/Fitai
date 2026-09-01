@@ -214,6 +214,24 @@ function sanitizeImageList(value) {
   return (Array.isArray(raw) ? raw : [raw]).map(sanitizeUrl).filter(Boolean).slice(0, 10);
 }
 
+function buildTaobaoImageProvenance(rawProduct = {}) {
+  const whiteImage = sanitizeUrl(rawProduct?.media?.white_image);
+  const pictUrl = sanitizeUrl(rawProduct?.media?.pict_url);
+  const imageUrl = whiteImage || pictUrl || null;
+  const selectedField = whiteImage ? "white_image" : pictUrl ? "pict_url" : null;
+  return deepFreeze({
+    status: imageUrl ? "AVAILABLE" : "UNKNOWN",
+    source: imageUrl ? "taobao_raw_product" : "unknown",
+    image_url: imageUrl,
+    white_image: whiteImage,
+    pict_url: pictUrl,
+    selected_field: selectedField,
+    confidence: imageUrl ? 1 : 0,
+    evidence: imageUrl ? [`raw_product.media.${selectedField}`] : [],
+    observed_at: safeIsoDate(rawProduct?.observed_at),
+  });
+}
+
 function valueAtPath(value, path) {
   return path.split(".").reduce((current, key) => current?.[key], value);
 }
@@ -376,8 +394,13 @@ function enrichTaobaoCandidate(rawProduct, {visionObservation = null} = {}) {
 }
 
 function attachEnrichmentToCandidate(candidate, rawProduct, enrichedCandidate) {
+  const imageProvenance = buildTaobaoImageProvenance(rawProduct);
   return {
     ...candidate,
+    image_url: imageProvenance.image_url || candidate?.image_url || null,
+    white_image: imageProvenance.white_image || candidate?.white_image || null,
+    pict_url: imageProvenance.pict_url || candidate?.pict_url || null,
+    image_provenance: imageProvenance,
     raw_product: rawProduct,
     raw_product_ref: enrichedCandidate.raw_product_ref,
     sales_evidence: rawProduct.sales_evidence,
@@ -878,6 +901,7 @@ module.exports = {
   RAW_TAOBAO_FIXTURE_SCHEMA_VERSION,
   RAW_TAOBAO_PRODUCT_SCHEMA_VERSION,
   attachEnrichmentToCandidate,
+  buildTaobaoImageProvenance,
   buildRawAvailabilityMatrix,
   buildRawTaobaoProduct,
   createSanitizedRawFixture,

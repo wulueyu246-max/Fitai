@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  attachEnrichmentToCandidate,
   buildRawAvailabilityMatrix,
   buildRawTaobaoProduct,
   createSanitizedRawFixture,
@@ -57,6 +58,25 @@ test("RawTaobaoProduct captures business fields before normalization and strips 
   assert.equal(raw.commerce.item_url, "https://item.example.com/123");
   assert.equal(raw.promotion.commission_rate, 12);
   assert.equal(Object.isFrozen(raw), true);
+});
+
+test("Taobao image provenance survives raw capture and enrichment attachment", () => {
+  const raw = buildRawTaobaoProduct(realShape(), {
+    query: "女装上衣",
+    observedAt: "2026-08-28T01:02:03.000Z",
+  });
+  const enriched = enrichTaobaoCandidate(raw);
+  const attached = attachEnrichmentToCandidate({
+    product_id: "123",
+    source: "taobao",
+  }, raw, enriched);
+
+  assert.equal(attached.white_image, "https://img.example.com/white.jpg");
+  assert.equal(attached.pict_url, "https://img.example.com/item.jpg");
+  assert.equal(attached.image_url, "https://img.example.com/white.jpg");
+  assert.deepEqual(attached.image_provenance.evidence,
+    ["raw_product.media.white_image"]);
+  assert.equal(attached.image_provenance.status, "AVAILABLE");
 });
 
 test("sanitized fixture is allowlisted, checksummed, and never retains secrets or signatures", () => {

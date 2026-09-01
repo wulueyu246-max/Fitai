@@ -19,8 +19,37 @@ const {
   NewDecisionPipelineError,
   comparePipelineOutcomes,
   executeNewDecisionPipeline,
+  publicProductForResponse,
   validateFinalPortfolio,
 } = require("../new_decision_pipeline");
+
+test("public Final Look contract retains only allowlisted real image provenance", () => {
+  const output = publicProductForResponse({
+    product_id: "real-image-1",
+    source: "taobao",
+    image_url: "//img.alicdn.com/item.jpg?token=remove-me",
+    white_image: "//img.alicdn.com/white.jpg",
+    pict_url: "//img.alicdn.com/item.jpg",
+    image_provenance: {
+      status: "AVAILABLE",
+      source: "taobao_raw_product",
+      image_url: "//img.alicdn.com/item.jpg?token=remove-me",
+      white_image: "//img.alicdn.com/white.jpg",
+      pict_url: "//img.alicdn.com/item.jpg",
+      selected_field: "white_image",
+      confidence: 1,
+      evidence: ["raw_product.media.white_image"],
+      observed_at: "2026-09-01T00:00:00.000Z",
+      secret: "must-not-pass",
+    },
+  });
+
+  assert.equal(output.image_url, "https://img.alicdn.com/item.jpg");
+  assert.equal(output.white_image, "https://img.alicdn.com/white.jpg");
+  assert.equal(output.image_provenance.status, "AVAILABLE");
+  assert.equal(output.image_provenance.secret, undefined);
+  assert.doesNotMatch(JSON.stringify(output), /remove-me|must-not-pass/u);
+});
 
 const silentLogger = Object.freeze({info() {}, warn() {}, error() {}});
 

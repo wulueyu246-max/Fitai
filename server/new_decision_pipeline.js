@@ -55,7 +55,8 @@ const PUBLIC_PRODUCT_FIELDS = Object.freeze([
   "brand_name", "shop_name", "category", "original_category",
   "subcategory", "search_subcategory", "slot", "look_id", "concept_id",
   "gender", "original_gender", "requested_gender", "price",
-  "original_price", "currency", "image_url", "detail_url", "purchase_url",
+  "original_price", "currency", "image_url", "white_image", "pict_url",
+  "image_provenance", "detail_url", "purchase_url",
   "source", "platform", "is_mock", "color", "color_label", "material",
   "style", "style_tags", "occasion_tags", "silhouette", "fit",
   "footwear", "quality", "quality_tier", "raw_product_ref",
@@ -109,8 +110,27 @@ function publicProductForResponse(product = {}) {
     }
     result[key] = product[key];
   }
-  for (const key of ["image_url", "detail_url", "purchase_url"]) {
+  for (const key of ["image_url", "white_image", "pict_url", "detail_url", "purchase_url"]) {
     if (Object.hasOwn(result, key)) result[key] = publicUrl(result[key]);
+  }
+  if (result.image_provenance && typeof result.image_provenance === "object") {
+    result.image_provenance = Object.freeze({
+      status: result.image_provenance.status === "AVAILABLE"
+        ? "AVAILABLE" : "UNKNOWN",
+      source: String(result.image_provenance.source || "unknown"),
+      image_url: publicUrl(result.image_provenance.image_url) || null,
+      white_image: publicUrl(result.image_provenance.white_image) || null,
+      pict_url: publicUrl(result.image_provenance.pict_url) || null,
+      selected_field: ["image_url", "white_image", "pict_url"].includes(
+        result.image_provenance.selected_field,
+      ) ? result.image_provenance.selected_field : null,
+      confidence: Number.isFinite(Number(result.image_provenance.confidence))
+        ? Math.max(0, Math.min(1, Number(result.image_provenance.confidence))) : 0,
+      evidence: Object.freeze((Array.isArray(result.image_provenance.evidence)
+        ? result.image_provenance.evidence : []).map((entry) =>
+        String(entry || "").slice(0, 120))),
+      observed_at: result.image_provenance.observed_at || null,
+    });
   }
   return Object.freeze(result);
 }

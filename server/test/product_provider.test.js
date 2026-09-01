@@ -2115,7 +2115,72 @@ test("Taobao mapping prefers a white-background image and records its quality", 
   }, {fallbackCategory: "bag"});
 
   assert.equal(product.image_url, "https://img.alicdn.com/white.jpg");
+  assert.equal(product.white_image, "https://img.alicdn.com/white.jpg");
+  assert.equal(product.pict_url, "https://img.alicdn.com/regular.jpg");
+  assert.equal(product.image_provenance.status, "AVAILABLE");
+  assert.equal(product.image_provenance.selected_field, "white_image");
   assert.equal(product.image_quality_hint, "white_background");
+});
+
+test("real Taobao image provenance survives reranker clones, strategy selection, and trace", async () => {
+  const requirements = ["top", "bottom", "shoes"].map((category) => ({
+    look_id: "image-provenance-look",
+    concept_id: "image-provenance-concept",
+    category,
+    gender: "female",
+    scene: "nightlife",
+    item_name: `年轻设计感${category}`,
+  }));
+  const groups = requirements.map((requirement) => {
+    const item = taobaoItem({
+      item_basic_info: {
+        item_id: `image-${requirement.category}`,
+        title: `女士年轻设计感${requirement.category}`,
+        category_name: requirement.category,
+        pict_url: `//img.example.com/${requirement.category}.jpg`,
+        white_image: `//img.example.com/${requirement.category}-white.jpg`,
+      },
+    });
+    const mapped = mapTaobaoProduct(item, {fallbackCategory: requirement.category});
+    return {requirement, candidates: [{...mapped, relevance_score: 95}]};
+  });
+  const quality = Object.freeze({status: "PASS", overall_score: 80});
+  const result = await runSharedCandidatePipeline({
+    requirements,
+    groups,
+    context: {gender: "female", scene: "nightlife"},
+    reranker: {
+      async rerank({groups: rerankGroups}) {
+        return rerankGroups.flatMap((group) => group.candidates.map((item) => ({
+          product_id: item.product_id,
+          candidate_id: item.candidate_id,
+          look_id: item.look_id,
+          category: item.category,
+          final_score: 90,
+        })));
+      },
+      getTraceForRequest() { return null; },
+    },
+    outfitPostProcessor: ({products}) => ({
+      applied: true,
+      products: products.map((item) => ({...item,
+        whole_look_quality_status: "PASS", whole_look_quality: quality})),
+      looks: [{look_id: "image-provenance-look", whole_look_quality: quality}],
+      rejected_looks: [],
+    }),
+    logger: {info() {}, warn() {}, error() {}},
+  });
+
+  assert.equal(result.products.length, 3);
+  for (const product of result.products) {
+    assert.equal(product.image_url,
+      `https://img.example.com/${product.category}-white.jpg`);
+    assert.equal(product.image_provenance.status, "AVAILABLE");
+  }
+  assert.equal(result.trace.gate_pass.every((item) =>
+    item.image_provenance?.status === "AVAILABLE" && item.image_url), true);
+  assert.equal(result.trace.strategy_selected.every((item) =>
+    item.image_provenance?.status === "AVAILABLE" && item.image_url), true);
 });
 
 test("Taobao mapping recognizes official and promotional image presentation", () => {
