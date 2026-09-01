@@ -600,6 +600,59 @@ test("Portfolio rejects a complete Look that lacks whole-look quality proof", as
   assert.equal(validation.quality_valid_look_count, 0);
   assert.equal(validation.looks.length, 0);
   assert.equal(validation.unfulfilled_look_ids.length, compiled.looks.length);
+  assert.equal(validation.validation_trace.validator_input_look_count,
+    compiled.looks.length);
+  assert.equal(validation.validation_trace.quality_valid_look_count, 0);
+  assert.equal(validation.validation_trace.reject_count, compiled.looks.length);
+  assert.equal(validation.validation_trace.looks.every((look) =>
+    look.final_quality.status === "FAIL" &&
+      look.coreValidation.errors.includes(`QUALITY_INVALID:${look.look_id}`) &&
+      look.validator_rules.FINAL_QUALITY.status === "FAIL" &&
+      typeof look.concept_id === "string"), true);
+  assert.equal(validation.validation_trace.portfolio_rules.LOOK_COUNT.status,
+    "FAIL");
+  assert.equal(validation.validation_trace.final_portfolio_failure_reason,
+    "LOOK_COUNT_OUT_OF_RANGE");
+});
+
+test("Portfolio observability records per-Look core errors and the first rejection without changing validation", () => {
+  const decisionContext = context({
+    requestId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    itemBudget: "100-150",
+  });
+  const compiled = compileLookConceptPortfolio(decisionContext);
+  const contract = compiled.looks[0];
+  const quality = Object.freeze({status: "PASS", overall_score: 72});
+  const products = contract.items.map((requirement, index) => ({
+    ...product(`trace-${requirement.category}-${index}`, requirement.category, {
+      price: 220,
+    }),
+    look_id: contract.look_id,
+    concept_id: contract.concept_id,
+    candidate_id: `trace-${requirement.category}-${index}`,
+    body_strategy_match_score: 70,
+    outfit_occasion_formality_score: 70,
+    whole_look_quality_status: "PASS",
+    whole_look_quality: quality,
+  }));
+  const validation = validateFinalPortfolio({
+    decisionContext,
+    compiled: Object.freeze({...compiled, looks: Object.freeze([contract])}),
+    products,
+  });
+
+  assert.equal(validation.status, "FAIL");
+  assert.equal(validation.validation_trace.validator_input_look_count, 1);
+  assert.equal(validation.validation_trace.looks[0].final_quality.score, 72);
+  assert.equal(validation.validation_trace.looks[0].final_quality.status, "PASS");
+  assert.equal(validation.validation_trace.looks[0]
+    .validator_rules.ITEM_BUDGET.status, "FAIL");
+  assert.match(validation.validation_trace.looks[0].first_reject_reason,
+    /^ITEM_BUDGET_CONFLICT:/u);
+  assert.equal(validation.validation_trace.first_reject_reason,
+    validation.errors[0]);
+  assert.equal(validation.validation_trace.final_portfolio_failure_reason,
+    validation.errors[0]);
 });
 
 test("provider/contract failure is explicit and eligible for visible legacy fallback", async () => {

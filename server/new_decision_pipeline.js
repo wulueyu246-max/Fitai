@@ -215,6 +215,165 @@ function wholeLookQualityPasses(contract, look) {
     product?.whole_look_quality?.status === "PASS");
 }
 
+function validatorRule(status, actual, expected) {
+  return Object.freeze({
+    status: status ? "PASS" : "FAIL",
+    actual,
+    expected,
+  });
+}
+
+function validationErrorsForLook(errors, lookId) {
+  const marker = `:${lookId}`;
+  return (Array.isArray(errors) ? errors : []).filter((error) =>
+    String(error || "").includes(marker));
+}
+
+function buildPortfolioValidationTrace({
+  decisionContext,
+  compiled,
+  products,
+  qualityValidLooks,
+  errors,
+  warnings,
+  duplicates,
+  underlyingDuplicates,
+} = {}) {
+  const explicitStyle = String(
+    decisionContext?.intent?.user_intent_brain?.explicit_style?.value || "",
+  ).trim().toLowerCase();
+  const explicitAvoid = unique([
+    decisionContext?.intent?.user_intent_brain?.explicit_avoid?.value,
+    decisionContext?.user_truth?.explicit_avoid,
+  ]);
+  const itemBudget = budgetCeiling(decisionContext?.user_truth?.budget?.item);
+  const outfitBudget = budgetCeiling(decisionContext?.user_truth?.budget?.outfit);
+  const qualityValidIds = new Set((qualityValidLooks || []).map((look) => look.look_id));
+  const compiledLookIds = (compiled?.looks || []).map((look) => look.look_id);
+  const portfolioErrors = (Array.isArray(errors) ? errors : []).filter((error) =>
+    !compiledLookIds.some((lookId) => String(error || "").includes(`:${lookId}`)));
+  const lookTraces = (compiled?.looks || []).map((contract) => {
+    const look = finalLookForContract(contract, products || []);
+    const selected = look.selected_products || [];
+    const categories = new Set(selected.map((product) => product.category));
+    const missingCoreSlots = ["top", "bottom", "shoes"]
+      .filter((category) => !categories.has(category));
+    const ids = look.selected_candidate_ids.filter(Boolean);
+    const identities = selected.map(productIdentity).filter(Boolean);
+    const acceptanceRejects = selected.filter((product) =>
+      product.product_acceptance_result === "HARD_REJECT").map(productId);
+    const avoidConflicts = selected.filter((product) => explicitAvoid.some((avoid) =>
+      violatesAvoid(product, avoid))).map(productId);
+    const itemBudgetConflicts = itemBudget > 0 ? selected.filter((product) =>
+      !Number.isFinite(Number(product.price)) || Number(product.price) > itemBudget)
+      .map(productId) : [];
+    const bodySignalMissing = selected.filter((product) =>
+      !Number.isFinite(Number(product.body_strategy_match_score))).map(productId);
+    const occasionSignalCount = selected.filter((product) =>
+      Number.isFinite(Number(product.outfit_occasion_formality_score))).length;
+    const prices = selected.map((product) => Number(product.price));
+    const outfitTotal = prices.every(Number.isFinite)
+      ? prices.reduce((sum, price) => sum + price, 0) : null;
+    const outfitBudgetPasses = outfitBudget <= 0 ||
+      (outfitTotal !== null && outfitTotal <= outfitBudget);
+    const quality = selected.map((product) => product?.whole_look_quality)
+      .find((entry) => entry && typeof entry === "object") || null;
+    const qualityPasses = wholeLookQualityPasses(contract, look);
+    const coreErrors = validationErrorsForLook(errors, look.look_id);
+    if (!qualityPasses) coreErrors.unshift(`QUALITY_INVALID:${look.look_id}`);
+    const distinctCoreErrors = unique(coreErrors);
+    const allRejectReasons = unique([...portfolioErrors, ...distinctCoreErrors]);
+    const styleLockPasses = !explicitStyle ||
+      String(contract?.style || "").toLowerCase() === explicitStyle;
+    const styleSignalPasses = !explicitStyle || selected.some((product) =>
+      Number.isFinite(Number(product.outfit_target_profile_match_score)));
+    const rules = Object.freeze({
+      FINAL_QUALITY: validatorRule(qualityPasses, Object.freeze({
+        status: quality?.status || "UNKNOWN",
+        score: Number.isFinite(Number(quality?.overall_score))
+          ? Number(quality.overall_score) : null,
+      }), Object.freeze({status: "PASS", overall_score_at_least: 60})),
+      CORE_SLOTS: validatorRule(missingCoreSlots.length === 0,
+        Object.freeze([...categories]), Object.freeze(["top", "bottom", "shoes"])),
+      CANDIDATE_IDENTITY: validatorRule(
+        ids.length === selected.length && new Set(ids).size === ids.length,
+        Object.freeze({selected_count: selected.length, id_count: ids.length,
+          unique_id_count: new Set(ids).size}),
+        "every selected product has one unique candidate id"),
+      UNDERLYING_PRODUCT_IDENTITY: validatorRule(
+        new Set(identities).size === identities.length,
+        Object.freeze({identity_count: identities.length,
+          unique_identity_count: new Set(identities).size}),
+        "underlying product identities are unique within the Look"),
+      STYLE_LOCK: validatorRule(styleLockPasses && styleSignalPasses,
+        Object.freeze({explicit_style: explicitStyle || null,
+          contract_style: contract?.style || null,
+          target_signal_present: styleSignalPasses}),
+        "explicit style remains locked and auditable when present"),
+      PRODUCT_ACCEPTANCE: validatorRule(acceptanceRejects.length === 0,
+        Object.freeze(acceptanceRejects), Object.freeze([])),
+      EXPLICIT_AVOID: validatorRule(avoidConflicts.length === 0,
+        Object.freeze(avoidConflicts), Object.freeze([])),
+      ITEM_BUDGET: validatorRule(itemBudgetConflicts.length === 0,
+        Object.freeze({ceiling: itemBudget || null, conflicts: itemBudgetConflicts}),
+        "no selected item exceeds an explicit item budget"),
+      BODY_FIT_SIGNAL: validatorRule(bodySignalMissing.length === 0,
+        Object.freeze(bodySignalMissing), Object.freeze([])),
+      OUTFIT_BUDGET: validatorRule(outfitBudgetPasses,
+        Object.freeze({total: outfitTotal, ceiling: outfitBudget || null}),
+        "outfit total does not exceed an explicit outfit budget"),
+      SCENE_FIT_SIGNAL: validatorRule(occasionSignalCount > 0,
+        occasionSignalCount, "at least one finite occasion/formality score"),
+    });
+    return Object.freeze({
+      look_id: look.look_id,
+      concept_id: look.concept_id,
+      final_quality: Object.freeze({
+        status: qualityPasses ? "PASS" : quality?.status || "FAIL",
+        score: Number.isFinite(Number(quality?.overall_score))
+          ? Number(quality.overall_score) : null,
+      }),
+      coreValidation: Object.freeze({errors: Object.freeze(distinctCoreErrors)}),
+      validator_rules: rules,
+      portfolio_pass: qualityValidIds.has(look.look_id) &&
+        allRejectReasons.length === 0,
+      first_reject_reason: allRejectReasons[0] || null,
+      all_reject_reasons: Object.freeze(allRejectReasons),
+    });
+  });
+  const conceptIds = (qualityValidLooks || []).map((look) => look.concept_id);
+  const portfolioRules = Object.freeze({
+    LOOK_COUNT: validatorRule(
+      qualityValidLooks.length >= 1 && qualityValidLooks.length <= 4,
+      qualityValidLooks.length, "between 1 and 4 quality-valid Looks"),
+    CROSS_LOOK_PRODUCT_UNIQUENESS: validatorRule(duplicates.length === 0,
+      Object.freeze(unique(duplicates)), Object.freeze([])),
+    CROSS_LOOK_UNDERLYING_PRODUCT_UNIQUENESS: validatorRule(
+      underlyingDuplicates.length === 0,
+      Object.freeze(unique(underlyingDuplicates)), Object.freeze([])),
+    CONCEPT_UNIQUENESS: validatorRule(
+      new Set(conceptIds).size === qualityValidLooks.length,
+      Object.freeze(conceptIds), "one unique concept_id per returned Look"),
+    CONCEPT_DIVERSITY: validatorRule(
+      decisionContext?.concept_diversity?.status === "PASS",
+      decisionContext?.concept_diversity?.status || "UNKNOWN", "PASS"),
+  });
+  return Object.freeze({
+    validator_input_look_count: compiled?.looks?.length || 0,
+    quality_valid_look_count: qualityValidLooks.length,
+    pass_count: lookTraces.filter((look) => look.portfolio_pass).length,
+    reject_count: lookTraces.filter((look) => !look.portfolio_pass).length,
+    looks: Object.freeze(lookTraces),
+    portfolio_rules: portfolioRules,
+    first_reject_reason: errors[0] ||
+      lookTraces.find((look) => look.first_reject_reason)?.first_reject_reason || null,
+    all_reject_reasons: Object.freeze(unique(errors)),
+    final_portfolio_failure_reason: errors[0] ||
+      (qualityValidLooks.length === 0 ? "INSUFFICIENT_QUALITY_LOOKS" : null),
+    warnings: Object.freeze([...(warnings || [])]),
+  });
+}
+
 function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
   const errors = [];
   const warnings = [];
@@ -329,6 +488,17 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
     errors.push("CONCEPT_DIVERSITY_FAILED");
   }
 
+  const validationTrace = buildPortfolioValidationTrace({
+    decisionContext,
+    compiled,
+    products,
+    qualityValidLooks: looks,
+    errors,
+    warnings,
+    duplicates,
+    underlyingDuplicates,
+  });
+
   return Object.freeze({
     version: FINAL_PORTFOLIO_VALIDATOR_VERSION,
     status: errors.length === 0 ? "PASS" : "FAIL",
@@ -353,6 +523,7 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
     errors: Object.freeze(errors),
     warnings: Object.freeze(warnings),
     looks: Object.freeze(looks),
+    validation_trace: validationTrace,
   });
 }
 
@@ -801,6 +972,11 @@ async function executeNewDecisionPipeline({
     products,
   });
   if (coreValidation.quality_valid_look_count === 0) {
+    logger.error?.("new_decision_portfolio_validation_failed", {
+      request_id: decisionContext.request_id,
+      error_code: "INSUFFICIENT_QUALITY_LOOKS",
+      validation_trace: coreValidation.validation_trace,
+    });
     throw new NewDecisionPipelineError("No whole-look quality PASS result", {
       code: "INSUFFICIENT_QUALITY_LOOKS",
       stage: "PORTFOLIO_VALIDATOR",
@@ -809,6 +985,11 @@ async function executeNewDecisionPipeline({
     });
   }
   if (coreValidation.status !== "PASS") {
+    logger.error?.("new_decision_portfolio_validation_failed", {
+      request_id: decisionContext.request_id,
+      error_code: "NEW_DECISION_PORTFOLIO_INVALID",
+      validation_trace: coreValidation.validation_trace,
+    });
     throw new NewDecisionPipelineError("Final concept portfolio is invalid", {
       code: "NEW_DECISION_PORTFOLIO_INVALID",
       stage: "PORTFOLIO_VALIDATOR",
