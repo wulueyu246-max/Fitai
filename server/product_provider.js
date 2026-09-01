@@ -69,6 +69,10 @@ const {
   canonicalProductIdentity,
   evaluateProductAcceptance,
 } = require("./product_acceptance_gate");
+const {
+  buildDeficitRefillQuery,
+  diagnoseQualityDeficit,
+} = require("./quality_deficit_refill");
 const {attachTargetFitAssessment} = require("./target_fit_assessment");
 
 const PRODUCT_CATEGORIES = SUPPORTED_PRODUCT_CATEGORIES;
@@ -289,6 +293,7 @@ async function runSharedCandidatePipeline({
     refill_network_query_count: 0,
     refill_max_rounds_used: 0,
     refill_rounds: [],
+    quality_deficit_diagnoses: [],
     slot_outcomes: [],
     requested_looks: [...new Set(safeRequirements.map((requirement) =>
       String(requirement?.look_id || "")).filter(Boolean))].length,
@@ -413,6 +418,7 @@ async function runSharedCandidatePipeline({
     gateGroups = await refillWholeLookFailures({
       groups: gateGroups,
       rejectedLookIds,
+      composition: selection,
       context,
       trace,
       refillCandidates,
@@ -884,6 +890,7 @@ function buildSeenCandidatesByGroup(rawCandidates = []) {
 async function refillWholeLookFailures({
   groups,
   rejectedLookIds,
+  composition,
   context,
   trace,
   refillCandidates,
@@ -894,9 +901,30 @@ async function refillWholeLookFailures({
     requirement: group.requirement,
     candidates: dedupeCandidates(group.candidates),
   }));
-  const targets = working.map((group, index) => ({group, index}))
-    .filter(({group}) => rejectedLookIds.has(String(
-      group?.requirement?.look_id || "",
+  const rejectedById = new Map((composition?.rejected_looks || []).map((look) => [
+    String(look?.look_id || ""),
+    look,
+  ]));
+  const diagnoses = new Map([...rejectedLookIds].map((lookId) => {
+    const lookGroups = working.filter((group) =>
+      String(group?.requirement?.look_id || "") === lookId);
+    const diagnosis = diagnoseQualityDeficit({
+      rejectedLook: rejectedById.get(lookId) || {look_id: lookId},
+      groups: lookGroups,
+      round,
+      context,
+    });
+    trace.quality_deficit_diagnoses.push(diagnosis);
+    return [lookId, diagnosis];
+  }));
+  const targets = working.map((group, index) => ({
+    group,
+    index,
+    diagnosis: diagnoses.get(String(group?.requirement?.look_id || "")),
+  })).filter(({group, diagnosis}) =>
+    rejectedLookIds.has(String(group?.requirement?.look_id || "")) &&
+    (!diagnosis?.failing_slots?.length || diagnosis.failing_slots.includes(
+      outfitRequirementSlot(group.requirement),
     )));
   trace.refill_trigger_count += new Set(targets.map(({group}) =>
     requirementPipelineKey(group.requirement))).size;
@@ -905,14 +933,15 @@ async function refillWholeLookFailures({
   const settled = await mapSettledWithConcurrency(
     targets,
     DEFAULT_REFILL_CONCURRENCY,
-    async ({group, index}) => ({
+    async ({group, index, diagnosis}) => ({
       index,
       response: await refillCandidates({
         requirement: group.requirement,
         round,
         originalCount: group.candidates.length,
         currentCount: group.candidates.length,
-        reason: "WHOLE_LOOK_QUALITY_REJECTED",
+        reason: diagnosis?.refill_reason || "WHOLE_LOOK_QUALITY_REJECTED",
+        qualityDeficit: diagnosis || null,
       }),
     }),
   );
@@ -934,6 +963,9 @@ async function refillWholeLookFailures({
         slot: outfitRequirementSlot(requirement),
         round,
         refill_reason: "WHOLE_LOOK_QUALITY_REJECTED",
+        weakest_dimensions: target.diagnosis?.weakest_dimensions || [],
+        failing_slots: target.diagnosis?.failing_slots || [],
+        deficit_dimension: target.diagnosis?.focus_dimension || null,
         before_count: beforeCount,
         query: Object.freeze([...queries]),
         returned_count: 0,
@@ -954,7 +986,8 @@ async function refillWholeLookFailures({
     const seen = seenByGroup.get(groupKey) || new Set();
     const uniqueRaw = [];
     for (const rawProduct of returned) {
-      const product = preserveCandidateContract(rawProduct, requirement);
+      const product = prepareRefillCandidate(rawProduct, requirement);
+      if (!product) continue;
       const keys = candidateDedupeKeys(product);
       if (keys.some((key) => seen.has(key))) continue;
       keys.forEach((key) => seen.add(key));
@@ -981,6 +1014,9 @@ async function refillWholeLookFailures({
       slot: outfitRequirementSlot(requirement),
       round,
       refill_reason: "WHOLE_LOOK_QUALITY_REJECTED",
+      weakest_dimensions: target.diagnosis?.weakest_dimensions || [],
+      failing_slots: target.diagnosis?.failing_slots || [],
+      deficit_dimension: target.diagnosis?.focus_dimension || null,
       before_count: beforeCount,
       query: Object.freeze([...(response?.queries || [])]),
       returned_count: Number(response?.returned_count ?? returned.length),
@@ -1518,6 +1554,62 @@ function preserveCandidateContract(product, requirement = {}) {
   };
 }
 
+function prepareRefillCandidate(product, requirement = {}) {
+  const preserved = preserveCandidateContract(product, requirement);
+  if (preserved.source !== "taobao" || hasSemanticEnrichment(
+    preserved.candidate_enrichment,
+  )) {
+    return preserved;
+  }
+  try {
+    const fullRaw = preserved.raw_product &&
+      preserved.raw_product.schema_version === "raw_taobao_product_v1"
+      ? preserved.raw_product : null;
+    const observedRaw = fullRaw || buildRawTaobaoProduct({
+      item_id: preserved.product_id || preserved.id,
+      title: preserved.raw_title || preserved.full_title ||
+        preserved.title || preserved.name,
+      short_title: preserved.short_title,
+      category_id: preserved.category_id,
+      category_name: preserved.category_name,
+      level_one_category_id: preserved.level_one_category_id,
+      level_one_category_name: preserved.level_one_category_name,
+      zk_final_price: preserved.price,
+      reserve_price: preserved.original_price,
+      annual_vol: preserved.annual_vol,
+      volume: preserved.volume,
+      tk_total_sales: preserved.tk_total_sales,
+      white_image: preserved.white_image,
+      pict_url: preserved.pict_url || preserved.image_url,
+      item_url: preserved.item_url || preserved.purchase_url,
+      shop_title: preserved.shop_title || preserved.shop_name,
+      seller_nick: preserved.seller_nick,
+      brand_name: preserved.brand_name || preserved.brand,
+      coupon_amount: preserved.coupon_amount,
+      commission_rate: preserved.commission_rate,
+    }, {
+      query: preserved.search_keyword || "",
+    });
+    const enrichment = enrichTaobaoCandidate(observedRaw);
+    return preserveCandidateContract({
+      ...attachEnrichmentToCandidate(preserved, observedRaw, enrichment),
+      refill_enrichment_status: "ENRICHED_FROM_PRODUCT_FACTS",
+    }, requirement);
+  } catch (_) {
+    return null;
+  }
+}
+
+function hasSemanticEnrichment(enrichment) {
+  return Boolean(enrichment && [
+    "style_expression",
+    "contemporary_expression",
+    "occasion_expression",
+    "desired_impression_evidence",
+    "audience_expression",
+  ].every((field) => enrichment[field] && typeof enrichment[field] === "object"));
+}
+
 function restoreCandidateContract(product, sourceCandidates) {
   const source = sourceCandidates.get(candidatePipelineKey(product));
   if (!source) return null;
@@ -1651,6 +1743,9 @@ function freezeCandidatePipelineTrace(trace) {
     reranker_keep: Object.freeze([...trace.reranker_keep]),
     strategy_selected: Object.freeze([...trace.strategy_selected]),
     refill_rounds: Object.freeze([...(trace.refill_rounds || [])]),
+    quality_deficit_diagnoses: Object.freeze([
+      ...(trace.quality_deficit_diagnoses || []),
+    ]),
     slot_outcomes: Object.freeze([...(trace.slot_outcomes || [])]),
     rejected: Object.freeze([...(trace.rejected || [])]),
     whole_look_ai_adjudication: Object.freeze([
@@ -2406,11 +2501,12 @@ class TaobaoProductProvider extends ProductProvider {
         wholeLookAIAdjudicator: this.wholeLookAIAdjudicator,
         rerankTimeoutMs: this.rerankBudgetMs,
         deadlineAt: pipelineDeadline,
-        refillCandidates: async ({requirement, round}) => withTimeBudget(
+        refillCandidates: async ({requirement, round, qualityDeficit}) => withTimeBudget(
           this.#refillCandidatePool({
             requirement,
             context,
             round,
+            qualityDeficit,
             executed: refillExecutionKeys,
           }),
           Math.max(1, Math.min(
@@ -2910,14 +3006,24 @@ class TaobaoProductProvider extends ProductProvider {
     return budgetAssessed.slice(0, candidateLimit);
   }
 
-  async #refillCandidatePool({requirement, context, round, executed}) {
+  async #refillCandidatePool({
+    requirement,
+    context,
+    round,
+    qualityDeficit,
+    executed,
+  }) {
     // Optional styling completion owns a strict Q1/Q2/Q3 ladder. Once its
     // bounded initial calls have run, the plan's Q3 may not be reissued by
     // generic Candidate Refill (which is allowed to broaden core searches).
     if (isTrustedStylingCompletionPlan(requirement, context)) {
       return {candidates: [], queries: [], returned_count: 0};
     }
-    const planned = buildCandidateRefillQueries(requirement, round)
+    const planned = buildCandidateRefillQueries(
+      requirement,
+      round,
+      qualityDeficit,
+    )
       .filter((entry) => {
         const key = `${requirementPipelineKey(requirement)}:${entry.query}:` +
           `${entry.page_no}`;
@@ -3824,12 +3930,22 @@ function isTrustedStylingCompletionPlan(requirement = {}, context = {}) {
     stylingCompletionQueryTexts(plan).every(Boolean);
 }
 
-function buildCandidateRefillQueries(requirement = {}, round = 1) {
+function buildCandidateRefillQueries(
+  requirement = {},
+  round = 1,
+  qualityDeficit = null,
+) {
   const normalizedRound = Number(round);
   if (!Number.isInteger(normalizedRound) || normalizedRound < 1 ||
       normalizedRound > DEFAULT_MAX_REFILL_ROUNDS) {
     return [];
   }
+  const deficitQuery = buildDeficitRefillQuery(
+    requirement,
+    qualityDeficit,
+    normalizedRound,
+  );
+  if (deficitQuery) return [deficitQuery];
   const plan = requirement?.commerce_query_plan || {};
   const candidates = Array.isArray(plan.query_candidates)
     ? plan.query_candidates : [];
