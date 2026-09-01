@@ -50,6 +50,19 @@ function productIdentity(product = {}) {
   ).trim();
 }
 
+function portfolioSceneFitScore(product = {}) {
+  for (const value of [
+    product.outfit_occasion_formality_score,
+    product.outfit_strategy_breakdown?.occasion_fit,
+    product.outfit_strategy_trace?.occasionFormalityFit,
+  ]) {
+    if (value == null || String(value).trim() === "") continue;
+    const score = Number(value);
+    if (Number.isFinite(score)) return score;
+  }
+  return null;
+}
+
 const PUBLIC_PRODUCT_FIELDS = Object.freeze([
   "id", "product_id", "candidate_id", "title", "name", "brand",
   "brand_name", "shop_name", "category", "original_category",
@@ -270,7 +283,7 @@ function buildPortfolioValidationTrace({
     const bodySignalMissing = selected.filter((product) =>
       !Number.isFinite(Number(product.body_strategy_match_score))).map(productId);
     const occasionSignalCount = selected.filter((product) =>
-      Number.isFinite(Number(product.outfit_occasion_formality_score))).length;
+      Number.isFinite(portfolioSceneFitScore(product))).length;
     const prices = selected.map((product) => Number(product.price));
     const outfitTotal = prices.every(Number.isFinite)
       ? prices.reduce((sum, price) => sum + price, 0) : null;
@@ -464,8 +477,7 @@ function validateFinalPortfolio({decisionContext, compiled, products} = {}) {
         errors.push(`OUTFIT_BUDGET_CONFLICT:${look.look_id}`);
       }
     }
-    const occasionScores = look.selected_products.map((product) =>
-      Number(product.outfit_occasion_formality_score));
+    const occasionScores = look.selected_products.map(portfolioSceneFitScore);
     if (!occasionScores.some(Number.isFinite)) {
       errors.push(`SCENE_FIT_SIGNAL_MISSING:${look.look_id}`);
     }

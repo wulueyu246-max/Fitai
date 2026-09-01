@@ -615,7 +615,7 @@ test("Portfolio rejects a complete Look that lacks whole-look quality proof", as
     "LOOK_COUNT_OUT_OF_RANGE");
 });
 
-test("Portfolio observability records per-Look core errors and the first rejection without changing validation", () => {
+test("Portfolio consumes the Strategy scene-fit value from its final Look contract", () => {
   const decisionContext = context({
     requestId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
     itemBudget: "100-150",
@@ -631,7 +631,8 @@ test("Portfolio observability records per-Look core errors and the first rejecti
     concept_id: contract.concept_id,
     candidate_id: `trace-${requirement.category}-${index}`,
     body_strategy_match_score: 70,
-    outfit_occasion_formality_score: 70,
+    outfit_strategy_breakdown: {occasion_fit: 70},
+    outfit_strategy_trace: {occasionFormalityFit: 70},
     whole_look_quality_status: "PASS",
     whole_look_quality: quality,
   }));
@@ -647,12 +648,31 @@ test("Portfolio observability records per-Look core errors and the first rejecti
   assert.equal(validation.validation_trace.looks[0].final_quality.status, "PASS");
   assert.equal(validation.validation_trace.looks[0]
     .validator_rules.ITEM_BUDGET.status, "FAIL");
+  assert.equal(validation.validation_trace.looks[0]
+    .validator_rules.SCENE_FIT_SIGNAL.status, "PASS");
+  assert.equal(validation.validation_trace.looks[0]
+    .validator_rules.SCENE_FIT_SIGNAL.actual, 3);
+  assert.equal(validation.errors.some((error) =>
+    error.startsWith("SCENE_FIT_SIGNAL_MISSING:")), false);
   assert.match(validation.validation_trace.looks[0].first_reject_reason,
     /^ITEM_BUDGET_CONFLICT:/u);
   assert.equal(validation.validation_trace.first_reject_reason,
     validation.errors[0]);
   assert.equal(validation.validation_trace.final_portfolio_failure_reason,
     validation.errors[0]);
+
+  const missingSceneProducts = products.map(({
+    outfit_strategy_breakdown: _breakdown,
+    outfit_strategy_trace: _trace,
+    ...product
+  }) => product);
+  const missingSceneValidation = validateFinalPortfolio({
+    decisionContext,
+    compiled: Object.freeze({...compiled, looks: Object.freeze([contract])}),
+    products: missingSceneProducts,
+  });
+  assert.equal(missingSceneValidation.errors.some((error) =>
+    error.startsWith("SCENE_FIT_SIGNAL_MISSING:")), true);
 });
 
 test("provider/contract failure is explicit and eligible for visible legacy fallback", async () => {
