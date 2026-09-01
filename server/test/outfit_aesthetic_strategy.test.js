@@ -789,3 +789,82 @@ test("high-confidence acceptance mismatch cannot be hidden by a high aggregate s
     (reason) => reason ===
       "CRITICAL_DIMENSION_BELOW_FLOOR:DESIRED_IMPRESSION"), true);
 });
+
+test("new decision pipeline uses human-grounded whole-look scoring", () => {
+  const lookId = "human-grounded-production-look";
+  const requirements = ["top", "bottom", "shoes"].map((category) =>
+    requirement(lookId, category, {style: "minimal"}));
+  const targetFit = () => ({
+    audience_fit: {score: 98, status: "MATCH", source: "product_fact",
+      confidence: 0.95, evidence: ["adult female"]},
+    occasion_fit: {score: 88, status: "MATCH", source: "product_fact",
+      confidence: 0.88, evidence: ["social scene"]},
+    desired_impression_fit: {score: 86, status: "MATCH", source: "product_fact",
+      confidence: 0.88, evidence: ["young design expression"]},
+    contemporary_fit: {score: 84, status: "MATCH", source: "product_fact",
+      confidence: 0.84, evidence: ["contemporary expression"]},
+    quality_fit: {score: 74, status: "PARTIAL", source: "product_fact",
+      confidence: 0.72, evidence: ["consistent quality"]},
+  });
+  const enriched = (category) => ({
+    style_expression: {value: "design_expression", source: "title",
+      confidence: 0.9, evidence: ["design detail"]},
+    desired_impression_evidence: {value: ["design_led", "youthful"],
+      source: "title", confidence: 0.88, evidence: ["young design"]},
+    contemporary_expression: {value: "contemporary", source: "title",
+      confidence: 0.84, evidence: ["contemporary"]},
+    occasion_expression: {value: "nightlife_social", source: "title",
+      confidence: 0.86, evidence: ["social"]},
+    silhouette_evidence: {value: category === "top" ? "cropped" :
+      category === "bottom" ? "a_line" : "fitted", source: "title",
+      confidence: 0.86, evidence: ["shape"]},
+    color_evidence: {value: category === "shoes" ? "black" : "white",
+      source: "title", confidence: 0.9, evidence: ["color"]},
+    ...(category === "shoes" ? {footwear_evidence: {value: "loafer",
+      source: "title", confidence: 0.9, evidence: ["loafer"]}} : {}),
+  });
+  const products = [
+    calibratedProduct(lookId, "top", "hg-top", "minimal", 90, {
+      gender: "female", title: "浅色短款设计感上衣",
+      candidate_enrichment: enriched("top"), target_fit_assessment: targetFit(),
+    }),
+    calibratedProduct(lookId, "bottom", "hg-bottom", "minimal", 90, {
+      gender: "female", title: "浅色百褶A字裙",
+      candidate_enrichment: enriched("bottom"), target_fit_assessment: targetFit(),
+    }),
+    calibratedProduct(lookId, "shoes", "hg-shoes", "minimal", 90, {
+      gender: "female", title: "黑色厚底乐福鞋",
+      candidate_enrichment: enriched("shoes"), target_fit_assessment: targetFit(),
+    }),
+  ];
+  const result = composeOutfitCandidates({
+    requirements,
+    products,
+    context: {
+      decision_pipeline: "new_decision_pipeline.v1",
+      gender: "female",
+      scene: "nightlife",
+      aesthetic_target_profile: resolveAestheticTargetProfile({
+        gender: "female", scene: "daily", style: "minimal",
+      }),
+      decision_context: {
+        user_truth: {gender: "female", scene: "nightlife"},
+        intent: {user_intent_brain: {
+          scene_intent: {value: "nightlife", source: "user", confidence: 1},
+          desired_impression: {value: ["年轻", "有设计感"], source: "user",
+            confidence: 1},
+          formality_preference: {value: "relaxed", source: "user", confidence: 1},
+          statement_level: {value: "medium", source: "user", confidence: 1},
+          explicit_avoid: {value: [], source: "user", confidence: 1},
+        }},
+      },
+    },
+  });
+
+  assert.equal(result.looks.length, 1);
+  assert.equal(result.looks[0].whole_look_quality.version,
+    "whole_look_human_grounded_score.v1");
+  assert.equal(result.looks[0].whole_look_quality.status, "PASS");
+  assert.ok(result.looks[0].whole_look_quality.intent_expression_score >= 60);
+  assert.equal(result.looks[0].whole_look_quality.defaulted_dimensions.length, 0);
+});

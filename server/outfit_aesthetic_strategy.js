@@ -10,6 +10,9 @@ const {
 const {canonicalProductIdentity} = require("./product_acceptance_gate");
 const {evaluateFinalLookQuality} = require("./final_look_quality");
 const {targetFitScore} = require("./target_fit_assessment");
+const {
+  evaluateProductionWholeLook,
+} = require("./whole_look_human_grounded_score");
 
 const STRATEGY_VERSION = "outfit_aesthetic_target_alignment_v1";
 const DEFAULT_TOP_PER_REQUIREMENT = 6;
@@ -146,7 +149,7 @@ function composeOutfitCandidates({
       compareCombinationIdentity(left.entries, right.entries));
     const qualityRanked = ranked.map((combination) => ({
       ...combination,
-      quality: evaluateCombinationQuality(combination),
+      quality: evaluateCombinationQuality(combination, strategyContext),
     }));
     const chosen = qualityRanked.find((combination) =>
       combination.quality.status === "PASS");
@@ -284,9 +287,18 @@ function composeOutfitCandidates({
   });
 }
 
-function evaluateCombinationQuality(combination) {
+function evaluateCombinationQuality(combination, context = {}) {
   const trace = combination.strategyTrace;
   const entries = combination.entries;
+  if (usesHumanGroundedWholeLookScore(context)) {
+    return evaluateProductionWholeLook({
+      entries,
+      strategyTrace: trace,
+      context,
+      target: combination.aestheticTargetProfile,
+      lookCandidateId: combinationIdentity(entries),
+    });
+  }
   return evaluateFinalLookQuality({
     overall_score: combination.adjustedScore,
     dimension_scores: {
@@ -350,6 +362,12 @@ function evaluateCombinationQuality(combination) {
       ]),
     },
   });
+}
+
+function usesHumanGroundedWholeLookScore(context = {}) {
+  const decisionContext = context.decision_context ||
+    context.recommendation_context?.decision_context;
+  return Boolean(decisionContext?.intent?.user_intent_brain);
 }
 
 function minimumProductScore(entries, fields) {

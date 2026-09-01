@@ -1,0 +1,203 @@
+{
+  "fixture_version": "human_grounded_whole_look_fixture.v1",
+  "request": {
+    "raw_user_input": "今晚和朋友出去玩，帮我搭3套，年轻一点，有点设计感，别太正式。",
+    "gender": "female",
+    "scene": "social_night_out",
+    "desired_impression": ["young", "design_led"],
+    "formality": "relaxed_non_office"
+  },
+  "pairwise_contracts": [
+    {"positive_sample_id": "human-positive-80", "negative_sample_id": "human-negative-a-40"},
+    {"positive_sample_id": "human-positive-80", "negative_sample_id": "human-negative-b-50"},
+    {"positive_sample_id": "human-positive-80", "negative_sample_id": "human-negative-c-55"}
+  ],
+  "samples": [
+    {
+      "sample_id": "human-positive-80",
+      "human_score": 80,
+      "label": "positive",
+      "products": [
+        {"slot": "top", "description": "浅色短款设计感上衣"},
+        {"slot": "bottom", "description": "浅色百褶裙"},
+        {"slot": "shoes", "description": "黑色厚底乐福鞋"}
+      ],
+      "required_intent_dimensions": ["scene_expression_strength", "desired_impression_coverage", "design_interest"],
+      "target_contract": {
+        "explicit_requirements": [
+          {"dimension": "scene_expression_strength", "value": "social_night_out"},
+          {"dimension": "desired_impression_coverage", "value": "young"},
+          {"dimension": "design_interest", "value": "design_led"}
+        ],
+        "resolved_requirements": [
+          {"dimension": "scene_expression_strength", "value": "social_night_out", "source": "user_intent"},
+          {"dimension": "desired_impression_coverage", "value": "young", "source": "user_intent"},
+          {"dimension": "design_interest", "value": "design_led", "source": "user_intent"}
+        ]
+      },
+      "baseline_integrity": {
+        "category_integrity": {"status": "EVIDENCED", "score": 100, "source": "human_grounded_fixture", "confidence": 1, "evidence": ["完整的上装、下装、鞋履结构"]},
+        "gender_integrity": {"status": "EVIDENCED", "score": 100, "source": "human_grounded_fixture", "confidence": 1, "evidence": ["商品表达与请求人群一致"]},
+        "body_fit": {"status": "EVIDENCED", "score": 76, "source": "human_grounded_fixture", "confidence": 0.75, "evidence": ["短上衣与高腰裙建立腰线"]},
+        "color_harmony": {"status": "EVIDENCED", "score": 84, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["浅色主体与黑色鞋形成稳定锚点"]},
+        "footwear_compatibility": {"status": "EVIDENCED", "score": 88, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["厚底乐福鞋与百褶裙比例兼容"]},
+        "quality_consistency": {"status": "EVIDENCED", "score": 74, "source": "human_grounded_fixture", "confidence": 0.7, "evidence": ["三件单品的视觉完成度一致"]},
+        "silhouette_coherence": {"status": "EVIDENCED", "score": 88, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["短上衣、高腰褶裙与厚底鞋形成清楚比例"]}
+      },
+      "intent_expression": {
+        "scene_expression_strength": {"status": "EVIDENCED", "score": 78, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["短款比例和厚底鞋具备年轻社交表达"]},
+        "desired_impression_coverage": {"status": "EVIDENCED", "score": 84, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["年轻与设计感两个明确目标均有整套证据"]},
+        "design_interest": {"status": "EVIDENCED", "score": 86, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["短款结构、褶裥和厚底构成分布式设计兴趣"]},
+        "contemporary_expression": {"status": "EVIDENCED", "score": 82, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["比例与鞋型组合具有当代表达"]},
+        "silhouette_interest": {"status": "EVIDENCED", "score": 86, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["短长与褶量关系形成清晰轮廓重点"]},
+        "color_story": {"status": "EVIDENCED", "score": 80, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["浅色连续面由黑色鞋履有意收束"]},
+        "footwear_statement": {"status": "EVIDENCED", "score": 88, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["黑色厚底鞋既呼应又提升造型力度"]},
+        "styling_distinction": {"status": "EVIDENCED", "score": 84, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["不是基础日常模板，具有可识别造型关系"]},
+        "overall_memorability": {"status": "EVIDENCED", "score": 80, "source": "human_grounded_fixture", "confidence": 0.8, "evidence": ["浅色褶裙与黑色厚底锚点形成记忆点"]}
+      }
+    },
+    {
+      "sample_id": "human-negative-a-40",
+      "human_score": 40,
+      "label": "negative",
+      "products": [
+        {"slot": "top", "description": "白色修身T"},
+        {"slot": "bottom", "description": "黑色直筒裤"},
+        {"slot": "shoes", "description": "成熟浅口鞋"}
+      ],
+      "legacy_machine_snapshot": {"overall_score": 60.36, "dimension_scores": {"style": 64, "silhouette": 62, "color": 76, "footwear": 58, "quality": 60, "body": 65}},
+      "required_intent_dimensions": ["scene_expression_strength", "desired_impression_coverage", "design_interest"],
+      "target_contract": {
+        "explicit_requirements": [
+          {"dimension": "scene_expression_strength", "value": "social_night_out"},
+          {"dimension": "desired_impression_coverage", "value": "young"},
+          {"dimension": "design_interest", "value": "design_led"}
+        ],
+        "resolved_requirements": [
+          {"dimension": "scene_expression_strength", "value": "social_night_out", "source": "user_intent"},
+          {"dimension": "desired_impression_coverage", "value": "young", "source": "user_intent"},
+          {"dimension": "design_interest", "value": "design_led", "source": "user_intent"}
+        ]
+      },
+      "baseline_integrity": {
+        "category_integrity": {"status": "EVIDENCED", "score": 100, "source": "human_grounded_fixture", "confidence": 1, "evidence": ["核心三槽完整"]},
+        "gender_integrity": {"status": "EVIDENCED", "score": 100, "source": "human_grounded_fixture", "confidence": 1, "evidence": ["人群无冲突"]},
+        "body_fit": {"status": "EVIDENCED", "score": 74, "source": "human_grounded_fixture", "confidence": 0.7, "evidence": ["修身上衣与直筒裤基础比例成立"]},
+        "color_harmony": {"status": "EVIDENCED", "score": 86, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["黑白配色无明显冲突"]},
+        "footwear_compatibility": {"status": "EVIDENCED", "score": 64, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["浅口鞋与裤装可穿但表达偏成熟"]},
+        "quality_consistency": {"status": "EVIDENCED", "score": 72, "source": "human_grounded_fixture", "confidence": 0.7, "evidence": ["单品视觉品质基本一致"]},
+        "silhouette_coherence": {"status": "EVIDENCED", "score": 82, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["修身与直筒关系稳定"]}
+      },
+      "intent_expression": {
+        "scene_expression_strength": {"status": "EVIDENCED", "score": 18, "source": "human_grounded_fixture", "confidence": 0.95, "evidence": ["整体主要表达通勤而非夜间社交"]},
+        "desired_impression_coverage": {"status": "EVIDENCED", "score": 22, "source": "human_grounded_fixture", "confidence": 0.95, "evidence": ["年轻与设计感均未兑现"]},
+        "design_interest": {"status": "EVIDENCED", "score": 16, "source": "human_grounded_fixture", "confidence": 0.95, "evidence": ["三件均为基础款结构"]},
+        "contemporary_expression": {"status": "EVIDENCED", "score": 35, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["成熟浅口鞋削弱当代表达"]},
+        "silhouette_interest": {"status": "EVIDENCED", "score": 32, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["轮廓正确但没有视觉张力"]},
+        "color_story": {"status": "EVIDENCED", "score": 42, "source": "human_grounded_fixture", "confidence": 0.8, "evidence": ["黑白只是安全搭配，没有叙事关系"]},
+        "footwear_statement": {"status": "EVIDENCED", "score": 12, "source": "human_grounded_fixture", "confidence": 0.95, "evidence": ["鞋履把造型拉向成熟通勤"]},
+        "styling_distinction": {"status": "EVIDENCED", "score": 18, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["接近常规通勤模板"]},
+        "overall_memorability": {"status": "EVIDENCED", "score": 15, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["缺少可识别焦点"]}
+      }
+    },
+    {
+      "sample_id": "human-negative-b-50",
+      "human_score": 50,
+      "label": "negative",
+      "products": [
+        {"slot": "top", "description": "无袖上衣"},
+        {"slot": "bottom", "description": "黑色阔腿裤"},
+        {"slot": "shoes", "description": "白色运动鞋"}
+      ],
+      "legacy_machine_snapshot": {"overall_score": 69.46, "dimension_scores": {"style": 62, "silhouette": 72, "color": 70, "footwear": 66, "quality": 62, "body": 70}},
+      "required_intent_dimensions": ["scene_expression_strength", "desired_impression_coverage", "design_interest"],
+      "target_contract": {
+        "explicit_requirements": [
+          {"dimension": "scene_expression_strength", "value": "social_night_out"},
+          {"dimension": "desired_impression_coverage", "value": "young"},
+          {"dimension": "design_interest", "value": "design_led"}
+        ],
+        "resolved_requirements": [
+          {"dimension": "scene_expression_strength", "value": "social_night_out", "source": "user_intent"},
+          {"dimension": "desired_impression_coverage", "value": "young", "source": "user_intent"},
+          {"dimension": "design_interest", "value": "design_led", "source": "user_intent"}
+        ]
+      },
+      "baseline_integrity": {
+        "category_integrity": {"status": "EVIDENCED", "score": 100, "source": "human_grounded_fixture", "confidence": 1, "evidence": ["核心三槽完整"]},
+        "gender_integrity": {"status": "EVIDENCED", "score": 100, "source": "human_grounded_fixture", "confidence": 1, "evidence": ["人群无冲突"]},
+        "body_fit": {"status": "EVIDENCED", "score": 78, "source": "human_grounded_fixture", "confidence": 0.75, "evidence": ["无袖上衣和阔腿裤比例可穿"]},
+        "color_harmony": {"status": "EVIDENCED", "score": 82, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["黑白中性色组合稳定"]},
+        "footwear_compatibility": {"status": "EVIDENCED", "score": 76, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["白运动鞋与阔腿裤基础兼容"]},
+        "quality_consistency": {"status": "EVIDENCED", "score": 70, "source": "human_grounded_fixture", "confidence": 0.7, "evidence": ["单品完成度相近"]},
+        "silhouette_coherence": {"status": "EVIDENCED", "score": 80, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["上窄下宽的轮廓关系成立"]}
+      },
+      "intent_expression": {
+        "scene_expression_strength": {"status": "EVIDENCED", "score": 44, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["休闲社交可用，但夜间表达偏弱"]},
+        "desired_impression_coverage": {"status": "EVIDENCED", "score": 46, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["年轻感存在但设计感不足"]},
+        "design_interest": {"status": "EVIDENCED", "score": 24, "source": "human_grounded_fixture", "confidence": 0.95, "evidence": ["三件组成常见基础公式"]},
+        "contemporary_expression": {"status": "EVIDENCED", "score": 66, "source": "human_grounded_fixture", "confidence": 0.8, "evidence": ["宽腿裤和运动鞋具有基础当代感"]},
+        "silhouette_interest": {"status": "EVIDENCED", "score": 52, "source": "human_grounded_fixture", "confidence": 0.8, "evidence": ["上窄下宽有比例但缺少独特结构"]},
+        "color_story": {"status": "EVIDENCED", "score": 44, "source": "human_grounded_fixture", "confidence": 0.8, "evidence": ["中性色安全但缺少有意图的颜色关系"]},
+        "footwear_statement": {"status": "EVIDENCED", "score": 40, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["白运动鞋只完成休闲功能，没有造型贡献"]},
+        "styling_distinction": {"status": "EVIDENCED", "score": 30, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["常见无袖上衣与阔腿裤模板"]},
+        "overall_memorability": {"status": "EVIDENCED", "score": 28, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["没有清楚焦点或签名关系"]}
+      }
+    },
+    {
+      "sample_id": "human-negative-c-55",
+      "human_score": 55,
+      "label": "negative",
+      "products": [
+        {"slot": "top", "description": "黑色T恤"},
+        {"slot": "bottom", "description": "米色A字长裙"},
+        {"slot": "shoes", "description": "白色玛丽珍鞋"}
+      ],
+      "legacy_machine_snapshot": {"overall_score": 64.17, "dimension_scores": {"style": 66, "silhouette": 70, "color": 74, "footwear": 64, "quality": 60, "body": 66}},
+      "required_intent_dimensions": ["scene_expression_strength", "desired_impression_coverage", "design_interest"],
+      "target_contract": {
+        "explicit_requirements": [
+          {"dimension": "scene_expression_strength", "value": "social_night_out"},
+          {"dimension": "desired_impression_coverage", "value": "young"},
+          {"dimension": "design_interest", "value": "design_led"}
+        ],
+        "resolved_requirements": [
+          {"dimension": "scene_expression_strength", "value": "social_night_out", "source": "user_intent"},
+          {"dimension": "desired_impression_coverage", "value": "young", "source": "user_intent"},
+          {"dimension": "design_interest", "value": "design_led", "source": "user_intent"}
+        ]
+      },
+      "baseline_integrity": {
+        "category_integrity": {"status": "EVIDENCED", "score": 100, "source": "human_grounded_fixture", "confidence": 1, "evidence": ["核心三槽完整"]},
+        "gender_integrity": {"status": "EVIDENCED", "score": 100, "source": "human_grounded_fixture", "confidence": 1, "evidence": ["人群无冲突"]},
+        "body_fit": {"status": "EVIDENCED", "score": 76, "source": "human_grounded_fixture", "confidence": 0.75, "evidence": ["T恤和A字长裙比例可穿"]},
+        "color_harmony": {"status": "EVIDENCED", "score": 84, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["黑米白配色无明显冲突"]},
+        "footwear_compatibility": {"status": "EVIDENCED", "score": 78, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["玛丽珍与A字裙风格兼容"]},
+        "quality_consistency": {"status": "EVIDENCED", "score": 72, "source": "human_grounded_fixture", "confidence": 0.7, "evidence": ["单品视觉品质基本一致"]},
+        "silhouette_coherence": {"status": "EVIDENCED", "score": 84, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["上装与A字长裙轮廓协调"]}
+      },
+      "intent_expression": {
+        "scene_expression_strength": {"status": "EVIDENCED", "score": 38, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["学院日常表达强于夜间社交表达"]},
+        "desired_impression_coverage": {"status": "EVIDENCED", "score": 48, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["年轻感部分存在，设计感不足"]},
+        "design_interest": {"status": "EVIDENCED", "score": 34, "source": "human_grounded_fixture", "confidence": 0.9, "evidence": ["品类组合协调但缺少设计焦点"]},
+        "contemporary_expression": {"status": "EVIDENCED", "score": 58, "source": "human_grounded_fixture", "confidence": 0.8, "evidence": ["有基础年轻表达但偏学院日常"]},
+        "silhouette_interest": {"status": "EVIDENCED", "score": 50, "source": "human_grounded_fixture", "confidence": 0.8, "evidence": ["A字轮廓清楚但视觉张力有限"]},
+        "color_story": {"status": "EVIDENCED", "score": 46, "source": "human_grounded_fixture", "confidence": 0.8, "evidence": ["配色协调但黑米白关系较分散"]},
+        "footwear_statement": {"status": "EVIDENCED", "score": 44, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["白色玛丽珍强化学院感而非当前目标"]},
+        "styling_distinction": {"status": "EVIDENCED", "score": 40, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["整体完整但辨识度有限"]},
+        "overall_memorability": {"status": "EVIDENCED", "score": 38, "source": "human_grounded_fixture", "confidence": 0.85, "evidence": ["缺少强焦点和可记忆的比例关系"]}
+      }
+    }
+  ],
+  "legacy_target_pollution_probe": {
+    "explicit_requirements": [
+      {"dimension": "scene_expression_strength", "value": "social_night_out"},
+      {"dimension": "desired_impression_coverage", "value": "young"},
+      {"dimension": "design_interest", "value": "design_led"}
+    ],
+    "resolved_requirements": [
+      {"dimension": "scene_expression_strength", "value": "daily", "source": "neutral_default"},
+      {"dimension": "desired_impression_coverage", "value": "minimal", "source": "neutral_default"}
+    ]
+  }
+}
