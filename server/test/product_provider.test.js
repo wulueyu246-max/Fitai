@@ -1178,7 +1178,7 @@ test("zero whole-look quality PASS returns INSUFFICIENT_QUALITY_LOOKS", async ()
     error.details.trace.rejected[0].look_id === "quality-rejected-look");
 });
 
-test("whole-look adjudication can select a near-score quality-valid alternative", async () => {
+test("whole-look adjudication preserves the selected scene-fit signal", async () => {
   const requirements = ["top", "bottom", "shoes"].map((category) => ({
     look_id: "adjudicated-look",
     concept_id: "adjudicated-concept",
@@ -1200,6 +1200,15 @@ test("whole-look adjudication can select a near-score quality-valid alternative"
       price: 199,
       image_url: `https://img.example.com/${requirement.category}-${suffix}.jpg`,
       relevance_score: 90,
+      target_fit_assessment: Object.freeze({
+        occasion_fit: Object.freeze({
+          score: suffix === "b" ? 86 : 78,
+          status: "MATCH",
+          source: "candidate_enrichment.occasion_expression",
+          confidence: 0.9,
+          evidence: Object.freeze(["nightlife"]),
+        }),
+      }),
     })),
   }));
   const quality = Object.freeze({
@@ -1255,7 +1264,7 @@ test("whole-look adjudication can select a near-score quality-valid alternative"
             adjusted_score: 80,
             base_score: 80,
             cross_look_duplicate_penalty: 0,
-            strategy_trace: {styleCoherence: 80},
+            strategy_trace: {styleCoherence: 80, occasionFormalityFit: 78},
             whole_look_quality: quality,
           },
           {
@@ -1264,7 +1273,7 @@ test("whole-look adjudication can select a near-score quality-valid alternative"
             adjusted_score: 79,
             base_score: 79,
             cross_look_duplicate_penalty: 0,
-            strategy_trace: {styleCoherence: 90},
+            strategy_trace: {styleCoherence: 90, occasionFormalityFit: 86},
             whole_look_quality: quality,
           },
         ],
@@ -1300,6 +1309,15 @@ test("whole-look adjudication can select a near-score quality-valid alternative"
   assert.equal(result.trace.whole_look_ai_adjudication[0].status, "AI_SUCCESS");
   assert.equal(result.products.every((product) =>
     product.whole_look_quality_status === "PASS"), true);
+  assert.equal(result.products.every((product) =>
+    product.outfit_occasion_formality_score === 86), true);
+  assert.equal(result.products.every((product) =>
+    Number.isFinite(Number(
+      product.target_fit_assessment?.occasion_fit?.score,
+    ))), true);
+  assert.equal(result.products.every((product) =>
+    product.target_fit_assessment?.occasion_fit?.source !== "user_requirement"),
+  true);
 });
 
 test("whole-look AI failure preserves the deterministic quality-valid winner", async () => {

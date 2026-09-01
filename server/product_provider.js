@@ -847,12 +847,16 @@ function candidateRepeatsUsedProduct(candidate, usedProductKeys) {
 function materializeWholeLookWinnerProducts(winner, look) {
   const trace = winner.strategy_trace || {};
   const quality = winner.whole_look_quality;
+  const occasionFormalityScore = Number(trace.occasionFormalityFit);
   return winner.selected_products.map((product) => ({
     ...product,
     look_id: look.look_id,
     outfit_selected: true,
     outfit_strategy_score: winner.adjusted_score,
     outfit_duplicate_penalty: winner.cross_look_duplicate_penalty,
+    ...(Number.isFinite(occasionFormalityScore)
+      ? {outfit_occasion_formality_score: occasionFormalityScore}
+      : {}),
     outfit_strategy_trace: trace,
     outfit_strategy_breakdown: Object.freeze({
       style_coherence: trace.styleCoherence,
