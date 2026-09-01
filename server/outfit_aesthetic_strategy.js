@@ -1,4 +1,5 @@
 const {
+  authorizedAestheticTarget,
   authoritativeProductGender,
   normalizeGender,
   normalizeProductCategory,
@@ -8,6 +9,7 @@ const {
 } = require("./style_intelligence");
 const {canonicalProductIdentity} = require("./product_acceptance_gate");
 const {evaluateFinalLookQuality} = require("./final_look_quality");
+const {targetFitScore} = require("./target_fit_assessment");
 
 const STRATEGY_VERSION = "outfit_aesthetic_target_alignment_v1";
 const DEFAULT_TOP_PER_REQUIREMENT = 6;
@@ -60,8 +62,6 @@ function composeOutfitCandidates({
 } = {}) {
   const safeRequirements = Array.isArray(requirements) ? requirements : [];
   const safeProducts = Array.isArray(products) ? products : [];
-  const aestheticTargetProfile = resolveStrategyTarget(context, safeRequirements);
-  const strategyContext = {...context, aesthetic_target_profile: aestheticTargetProfile};
   const looks = groupRequirementsByLook(safeRequirements);
   const composableLooks = looks.filter((look) => look.structure.recognized);
   if (composableLooks.length === 0) {
@@ -80,6 +80,14 @@ function composeOutfitCandidates({
   const rejectedLooks = [];
   const usedProductKeys = new Set();
   for (const look of composableLooks) {
+    const aestheticTargetProfile = resolveStrategyTarget(
+      context,
+      look.requirements,
+    );
+    const strategyContext = {
+      ...context,
+      aesthetic_target_profile: aestheticTargetProfile,
+    };
     const pools = look.requirements.map((requirement, requirementIndex) => ({
       requirement,
       requirementIndex,
@@ -935,6 +943,17 @@ function summarizeSlotTargetFit(entries, target, kind) {
 }
 
 function candidateTargetFit(product, requirement, target, kind) {
+  const canonicalDimension = {
+    style: "style_fit",
+    occasion: "occasion_fit",
+    quality: "quality_fit",
+    color: "color_fit",
+    silhouette: "silhouette_fit",
+    footwear: "footwear_fit",
+    gender: "audience_fit",
+  }[kind];
+  const canonical = targetFitScore(product, canonicalDimension);
+  if (canonical != null) return canonical;
   const assessment = product?.aesthetic_target_assessment || {};
   const directFields = {
     style: [product?.style_fit_score, assessment.style_fit, product?.style_match_score],
@@ -1294,6 +1313,11 @@ function scoreFocalHierarchy(entries, target) {
 }
 
 function resolveStrategyTarget(context = {}, requirements = []) {
+  const authorizedTargets = requirements.map(authorizedAestheticTarget)
+    .filter(Boolean);
+  if (authorizedTargets.length > 0) {
+    return authorizedTargets[0];
+  }
   const configured = context.aesthetic_target_profile ||
     context.aestheticTargetProfile ||
     context.recommendation_context?.aesthetic_target_profile;

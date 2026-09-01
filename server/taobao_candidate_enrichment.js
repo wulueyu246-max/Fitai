@@ -285,6 +285,28 @@ function enrichTaobaoCandidate(rawProduct, {visionObservation = null} = {}) {
   const gender = inferGender(title, categoryText);
   const style = inferTokens(title, STYLE_PATTERNS);
   const occasion = inferTokens(title, OCCASION_PATTERNS);
+  const semanticText = [title, categoryName, levelOneCategoryName]
+    .filter(Boolean).join(" ");
+  const styleExpression = inferSemanticExpression(
+    semanticText, STYLE_EXPRESSION_PATTERNS, observedAt,
+    vision.style_expression,
+  );
+  const contemporaryExpression = inferSemanticExpression(
+    semanticText, CONTEMPORARY_EXPRESSION_PATTERNS, observedAt,
+    vision.contemporary_expression,
+  );
+  const occasionExpression = inferSemanticExpression(
+    semanticText, OCCASION_EXPRESSION_PATTERNS, observedAt,
+    vision.occasion_expression,
+  );
+  const desiredImpressionEvidence = inferSemanticExpression(
+    semanticText, DESIRED_IMPRESSION_PATTERNS, observedAt,
+    vision.desired_impression,
+  );
+  const audienceExpression = inferSemanticExpression(
+    semanticText, AUDIENCE_EXPRESSION_PATTERNS, observedAt,
+    vision.audience_expression,
+  );
   const color = inferTokens(title, COLOR_PATTERNS);
   const silhouette = inferTokens(title, SILHOUETTE_PATTERNS);
   const fit = inferTokens(title, FIT_PATTERNS);
@@ -317,8 +339,19 @@ function enrichTaobaoCandidate(rawProduct, {visionObservation = null} = {}) {
       gender.evidence,
       observedAt,
     ),
-    style_evidence: tokenEvidence(style, observedAt),
-    occasion_evidence: tokenEvidence(occasion, observedAt),
+    style_evidence: tokenEvidence([
+      ...style,
+      ...semanticValues(styleExpression),
+    ], observedAt),
+    occasion_evidence: tokenEvidence([
+      ...occasion,
+      ...semanticValues(occasionExpression),
+    ], observedAt),
+    style_expression: styleExpression,
+    contemporary_expression: contemporaryExpression,
+    occasion_expression: occasionExpression,
+    desired_impression_evidence: desiredImpressionEvidence,
+    audience_expression: audienceExpression,
     color_evidence: vision.color || tokenEvidence(color, observedAt),
     silhouette_evidence: vision.silhouette || tokenEvidence(silhouette, observedAt),
     fit_evidence: vision.fit || tokenEvidence(fit, observedAt),
@@ -345,6 +378,7 @@ function enrichTaobaoCandidate(rawProduct, {visionObservation = null} = {}) {
 function attachEnrichmentToCandidate(candidate, rawProduct, enrichedCandidate) {
   return {
     ...candidate,
+    raw_product: rawProduct,
     raw_product_ref: enrichedCandidate.raw_product_ref,
     sales_evidence: rawProduct.sales_evidence,
     candidate_enrichment: enrichedCandidate,
@@ -369,6 +403,47 @@ function tokenEvidence(tokens, observedAt) {
     values.length ? "explicit_text_evidence" : "unknown",
     values.length ? 0.82 : 0,
     values,
+    observedAt,
+  );
+}
+
+function semanticValues(item) {
+  return Array.isArray(item?.value) ? item.value : [];
+}
+
+function inferSemanticExpression(text, rules, observedAt, visionEvidence = null) {
+  const matches = [];
+  for (const rule of rules) {
+    const match = String(text || "").match(rule.pattern);
+    if (match) matches.push({
+      value: rule.value,
+      confidence: rule.confidence,
+      evidence: `product_text:${match[0]}`,
+    });
+  }
+  const visionValues = visionEvidence?.value == null ? [] :
+    (Array.isArray(visionEvidence.value)
+      ? visionEvidence.value : [visionEvidence.value]);
+  const values = [...new Set([
+    ...matches.map((item) => item.value),
+    ...visionValues.map((value) => String(value || "").trim()).filter(Boolean),
+  ])];
+  const evidence = [...new Set([
+    ...matches.map((item) => item.evidence),
+    ...(Array.isArray(visionEvidence?.evidence)
+      ? visionEvidence.evidence.map((item) => `vision:${item}`) : []),
+  ])];
+  const source = matches.length && visionValues.length
+    ? "mixed_product_fact_evidence" : visionValues.length
+      ? "vision" : matches.length ? "explicit_text_evidence" : "unknown";
+  return evidenceValue(
+    values,
+    source,
+    Math.max(
+      matches.length ? Math.max(...matches.map((item) => item.confidence)) : 0,
+      Number(visionEvidence?.confidence) || 0,
+    ),
+    evidence,
     observedAt,
   );
 }
@@ -569,6 +644,11 @@ function normalizeVisionObservation(observation, observedAt) {
     ["fit", build("fit")],
     ["footwear", build("footwear")],
     ["quality", build("quality")],
+    ["style_expression", build("style_expression")],
+    ["contemporary_expression", build("contemporary_expression")],
+    ["occasion_expression", build("occasion_expression")],
+    ["desired_impression", build("desired_impression")],
+    ["audience_expression", build("audience_expression")],
   ].filter(([, value]) => value));
 }
 
@@ -686,6 +766,53 @@ const STYLE_PATTERNS = [
   {value: "sporty", pattern: /运动|跑步|训练/iu},
   {value: "street", pattern: /街头|潮牌|嘻哈/iu},
   {value: "business_casual", pattern: /商务休闲|通勤/iu},
+];
+const STYLE_EXPRESSION_PATTERNS = [
+  {value: "design_expression", confidence: 0.9,
+    pattern: /设计款|设计感|解构|不规则|拼接|褶皱|褶裥|不对称|立体剪裁|特殊廓形/iu},
+  {value: "minimal_expression", confidence: 0.82,
+    pattern: /极简|简约|纯色基础|clean\s*fit/iu},
+  {value: "traditional_expression", confidence: 0.82,
+    pattern: /传统|经典复古|中式复古|老式/iu},
+];
+const CONTEMPORARY_EXPRESSION_PATTERNS = [
+  {value: "contemporary", confidence: 0.86,
+    pattern: /解构|不规则|不对称|立体剪裁|现代廓形|当代|先锋/iu},
+  {value: "fashion_forward", confidence: 0.78,
+    pattern: /时髦|潮流|时尚款|小众设计|流行设计/iu},
+  {value: "trend_mention", confidence: 0.45,
+    pattern: /新款|当季|流行版型|今年流行/iu},
+  {value: "traditional", confidence: 0.82,
+    pattern: /传统|老式|经典商务|中老年/iu},
+];
+const OCCASION_EXPRESSION_PATTERNS = [
+  {value: "nightlife_social", confidence: 0.9,
+    pattern: /派对|聚会|夜店|酒吧|夜间社交|夜生活|KTV|晚宴/iu},
+  {value: "date", confidence: 0.88, pattern: /约会/iu},
+  {value: "work", confidence: 0.9,
+    pattern: /通勤|工作装|职业装|职场|商务正装|正装/iu},
+  {value: "daily", confidence: 0.76, pattern: /日常|休闲/iu},
+  {value: "sport_outdoor", confidence: 0.9,
+    pattern: /户外|登山|徒步|跑步|训练/iu},
+];
+const DESIRED_IMPRESSION_PATTERNS = [
+  {value: "design_led", confidence: 0.9,
+    pattern: /设计款|设计感|解构|不规则|拼接|褶皱|褶裥|不对称|立体剪裁|特殊廓形/iu},
+  {value: "youthful", confidence: 0.84,
+    pattern: /年轻|减龄|青春|少女感|少年感|学院风/iu},
+  {value: "fashion_forward", confidence: 0.8,
+    pattern: /时髦|时尚款|潮流|小众设计/iu},
+  {value: "clean", confidence: 0.8, pattern: /干净利落|清爽|简洁利落/iu},
+  {value: "relaxed", confidence: 0.78, pattern: /松弛|慵懒|宽松休闲/iu},
+  {value: "polished", confidence: 0.82, pattern: /精致|考究|优雅/iu},
+];
+const AUDIENCE_EXPRESSION_PATTERNS = [
+  {value: "child", confidence: 0.99,
+    pattern: /婴幼儿|婴儿|幼童|儿童|童装|男童|女童|少儿|小童|中童|大童|kids?|children/iu},
+  {value: "mature", confidence: 0.9,
+    pattern: /中老年|老年|老人|奶奶|爷爷|妈妈款|妈妈鞋|爸爸款|爸爸鞋|老人鞋/iu},
+  {value: "youthful", confidence: 0.82,
+    pattern: /年轻|减龄|青春|少女感|少年感|学院风/iu},
 ];
 const OCCASION_PATTERNS = [
   {value: "date", pattern: /约会/iu},

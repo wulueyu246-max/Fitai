@@ -1,9 +1,12 @@
 const {resolveIntentPriorityScore} = require("./intent_priority");
+const {targetFitScore} = require("./target_fit_assessment");
 
 // This symbol is deliberately not representable in JSON. Only the internal
 // Styling Completion orchestration path can grant this authority; callers
 // cannot promote an ordinary requirement with similarly named fields.
 const STYLING_COMPLETION_AUTHORITY = Symbol("fitai.styling_completion_authority");
+const AUTHORIZED_AESTHETIC_TARGETS = new WeakSet();
+const MAX_AESTHETIC_TARGET_BYTES = 32 * 1024;
 
 const SUPPORTED_PRODUCT_CATEGORIES = Object.freeze([
   "top",
@@ -381,7 +384,8 @@ function normalizeProductRequirement(input = {}, context = {}) {
     context?.[STYLING_COMPLETION_AUTHORITY] === true &&
     String(input.style_role || input.styleRole || context.style_role || "")
       .trim().toLowerCase() === "styling_completion";
-  return {
+  const trustedAestheticTarget = authorizedAestheticTarget(input);
+  const normalized = {
     request_id: optionalText(
       input.request_id || input.requestId || context.request_id || context.requestId,
       "request_id",
@@ -465,6 +469,46 @@ function normalizeProductRequirement(input = {}, context = {}) {
       input.user_search_keyword || context.user_search_keyword,
     ),
   };
+  if (trustedAestheticTarget) {
+    normalized.aesthetic_target_profile = trustedAestheticTarget;
+  }
+  return normalized;
+}
+
+function authorizeAestheticTargetRequirement(input = {}) {
+  const target = validateAndCloneAestheticTarget(
+    input.aesthetic_target_profile || input.aestheticTargetProfile,
+  );
+  AUTHORIZED_AESTHETIC_TARGETS.add(target);
+  return {...input, aesthetic_target_profile: target};
+}
+
+function authorizedAestheticTarget(requirement = {}) {
+  const target = requirement?.aesthetic_target_profile ||
+    requirement?.aestheticTargetProfile;
+  return target && AUTHORIZED_AESTHETIC_TARGETS.has(target) ? target : null;
+}
+
+function validateAndCloneAestheticTarget(target) {
+  if (!target || typeof target !== "object" || Array.isArray(target) ||
+      target.version !== "aesthetic_target_profile_v1" ||
+      !Array.isArray(target.style_targets) || target.style_targets.length > 2 ||
+      !target.weights || typeof target.weights !== "object" ||
+      Array.isArray(target.weights)) {
+    throw new TypeError("aesthetic_target_profile is not a trusted V1 profile");
+  }
+  const serialized = JSON.stringify(target);
+  if (Buffer.byteLength(serialized, "utf8") > MAX_AESTHETIC_TARGET_BYTES) {
+    throw new TypeError("aesthetic_target_profile exceeds the internal size limit");
+  }
+  return deepFreezeValue(JSON.parse(serialized));
+}
+
+function deepFreezeValue(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  Object.values(value).forEach(deepFreezeValue);
+  return value;
 }
 
 function normalizeTranslatedQueries(value) {
@@ -784,8 +828,27 @@ function scoreProduct(product, requirement, searchKeyword = "") {
   if (originalGender === requirement.gender) score += 20;
   else if (originalGender === "unisex") score += 10;
   else if (matchesGender(title, requirement.gender)) score += 20;
-  if (matchesColor(structuredEvidence, requirement.color)) score += 15;
-  if (matchesStyle(structuredEvidence, requirement.style, requirement.fit)) score += 10;
+  const canonicalStyle = targetFitScore(product, "style_fit");
+  const canonicalColor = targetFitScore(product, "color_fit");
+  const canonicalContemporary = targetFitScore(product, "contemporary_fit");
+  const canonicalDesired = targetFitScore(product, "desired_impression_fit");
+  const hasCanonicalTargetFit = [
+    canonicalStyle,
+    canonicalColor,
+    canonicalContemporary,
+    canonicalDesired,
+  ].some((value) => value != null);
+  if (hasCanonicalTargetFit) {
+    score += averageFinite([
+      canonicalStyle,
+      canonicalContemporary,
+      canonicalDesired,
+    ], 50) / 10;
+    score += (canonicalColor ?? 50) * 0.15;
+  } else {
+    if (matchesColor(structuredEvidence, requirement.color)) score += 15;
+    if (matchesStyle(structuredEvidence, requirement.style, requirement.fit)) score += 10;
+  }
   if (matchesSeason(structuredEvidence, requirement.season)) score += 5;
   score += Math.min(keywordOverlapScore(title, searchKeyword, requirement), 15);
   score += categoryPriorityScore(requirement.category);
@@ -804,9 +867,23 @@ function scoreProduct(product, requirement, searchKeyword = "") {
     requested_gender: requirement.gender,
     search_keyword: normalizeWhitespace(searchKeyword),
     relevance_score: Math.min(score, 100),
+    target_fit_relevance_score: hasCanonicalTargetFit
+      ? Math.round(averageFinite([
+        canonicalStyle,
+        canonicalColor,
+        canonicalContemporary,
+        canonicalDesired,
+      ], 50) * 100) / 100 : null,
     relevance_negative_conflict: negativeKeywordConflict,
     product_quality_warning: qualityBlock,
   };
+}
+
+function averageFinite(values, fallback = 0) {
+  const finite = values.map(Number).filter(Number.isFinite);
+  return finite.length
+    ? finite.reduce((sum, value) => sum + value, 0) / finite.length
+    : fallback;
 }
 
 function productQualityBlock(product, requirement = {}) {
@@ -1030,6 +1107,8 @@ module.exports = {
   buildRelaxedCategoryKeyword,
   buildSearchKeywords,
   buildTaobaoSearchPlan,
+  authorizeAestheticTargetRequirement,
+  authorizedAestheticTarget,
   categoryPriority,
   matchesTargetCategory,
   normalizeGender,

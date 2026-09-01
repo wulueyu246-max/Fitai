@@ -69,6 +69,7 @@ const {
   canonicalProductIdentity,
   evaluateProductAcceptance,
 } = require("./product_acceptance_gate");
+const {attachTargetFitAssessment} = require("./target_fit_assessment");
 
 const PRODUCT_CATEGORIES = SUPPORTED_PRODUCT_CATEGORIES;
 const DEFAULT_SAMPLE_MATERIAL_ID = "28029";
@@ -1046,7 +1047,10 @@ function processCandidateGroup({group, context, trace, stagePrefix = ""}) {
   const keyword = requirementSearchKeywords(requirement).join(" ") ||
     requirement.item_name || "";
   const relevanceCandidates = rankProducts(
-    Array.isArray(group?.candidates) ? group.candidates : [],
+    (Array.isArray(group?.candidates) ? group.candidates : []).map((product) =>
+      product?.candidate_enrichment || product?.target_fit_assessment
+        ? attachTargetFitAssessment(product, requirement, context)
+        : product),
     requirement,
     keyword,
     {minimumScore: 35},
@@ -1576,6 +1580,7 @@ function candidateTraceRecord(product, requirement = {}, stage, reason = "") {
     outfit_strategy_breakdown: product?.outfit_strategy_breakdown || null,
     raw_product_ref: product?.raw_product_ref || null,
     candidate_enrichment: product?.candidate_enrichment || null,
+    target_fit_assessment: product?.target_fit_assessment || null,
   });
 }
 

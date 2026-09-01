@@ -6,6 +6,10 @@ const {
   normalizeGender,
   normalizeProductCategory,
 } = require("./product_relevance");
+const {
+  acceptanceEvidenceFromTargetFit,
+  attachTargetFitAssessment,
+} = require("./target_fit_assessment");
 
 const PRODUCT_ACCEPTANCE_VERSION = "real_product_acceptance_gate_v1";
 const EVIDENCE_APPLICABILITY = Object.freeze({
@@ -511,23 +515,28 @@ function acceptancePenalty(evidenceSet) {
 }
 
 function evaluateProductAcceptance(product = {}, requirement = {}, context = {}) {
-  const text = productText(product);
+  const assessedProduct = product.target_fit_assessment ||
+      product.candidate_enrichment
+    ? attachTargetFitAssessment(product, requirement, context)
+    : product;
+  const text = productText(assessedProduct);
   const target = targetContext(requirement, context);
-  const vision = visionEvidence(product);
+  const vision = visionEvidence(assessedProduct);
   const optionalSlot = stylingCompletionSlot(requirement);
+  const canonical = (dimension, fallback) =>
+    acceptanceEvidenceFromTargetFit(assessedProduct, dimension) || fallback();
   const evidenceSet = Object.freeze({
-    audience_fit: audienceFit(product, target, text, vision),
-    contemporary_fit: contemporaryFit(target, text, {optionalSlot}),
-    occasion_fit: occasionFit(target, text, {optionalSlot}),
-    desired_impression_fit: desiredImpressionFit(
-      target,
-      text,
-      vision,
-      {optionalSlot},
-    ),
-    visual_quality: visualQualityEvidence(product, vision),
-    commerce_quality: commerceQuality(product, text, vision),
-    product_identity_confidence: productIdentityConfidence(product),
+    audience_fit: canonical("audience_fit",
+      () => audienceFit(assessedProduct, target, text, vision)),
+    contemporary_fit: canonical("contemporary_fit",
+      () => contemporaryFit(target, text, {optionalSlot})),
+    occasion_fit: canonical("occasion_fit",
+      () => occasionFit(target, text, {optionalSlot})),
+    desired_impression_fit: canonical("desired_impression_fit", () =>
+      desiredImpressionFit(target, text, vision, {optionalSlot})),
+    visual_quality: visualQualityEvidence(assessedProduct, vision),
+    commerce_quality: commerceQuality(assessedProduct, text, vision),
+    product_identity_confidence: productIdentityConfidence(assessedProduct),
   });
   const hardReasons = [];
   if (evidenceSet.audience_fit.value === "severe_mismatch" &&
@@ -572,12 +581,12 @@ function evaluateProductAcceptance(product = {}, requirement = {}, context = {})
     reason: hardReasons[0] || (softReasons[0] || "PASS"),
     acceptance,
     product: Object.freeze({
-      ...product,
+      ...assessedProduct,
       product_acceptance_result: result,
       product_acceptance_penalty: penalty,
       product_acceptance_evidence: evidenceSet,
       product_acceptance_trace: acceptance,
-      canonical_product_identity: canonicalProductIdentity(product),
+      canonical_product_identity: canonicalProductIdentity(assessedProduct),
     }),
   });
 }

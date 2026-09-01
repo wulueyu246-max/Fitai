@@ -1,6 +1,9 @@
 "use strict";
 
-const {normalizeGender} = require("./product_relevance");
+const {
+  authorizeAestheticTargetRequirement,
+  normalizeGender,
+} = require("./product_relevance");
 const {
   planConceptSearchQueries,
 } = require("./concept_search_query_planner");
@@ -172,7 +175,7 @@ function requirementForSlot({
     ...avoids,
     ...commerceQueryPlan.hard_gate_negatives,
   ]);
-  return Object.freeze({
+  const requirement = {
     request_id: context.request_id,
     look_id: lookId,
     concept_id: concept.concept_id,
@@ -220,7 +223,10 @@ function requirementForSlot({
       market: "soft_capped",
       style_intelligence: "normalization_helper",
     }),
-  });
+  };
+  return Object.freeze(requirement.aesthetic_target_profile
+    ? authorizeAestheticTargetRequirement(requirement)
+    : requirement);
 }
 
 function compileLookConcept(context, rawConcept, index) {

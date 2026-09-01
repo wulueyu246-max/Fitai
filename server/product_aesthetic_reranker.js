@@ -24,6 +24,7 @@ const {
   MAX_ADJUDICATION_CALLS,
   buildAmbiguityPlan,
 } = require("./product_reranker_ambiguity");
+const {buildTargetFitAssessment} = require("./target_fit_assessment");
 
 const DEFAULT_SELECTION_LIMIT = 6;
 const MAX_SELECTION_LIMIT = 6;
@@ -3053,6 +3054,11 @@ function genderFitAssessment(product = {}, target = null, requirement = {}) {
 }
 
 function candidateAestheticTargetAssessment(product = {}, requirement = {}, target = null) {
+  const canonical = product.target_fit_assessment || buildTargetFitAssessment(
+    product,
+    requirement,
+    {aesthetic_target_profile: target},
+  );
   const style = styleFitAssessment(product, target);
   const occasion = occasionFitAssessment(product, target, requirement);
   const color = colorFitAssessment(product, target, requirement);
@@ -3071,17 +3077,31 @@ function candidateAestheticTargetAssessment(product = {}, requirement = {}, targ
   ].filter(([, assessment]) => assessment.missing)
     .map(([name]) => name);
   return Object.freeze({
-    style_fit: style.score,
-    occasion_fit: occasion.score,
-    color_fit: color.score,
-    silhouette_fit: silhouette.score,
-    footwear_fit: footwear.score,
-    quality_fit: quality.score,
-    gender_fit: gender.score,
+    style_fit: canonicalScore(canonical.style_fit, style.score),
+    occasion_fit: canonicalScore(canonical.occasion_fit, occasion.score),
+    color_fit: canonicalScore(canonical.color_fit, color.score),
+    silhouette_fit: canonicalScore(canonical.silhouette_fit, silhouette.score),
+    footwear_fit: canonicalScore(canonical.footwear_fit, footwear.score),
+    quality_fit: canonicalScore(canonical.quality_fit, quality.score),
+    gender_fit: canonicalScore(canonical.audience_fit, gender.score),
+    contemporary_fit: canonicalScore(canonical.contemporary_fit, 50),
+    desired_impression_fit: canonicalScore(
+      canonical.desired_impression_fit,
+      50,
+    ),
+    canonical_assessment: canonical,
     style_classification: style.classification,
     occasion_classification: occasion.classification,
     metadata_missing: Object.freeze(missingMetadata),
   });
+}
+
+function canonicalScore(record, fallback) {
+  if (!record || ["UNKNOWN", "NOT_APPLICABLE"].includes(record.status)) {
+    return fallback;
+  }
+  const score = Number(record.score);
+  return Number.isFinite(score) ? boundedScore(score) : fallback;
 }
 
 function styleGateScore(targetAssessment, legacyStyleMatch) {
