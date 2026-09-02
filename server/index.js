@@ -23,6 +23,9 @@ const {SupabasePersistence} = require("./supabase_persistence");
 const {SupabaseUserPersistence} = require("./supabase_user_persistence");
 const {ShoppingCandidateFunnelStore} = require("./shopping_candidate_funnel_store");
 const {
+  PortfolioFailureTraceStore,
+} = require("./portfolio_failure_trace_store");
+const {
   registerShoppingAgentDiagnosticsRoutes,
 } = require("./shopping_agent_diagnostics_routes");
 const {
@@ -467,6 +470,17 @@ const config = Object.freeze({
   shoppingAgentDiagnosticsToken: readOptionalString(
     process.env.SHOPPING_AGENT_DIAGNOSTICS_TOKEN,
   ),
+  portfolioFailureDiagnosticsEnabled:
+    String(process.env.NODE_ENV || (process.env.RENDER
+      ? "production" : "development")).trim().toLowerCase() === "development" ||
+    readBoolean(process.env.PORTFOLIO_FAILURE_DIAGNOSTICS, false),
+  portfolioFailureTracePath: readOptionalString(
+    process.env.PORTFOLIO_FAILURE_TRACE_PATH,
+  ) || path.join(__dirname, "data", "portfolio_failure_traces_v2.json"),
+  buildVersion: readOptionalString(
+    process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT ||
+    process.env.SOURCE_VERSION,
+  ) || "unknown",
   shoppingAgentDeadlineMs: resolveShoppingAgentDeadlineMs(
     process.env.SHOPPING_AGENT_DEADLINE_MS,
   ),
@@ -826,6 +840,11 @@ const shoppingCandidateFunnelStore = new ShoppingCandidateFunnelStore({
   serviceRoleKey: config.supabaseServiceRoleKey,
   enabled: config.shoppingAgentDiagnosticsEnabled,
   fetchImpl: supabaseFetch || fetch,
+});
+const portfolioFailureTraceStore = new PortfolioFailureTraceStore({
+  enabled: config.portfolioFailureDiagnosticsEnabled,
+  filePath: config.portfolioFailureTracePath,
+  logger: console,
 });
 
 function shouldUseMockAi(currentConfig, aiClient) {
@@ -7295,6 +7314,8 @@ app.post(
           decisionContext: outfitRequest.decisionContext,
           productProvider,
           logger: console,
+          portfolioFailureTraceStore,
+          commitVersion: config.buildVersion,
         });
         setServerTiming(res, {total: Date.now() - requestStartedAt});
         return res.json(responsePayload);
@@ -8277,6 +8298,7 @@ module.exports = {
   productAestheticReranker,
   visualProductVerifier,
   shoppingAgentV1,
+  portfolioFailureTraceStore,
   taobaoService,
   productClickStore,
   fashionBrain,

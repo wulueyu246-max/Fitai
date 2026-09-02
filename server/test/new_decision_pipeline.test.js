@@ -622,7 +622,20 @@ test("Portfolio consumes the Strategy scene-fit value from its final Look contra
   });
   const compiled = compileLookConceptPortfolio(decisionContext);
   const contract = compiled.looks[0];
-  const quality = Object.freeze({status: "PASS", overall_score: 72});
+  const quality = Object.freeze({
+    version: "whole_look_human_grounded_score.v1",
+    status: "PASS",
+    overall_score: 72,
+    final_score: 72,
+    baseline_integrity_score: 79,
+    intent_expression: {
+      dimensions: {
+        scene_expression_strength: {score: 68},
+        desired_impression_coverage: {score: 71},
+        design_interest: {score: 74},
+      },
+    },
+  });
   const products = contract.items.map((requirement, index) => ({
     ...product(`trace-${requirement.category}-${index}`, requirement.category, {
       price: 220,
@@ -646,6 +659,11 @@ test("Portfolio consumes the Strategy scene-fit value from its final Look contra
   assert.equal(validation.validation_trace.validator_input_look_count, 1);
   assert.equal(validation.validation_trace.looks[0].final_quality.score, 72);
   assert.equal(validation.validation_trace.looks[0].final_quality.status, "PASS");
+  assert.equal(validation.validation_trace.looks[0].human_grounded_score, 72);
+  assert.equal(validation.validation_trace.looks[0].baseline_score, 79);
+  assert.equal(validation.validation_trace.looks[0].scene_score, 68);
+  assert.equal(validation.validation_trace.looks[0]
+    .intent_scores.design_interest, 74);
   assert.equal(validation.validation_trace.looks[0]
     .validator_rules.ITEM_BUDGET.status, "FAIL");
   assert.equal(validation.validation_trace.looks[0]

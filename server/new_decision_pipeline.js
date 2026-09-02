@@ -13,6 +13,18 @@ const {
 
 const NEW_DECISION_PIPELINE_VERSION = "new_decision_pipeline.v1";
 const FINAL_PORTFOLIO_VALIDATOR_VERSION = "final_portfolio_validator.v1";
+const INTENT_TRACE_DIMENSIONS = Object.freeze([
+  "scene_expression_strength",
+  "desired_impression_coverage",
+  "design_interest",
+  "contemporary_expression",
+  "silhouette_interest",
+  "color_story",
+  "footwear_statement",
+  "styling_distinction",
+  "overall_memorability",
+  "youthful_social_energy",
+]);
 
 class NewDecisionPipelineError extends Error {
   constructor(message, {
@@ -61,6 +73,47 @@ function portfolioSceneFitScore(product = {}) {
     if (Number.isFinite(score)) return score;
   }
   return null;
+}
+
+function finiteScore(value) {
+  if (value == null || String(value).trim() === "") return null;
+  const score = Number(value);
+  return Number.isFinite(score) ? score : null;
+}
+
+function humanGroundedAssessment(quality = {}) {
+  if (quality?.version === "whole_look_human_grounded_score.v1") return quality;
+  for (const candidate of [
+    quality?.human_grounded,
+    quality?.human_grounded_score,
+    quality?.human_grounded_assessment,
+  ]) {
+    if (candidate && typeof candidate === "object") return candidate;
+  }
+  return {};
+}
+
+function humanGroundedTraceFields(quality = {}) {
+  const human = humanGroundedAssessment(quality);
+  const dimensions = human?.intent_expression?.dimensions || {};
+  const intentScores = Object.fromEntries(INTENT_TRACE_DIMENSIONS.map((key) => [
+    key,
+    finiteScore(dimensions?.[key]?.score ?? dimensions?.[key]),
+  ]));
+  return Object.freeze({
+    human_grounded_score: finiteScore(
+      human?.final_score ?? human?.overall_score ?? human?.score,
+    ),
+    scene_score: finiteScore(
+      dimensions?.scene_expression_strength?.score ??
+      dimensions?.scene_expression_strength ??
+      quality?.dimension_scores?.scene,
+    ),
+    intent_scores: Object.freeze(intentScores),
+    baseline_score: finiteScore(
+      human?.baseline_integrity_score ?? human?.baseline_integrity?.score,
+    ),
+  });
 }
 
 const PUBLIC_PRODUCT_FIELDS = Object.freeze([
@@ -291,6 +344,7 @@ function buildPortfolioValidationTrace({
       (outfitTotal !== null && outfitTotal <= outfitBudget);
     const quality = selected.map((product) => product?.whole_look_quality)
       .find((entry) => entry && typeof entry === "object") || null;
+    const humanGrounded = humanGroundedTraceFields(quality || {});
     const qualityPasses = wholeLookQualityPasses(contract, look);
     const coreErrors = validationErrorsForLook(errors, look.look_id);
     if (!qualityPasses) coreErrors.unshift(`QUALITY_INVALID:${look.look_id}`);
@@ -346,6 +400,9 @@ function buildPortfolioValidationTrace({
         score: Number.isFinite(Number(quality?.overall_score))
           ? Number(quality.overall_score) : null,
       }),
+      quality_score: Number.isFinite(Number(quality?.overall_score))
+        ? Number(quality.overall_score) : null,
+      ...humanGrounded,
       coreValidation: Object.freeze({errors: Object.freeze(distinctCoreErrors)}),
       validator_rules: rules,
       portfolio_pass: qualityValidIds.has(look.look_id) &&
@@ -926,6 +983,8 @@ async function executeNewDecisionPipeline({
   decisionContext,
   productProvider,
   logger = console,
+  portfolioFailureTraceStore = null,
+  commitVersion = NEW_DECISION_PIPELINE_VERSION,
 } = {}) {
   if (!decisionContext?.decision_context_id || !productProvider ||
       typeof productProvider.recommendForQueries !== "function") {
@@ -984,6 +1043,14 @@ async function executeNewDecisionPipeline({
     products,
   });
   if (coreValidation.quality_valid_look_count === 0) {
+    await persistPortfolioFailureTrace({
+      store: portfolioFailureTraceStore,
+      decisionContext,
+      validation: coreValidation,
+      failureCode: "INSUFFICIENT_QUALITY_LOOKS",
+      commitVersion,
+      logger,
+    });
     logger.error?.("new_decision_portfolio_validation_failed", {
       request_id: decisionContext.request_id,
       error_code: "INSUFFICIENT_QUALITY_LOOKS",
@@ -997,6 +1064,14 @@ async function executeNewDecisionPipeline({
     });
   }
   if (coreValidation.status !== "PASS") {
+    await persistPortfolioFailureTrace({
+      store: portfolioFailureTraceStore,
+      decisionContext,
+      validation: coreValidation,
+      failureCode: "NEW_DECISION_PORTFOLIO_INVALID",
+      commitVersion,
+      logger,
+    });
     logger.error?.("new_decision_portfolio_validation_failed", {
       request_id: decisionContext.request_id,
       error_code: "NEW_DECISION_PORTFOLIO_INVALID",
@@ -1062,6 +1137,32 @@ async function executeNewDecisionPipeline({
   });
 }
 
+async function persistPortfolioFailureTrace({
+  store,
+  decisionContext,
+  validation,
+  failureCode,
+  commitVersion,
+  logger,
+} = {}) {
+  if (!store || typeof store.persist !== "function") return false;
+  try {
+    return await store.persist({
+      requestId: decisionContext?.request_id,
+      timestamp: new Date().toISOString(),
+      commitVersion,
+      failureCode,
+      validation,
+    });
+  } catch (error) {
+    logger?.warn?.("portfolio_failure_trace_persistence_failed", {
+      request_id: decisionContext?.request_id,
+      error_code: error?.code || "TRACE_PERSISTENCE_FAILED",
+    });
+    return false;
+  }
+}
+
 function comparePipelineOutcomes({legacy = {}, next = {}} = {}) {
   const metric = (value, fallback = 0) => Number.isFinite(Number(value))
     ? Number(value) : fallback;
@@ -1107,6 +1208,7 @@ module.exports = {
   NewDecisionPipelineError,
   comparePipelineOutcomes,
   executeNewDecisionPipeline,
+  persistPortfolioFailureTrace,
   publicProductForResponse,
   validateFinalPortfolio,
 };
