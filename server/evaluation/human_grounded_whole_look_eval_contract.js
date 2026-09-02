@@ -46,7 +46,7 @@ function evaluateHumanGroundedWholeLook(sample = {}) {
   );
   const intent = evaluateLayer(
     sample.intent_expression,
-    INTENT_EXPRESSION_SCHEMA,
+    intentExpressionSchemaFor(sample.intent_expression_schema_extensions),
   );
   const requiredIntentDimensions = new Set(
     array(sample.required_intent_dimensions).map(String),
@@ -100,6 +100,18 @@ function evaluateHumanGroundedWholeLook(sample = {}) {
       price_used: false,
     }),
   });
+}
+
+function intentExpressionSchemaFor(extensions) {
+  const existing = new Set(INTENT_EXPRESSION_SCHEMA.map(({key}) => key));
+  const validExtensions = array(extensions).flatMap((entry) => {
+    const key = string(entry?.key);
+    const weight = Number(entry?.weight);
+    if (!key || existing.has(key) || !(weight > 0 && weight <= 1)) return [];
+    existing.add(key);
+    return [dimension(key, weight)];
+  });
+  return Object.freeze([...INTENT_EXPRESSION_SCHEMA, ...validExtensions]);
 }
 
 function evaluatePairwise(positiveSample, negativeSample) {

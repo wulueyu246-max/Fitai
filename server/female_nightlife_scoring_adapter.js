@@ -12,6 +12,10 @@ const FEMALE_NIGHTLIFE_SCORING_CONTRACT = Object.freeze({
     "design_interest",
     "styling_distinction",
     "overall_memorability",
+    "youthful_social_energy",
+  ]),
+  intent_expression_schema_extensions: Object.freeze([
+    Object.freeze({key: "youthful_social_energy", weight: 0.21}),
   ]),
 });
 
@@ -28,6 +32,7 @@ function resolveFemaleNightlifeScoringContract(intent = {}) {
       version: null,
       calibration_status: "SCENE_PENDING_CALIBRATION",
       required_intent_dimensions: Object.freeze([]),
+      intent_expression_schema_extensions: Object.freeze([]),
       activation_reason: "EXACT_CALIBRATED_SCENE_NOT_MATCHED",
     });
   }
@@ -50,6 +55,8 @@ function applyFemaleNightlifeScoringContract(
       ...array(requiredIntentDimensions).map(String),
       ...sceneContract.required_intent_dimensions,
     ])),
+    intent_expression_schema_extensions:
+      sceneContract.intent_expression_schema_extensions,
   });
 }
 

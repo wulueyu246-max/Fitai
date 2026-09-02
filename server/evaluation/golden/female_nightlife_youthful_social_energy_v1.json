@@ -1,0 +1,113 @@
+{
+  "fixture_version": "female_nightlife_youthful_social_energy.v1",
+  "scene_id": "female_nightlife",
+  "definition": "Night-social vitality, focal point, memorability and social presence; not chronological age.",
+  "positive_sample_id": "human-positive-80",
+  "comparison_sample_ids": [
+    "online-nightlife-look-1-low",
+    "online-nightlife-look-2-medium",
+    "online-nightlife-look-3-low"
+  ],
+  "samples": [
+    {
+      "sample_id": "human-positive-80",
+      "golden_source": "human_feedback",
+      "human_label": "PASS",
+      "components": ["浅色短款设计感上衣", "浅色百褶裙", "黑色厚底乐福鞋"],
+      "footwear_family": "loafer",
+      "intent_expression": {
+        "scene_expression_strength": {"status": "EVIDENCED", "score": 82, "source": "human_feedback", "confidence": 1, "evidence": ["夜间社交表达成立"]},
+        "desired_impression_coverage": {"status": "EVIDENCED", "score": 84, "source": "human_feedback", "confidence": 1, "evidence": ["年轻与设计感同时成立"]},
+        "design_interest": {"status": "EVIDENCED", "score": 88, "source": "human_feedback", "confidence": 1, "evidence": ["短款设计上衣形成明确设计焦点"]},
+        "styling_distinction": {"status": "EVIDENCED", "score": 84, "source": "human_feedback", "confidence": 1, "evidence": ["短款比例与百褶结构具有造型区分度"]},
+        "overall_memorability": {"status": "EVIDENCED", "score": 84, "source": "human_feedback", "confidence": 1, "evidence": ["核心轮廓与厚底鞋形成记忆点"]},
+        "footwear_statement": {"status": "EVIDENCED", "score": 82, "source": "human_feedback", "confidence": 1, "evidence": ["厚底量感提升整套夜间表达"]},
+        "youthful_social_energy": {
+          "source": "human_feedback",
+          "confidence": 1,
+          "components": {
+            "vitality": {"status": "EVIDENCED", "score": 86, "source": "human_feedback", "confidence": 1, "evidence": ["比例轻快且有活力"]},
+            "focal_point": {"status": "EVIDENCED", "score": 88, "source": "human_feedback", "confidence": 1, "evidence": ["设计感短上衣提供视觉焦点"]},
+            "memorability": {"status": "EVIDENCED", "score": 84, "source": "human_feedback", "confidence": 1, "evidence": ["百褶结构与厚底鞋形成可记忆组合"]},
+            "social_presence": {"status": "EVIDENCED", "score": 86, "source": "human_feedback", "confidence": 1, "evidence": ["夜间社交存在感高于普通日常穿搭"]}
+          }
+        }
+      }
+    },
+    {
+      "sample_id": "online-nightlife-look-1-low",
+      "golden_source": "human_feedback",
+      "human_label": "FAIL",
+      "components": ["短袖开叉T恤", "成熟倾向直筒裤", "浅口平底鞋", "复古项链"],
+      "footwear_family": "flat_shoe",
+      "presentation": "feminine",
+      "intent_expression": {
+        "scene_expression_strength": {"status": "EVIDENCED", "score": 30, "source": "human_feedback", "confidence": 1, "evidence": ["整体更接近日常通勤"]},
+        "desired_impression_coverage": {"status": "EVIDENCED", "score": 32, "source": "human_feedback", "confidence": 1, "evidence": ["年轻夜间目标未兑现"]},
+        "design_interest": {"status": "EVIDENCED", "score": 34, "source": "human_feedback", "confidence": 1, "evidence": ["单件细节未形成整套焦点"]},
+        "styling_distinction": {"status": "EVIDENCED", "score": 28, "source": "human_feedback", "confidence": 1, "evidence": ["造型区分度低"]},
+        "overall_memorability": {"status": "EVIDENCED", "score": 26, "source": "human_feedback", "confidence": 1, "evidence": ["缺少整套记忆点"]},
+        "footwear_statement": {"status": "EVIDENCED", "score": 25, "source": "human_feedback", "confidence": 1, "evidence": ["鞋履没有提升夜间社交表达"]},
+        "youthful_social_energy": {
+          "source": "human_feedback", "confidence": 1,
+          "components": {
+            "vitality": {"status": "EVIDENCED", "score": 28, "source": "human_feedback", "confidence": 1, "evidence": ["整套活力不足"]},
+            "focal_point": {"status": "EVIDENCED", "score": 24, "source": "human_feedback", "confidence": 1, "evidence": ["没有明确视觉焦点"]},
+            "memorability": {"status": "EVIDENCED", "score": 22, "source": "human_feedback", "confidence": 1, "evidence": ["整套不具记忆点"]},
+            "social_presence": {"status": "EVIDENCED", "score": 28, "source": "human_feedback", "confidence": 1, "evidence": ["社交场景存在感不足"]}
+          }
+        }
+      }
+    },
+    {
+      "sample_id": "online-nightlife-look-2-medium",
+      "golden_source": "human_feedback",
+      "human_label": "MEDIUM",
+      "components": ["基础短袖T恤", "宽松工装裤", "平底乐福鞋", "设计感帽子"],
+      "footwear_family": "loafer",
+      "presentation": "feminine",
+      "intent_expression": {
+        "scene_expression_strength": {"status": "EVIDENCED", "score": 58, "source": "human_feedback", "confidence": 1, "evidence": ["帽子提供部分社交表达"]},
+        "desired_impression_coverage": {"status": "EVIDENCED", "score": 58, "source": "human_feedback", "confidence": 1, "evidence": ["年轻感存在但设计目标覆盖有限"]},
+        "design_interest": {"status": "EVIDENCED", "score": 42, "source": "human_feedback", "confidence": 1, "evidence": ["核心三件仍偏基础"]},
+        "styling_distinction": {"status": "EVIDENCED", "score": 48, "source": "human_feedback", "confidence": 1, "evidence": ["帽子带来有限区分度"]},
+        "overall_memorability": {"status": "EVIDENCED", "score": 42, "source": "human_feedback", "confidence": 1, "evidence": ["核心组合记忆点不足"]},
+        "footwear_statement": {"status": "EVIDENCED", "score": 38, "source": "human_feedback", "confidence": 1, "evidence": ["鞋履表达偏基础"]},
+        "youthful_social_energy": {
+          "source": "human_feedback", "confidence": 1,
+          "components": {
+            "vitality": {"status": "EVIDENCED", "score": 64, "source": "human_feedback", "confidence": 1, "evidence": ["工装比例具有一定活力"]},
+            "focal_point": {"status": "EVIDENCED", "score": 46, "source": "human_feedback", "confidence": 1, "evidence": ["焦点主要依赖单一帽子"]},
+            "memorability": {"status": "EVIDENCED", "score": 42, "source": "human_feedback", "confidence": 1, "evidence": ["基础核心组合记忆度有限"]},
+            "social_presence": {"status": "EVIDENCED", "score": 58, "source": "human_feedback", "confidence": 1, "evidence": ["具有中等社交存在感"]}
+          }
+        }
+      }
+    },
+    {
+      "sample_id": "online-nightlife-look-3-low",
+      "golden_source": "human_feedback",
+      "human_label": "FAIL",
+      "components": ["基础纯棉T恤", "刺绣半身裙", "凉鞋", "腋下包"],
+      "footwear_family": "sandal",
+      "presentation": "feminine",
+      "intent_expression": {
+        "scene_expression_strength": {"status": "EVIDENCED", "score": 45, "source": "human_feedback", "confidence": 1, "evidence": ["女性化但仍偏日常"]},
+        "desired_impression_coverage": {"status": "EVIDENCED", "score": 44, "source": "human_feedback", "confidence": 1, "evidence": ["未充分兑现年轻夜间社交目标"]},
+        "design_interest": {"status": "EVIDENCED", "score": 48, "source": "human_feedback", "confidence": 1, "evidence": ["裙装细节没有转化为整套设计焦点"]},
+        "styling_distinction": {"status": "EVIDENCED", "score": 42, "source": "human_feedback", "confidence": 1, "evidence": ["造型语言仍接近日常"]},
+        "overall_memorability": {"status": "EVIDENCED", "score": 38, "source": "human_feedback", "confidence": 1, "evidence": ["基础T削弱整套记忆点"]},
+        "footwear_statement": {"status": "EVIDENCED", "score": 42, "source": "human_feedback", "confidence": 1, "evidence": ["鞋履未形成有效造型贡献"]},
+        "youthful_social_energy": {
+          "source": "human_feedback", "confidence": 1,
+          "components": {
+            "vitality": {"status": "EVIDENCED", "score": 48, "source": "human_feedback", "confidence": 1, "evidence": ["局部轻盈但整套活力有限"]},
+            "focal_point": {"status": "EVIDENCED", "score": 46, "source": "human_feedback", "confidence": 1, "evidence": ["缺乏主导视觉焦点"]},
+            "memorability": {"status": "EVIDENCED", "score": 38, "source": "human_feedback", "confidence": 1, "evidence": ["整套记忆点弱"]},
+            "social_presence": {"status": "EVIDENCED", "score": 42, "source": "human_feedback", "confidence": 1, "evidence": ["夜间社交存在感不足"]}
+          }
+        }
+      }
+    }
+  ]
+}

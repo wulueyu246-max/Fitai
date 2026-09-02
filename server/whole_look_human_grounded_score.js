@@ -156,12 +156,26 @@ function buildProductionAssessment({
     [designInterest, silhouetteInterest, footwearStatement, stylingDistinction],
     intent.statement_strength,
   );
+  const youthfulSocialEnergy = sceneIntegration.scene_contract.enabled
+    ? youthfulSocialEnergyAssessment({
+      contemporary,
+      designInterest,
+      desiredImpression,
+      footwearStatement,
+      memorability,
+      sceneExpression,
+      silhouetteInterest,
+      stylingDistinction,
+    })
+    : notApplicable("female_nightlife_scene_contract_not_enabled");
   const targetContract = targetContractFor(intent, requiredIntentDimensions);
 
   return {
     sample_id: String(lookCandidateId || "production-look"),
     human_score: null,
     required_intent_dimensions: requiredIntentDimensions,
+    intent_expression_schema_extensions:
+      sceneIntegration.intent_expression_schema_extensions,
     scene_scoring_contract: sceneIntegration.scene_contract,
     target_contract: targetContract,
     baseline_integrity: baselineIntegrity,
@@ -175,6 +189,7 @@ function buildProductionAssessment({
       footwear_statement: footwearStatement,
       styling_distinction: stylingDistinction,
       overall_memorability: memorability,
+      youthful_social_energy: youthfulSocialEnergy,
     },
     intent_authority: deepFreeze({
       source: "decision_context.user_intent_brain",
@@ -195,6 +210,51 @@ function buildProductionAssessment({
         entries.every(({product}) => !hasAcceptanceReject(product)),
     }),
   };
+}
+
+function youthfulSocialEnergyAssessment({
+  contemporary,
+  designInterest,
+  desiredImpression,
+  footwearStatement,
+  memorability,
+  sceneExpression,
+  silhouetteInterest,
+  stylingDistinction,
+}) {
+  const components = [
+    strictCompositeAssessment("vitality", [contemporary, silhouetteInterest]),
+    strictCompositeAssessment("focal_point", [designInterest, footwearStatement]),
+    strictCompositeAssessment("memorability", [memorability, stylingDistinction]),
+    strictCompositeAssessment("social_presence", [
+      sceneExpression,
+      desiredImpression,
+      stylingDistinction,
+    ]),
+  ];
+  if (components.some(({status}) => status !== STATUS.EVIDENCED)) {
+    return unknown("youthful_social_energy_product_evidence_insufficient");
+  }
+  return evidenced(
+    average(components.map(({score}) => score)),
+    "derived_product_evidence.youthful_social_energy",
+    Math.min(...components.map(({confidence}) => confidence ?? 0)),
+    unique(components.flatMap(({evidence}) => evidence)).slice(0, 20),
+  );
+}
+
+function strictCompositeAssessment(name, assessments) {
+  const valid = assessments.filter(({status, score}) =>
+    status === STATUS.EVIDENCED && Number.isFinite(Number(score)));
+  if (valid.length !== assessments.length) {
+    return unknown(`youthful_social_energy.${name}:evidence_insufficient`);
+  }
+  return evidenced(
+    average(valid.map(({score}) => score)),
+    `derived_product_evidence.youthful_social_energy.${name}`,
+    Math.min(...valid.map(({confidence}) => confidence ?? 0)),
+    unique(valid.flatMap(({evidence}) => evidence)).slice(0, 12),
+  );
 }
 
 function authoritativeIntent(context = {}) {

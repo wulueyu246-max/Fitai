@@ -4,15 +4,16 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const golden = require(
-  "../evaluation/golden/human_grounded_whole_look_v1.json"
+  "../evaluation/golden/female_nightlife_youthful_social_energy_v1.json"
 );
 const {
-  evaluateHumanGroundedWholeLook,
+  evaluateFemaleNightlifeYouthfulSocialEnergy,
   evaluatePairwise,
-} = require("../evaluation/human_grounded_whole_look_eval_contract");
+} = require(
+  "../evaluation/female_nightlife_youthful_social_energy_contract"
+);
 const {
   FEMALE_NIGHTLIFE_SCORING_CONTRACT,
-  applyFemaleNightlifeScoringContract,
   resolveFemaleNightlifeScoringContract,
 } = require("../female_nightlife_scoring_adapter");
 const {evaluateProductionWholeLook} = require(
@@ -26,15 +27,6 @@ const PENDING_SCENES = Object.freeze([
   {gender: "male", scene: "date_social"},
   {gender: "male", scene: "nightlife"},
 ]);
-
-function phaseOneSample(sample) {
-  const copy = structuredClone(sample);
-  copy.required_intent_dimensions = applyFemaleNightlifeScoringContract(
-    copy.required_intent_dimensions,
-    {gender: "female", scene: "nightlife"},
-  ).required_intent_dimensions;
-  return copy;
-}
 
 function semantic(value) {
   return {value, source: "raw_taobao_title", confidence: 0.9,
@@ -106,7 +98,7 @@ test("production activation is limited to female_nightlife", () => {
   }
 });
 
-test("production consumes all five calibrated expression dimensions", () => {
+test("production consumes all six calibrated expression dimensions", () => {
   const result = evaluateProductionWholeLook(productionInput());
   assert.equal(result.status, "PASS");
   assert.equal(result.scene_scoring_contract.enabled, true);
@@ -115,16 +107,38 @@ test("production consumes all five calibrated expression dimensions", () => {
     assert.ok(result.required_intent_dimensions.includes(dimension));
     assert.equal(result.intent_expression.dimensions[dimension].status, "EVIDENCED");
   }
+  assert.equal(
+    Number.isFinite(result.intent_expression.dimensions
+      .youthful_social_energy.score),
+    true,
+  );
 });
 
-test("UNKNOWN calibrated evidence stays missing instead of matching", () => {
-  const positive = phaseOneSample(golden.samples[0]);
-  positive.intent_expression.styling_distinction = {status: "UNKNOWN",
-    score: null, source: "product_evidence_missing", confidence: 0, evidence: []};
-  const result = evaluateHumanGroundedWholeLook(positive);
+test("UNKNOWN youthful social energy stays missing instead of matching", () => {
+  const input = productionInput();
+  for (const entry of input.entries) {
+    delete entry.product.candidate_enrichment.silhouette_evidence;
+  }
+  const result = evaluateProductionWholeLook(input);
   assert.equal(result.status, "FAIL");
+  assert.equal(
+    result.intent_expression.dimensions.youthful_social_energy.score,
+    null,
+  );
   assert.ok(result.reason_codes.includes(
-    "REQUIRED_INTENT_EVIDENCE_MISSING:STYLING_DISTINCTION"));
+    "REQUIRED_INTENT_EVIDENCE_MISSING:YOUTHFUL_SOCIAL_ENERGY"));
+});
+
+test("pending scenes do not receive youthful social energy scoring", () => {
+  const input = productionInput();
+  input.context.decision_context.user_truth.scene = "casual_social";
+  input.context.decision_context.intent.user_intent_brain.scene_intent = {
+    value: "casual_social", source: "user",
+  };
+  const result = evaluateProductionWholeLook(input);
+  assert.equal(result.scene_scoring_contract.enabled, false);
+  assert.equal(result.intent_expression.dimensions.youthful_social_energy,
+    undefined);
 });
 
 test("strong expression cannot compensate for weak baseline integrity", () => {
@@ -138,15 +152,19 @@ test("strong expression cannot compensate for weak baseline integrity", () => {
   assert.ok(result.failure_reasons.includes("BASELINE_INTEGRITY_INSUFFICIENT"));
 });
 
-test("human positive passes and the 40/50/55 negatives still fail", () => {
-  const samples = golden.samples.map(phaseOneSample);
-  const positive = samples[0];
-  const positiveResult = evaluateHumanGroundedWholeLook(positive);
-  const negatives = samples.slice(1);
+test("human 84.54 positive passes and old nightlife results do not pass", () => {
+  const positive = golden.samples.find(({sample_id}) =>
+    sample_id === golden.positive_sample_id);
+  const negatives = golden.samples.filter(({sample_id}) =>
+    sample_id !== positive.sample_id);
+  const positiveResult = evaluateFemaleNightlifeYouthfulSocialEnergy(positive);
+  const negativeResults = negatives.map(
+    evaluateFemaleNightlifeYouthfulSocialEnergy);
   assert.equal(positiveResult.status, "PASS");
-  assert.equal(negatives.every((sample) =>
-    evaluateHumanGroundedWholeLook(sample).status === "FAIL"), true);
-  assert.deepEqual(negatives.map((sample) => sample.human_score), [40, 50, 55]);
+  assert.equal(positiveResult.score, 84.54);
+  assert.deepEqual(negativeResults.map(({score}) => score),
+    [28.82, 49.62, 43.52]);
+  assert.equal(negativeResults.some(({status}) => status === "PASS"), false);
   assert.equal(negatives.every((sample) =>
     evaluatePairwise(positive, sample).passed), true);
 });
