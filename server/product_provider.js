@@ -75,6 +75,9 @@ const {
   diagnoseQualityDeficit,
 } = require("./quality_deficit_refill");
 const {attachTargetFitAssessment} = require("./target_fit_assessment");
+const {
+  selectExpressionCandidateSupply,
+} = require("./female_nightlife_candidate_expression_supply");
 
 const PRODUCT_CATEGORIES = SUPPORTED_PRODUCT_CATEGORIES;
 const DEFAULT_SAMPLE_MATERIAL_ID = "28029";
@@ -2755,9 +2758,22 @@ class TaobaoProductProvider extends ProductProvider {
         (_query, index) => plannedBatches[index].length > 0,
       );
       successfulQuery = successfulQueries.join(" | ");
-      products = uniqueProducts(plannedBatches.flat())
+      const expressionSupplySelection = selectExpressionCandidateSupply({
+        contract: commerceQueryPlan?.trace?.candidate_expression_supply,
+        highRecallCandidates: plannedBatches[0],
+        intentCandidates: plannedBatches[1],
+      });
+      products = uniqueProducts(expressionSupplySelection.candidates)
         .sort((left, right) =>
           Number(right.relevance_score || 0) - Number(left.relevance_score || 0));
+      if (metrics) {
+        metrics.funnel.candidate_expression_supply = {
+          applied: expressionSupplySelection.applied,
+          high_recall_count: expressionSupplySelection.high_recall_count,
+          intent_count: expressionSupplySelection.intent_count,
+          reason: expressionSupplySelection.reason,
+        };
+      }
       if (queryPlanVersion === "concept_search_query_planner.v2" ||
           trustedStylingCompletionQueryPlan) {
         const highRecallCount = plannedBatches[0]?.length || 0;

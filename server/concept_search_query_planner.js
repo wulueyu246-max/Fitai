@@ -2,6 +2,9 @@
 
 const {normalizeGender} = require("./product_relevance");
 const {listStyleProfiles} = require("./style_intelligence");
+const {
+  resolveFemaleNightlifeCandidateExpression,
+} = require("./female_nightlife_candidate_expression_supply");
 
 const CONCEPT_SEARCH_QUERY_PLANNER_VERSION =
   "concept_search_query_planner.v2";
@@ -262,13 +265,22 @@ function planConceptSearchQueries({
   const audience = audienceTerm(gender);
   const categoryLabel = concreteCategoryTerm(category, gender, direction);
   const broadCategoryLabel = broadCategoryTerm(category);
-  const aestheticSignal = strongestSearchableSignal({
+  const defaultAestheticSignal = strongestSearchableSignal({
     impressions,
     direction,
     styleTerm,
     statement,
     slot: category,
   });
+  const expressionSupply = resolveFemaleNightlifeCandidateExpression({
+    gender,
+    scene,
+    slot: category,
+    direction,
+    availableSignals: impressions,
+  });
+  const aestheticSignal = expressionSupply.enabled
+    ? expressionSupply.signal : defaultAestheticSignal;
   const negatives = conditionalCommerceNegatives({brain, formality, slot: category});
   const q1 = compactQuery([audience, categoryLabel]);
   const q2 = compactQuery([audience, categoryLabel, aestheticSignal]);
@@ -347,6 +359,7 @@ function planConceptSearchQueries({
       },
       body_fit_signal: bodyFitProfile?.version ? "AVAILABLE_SOFT" : "UNAVAILABLE",
       market_preference: marketPreference || valueOf(brain.trend_preference),
+      candidate_expression_supply: expressionSupply,
       default_query_count: queryCandidates.length,
       maximum_query_count: queryCandidates.length + 1,
     },
