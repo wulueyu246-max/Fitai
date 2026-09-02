@@ -1,0 +1,48 @@
+{
+  "fixture_version": "look_portfolio_role.v1",
+  "source": "user_confirmed_portfolio_role_contract",
+  "looks": [
+    {
+      "look_id": "look-1",
+      "expected_role": "REFINED_LOOK",
+      "human_grounded_score": 72.07,
+      "intent_expression_score": 67.24,
+      "intent_expression": {
+        "scene_expression_strength": 68,
+        "design_interest": 68,
+        "overall_memorability": 66
+      },
+      "body_fit_score": 78,
+      "comfort_score": 76,
+      "risk_score": 25
+    },
+    {
+      "look_id": "look-2",
+      "expected_role": "BALANCED_LOOK",
+      "human_grounded_score": 73.24,
+      "intent_expression_score": 66.93,
+      "intent_expression": {
+        "scene_expression_strength": 64,
+        "design_interest": 62,
+        "overall_memorability": 61
+      },
+      "body_fit_score": 92,
+      "comfort_score": 94,
+      "risk_score": 8
+    },
+    {
+      "look_id": "look-3",
+      "expected_role": "SIGNATURE_LOOK",
+      "human_grounded_score": 81.36,
+      "intent_expression_score": 78.36,
+      "intent_expression": {
+        "scene_expression_strength": 82,
+        "design_interest": 86,
+        "overall_memorability": 82
+      },
+      "body_fit_score": 72,
+      "comfort_score": 66,
+      "risk_score": 34
+    }
+  ]
+}
