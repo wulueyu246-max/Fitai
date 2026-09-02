@@ -1,0 +1,72 @@
+{
+  "fixture_version": "human_feedback_component_replacement_fixture.v1",
+  "original_look": {
+    "look_id": "current-real-taobao-look",
+    "final_human_grounded_score": 73.89,
+    "relationships": {
+      "top_bottom_harmony": 28,
+      "bottom_shoes_harmony": 46,
+      "top_shoes_harmony": 38,
+      "color_story": 30,
+      "style_language_coherence": 32,
+      "personal_aesthetic_fit": 28,
+      "footwear_contribution": 26
+    },
+    "components": {
+      "top": {"product_id": "current-montbell-purple-top", "slot": "top", "title": "紫色 Montbell 长袖T", "source": "taobao", "is_mock": false},
+      "bottom": {"product_id": "current-black-a-line-skirt", "slot": "bottom", "title": "黑色 A字长裙", "source": "taobao", "is_mock": false},
+      "shoes": {"product_id": "current-white-loafer", "slot": "shoes", "title": "白色乐福鞋", "source": "taobao", "is_mock": false},
+      "headwear": {"product_id": "current-black-hat", "slot": "headwear", "title": "黑色帽子", "source": "taobao", "is_mock": false}
+    }
+  },
+  "feedback": {
+    "components": {
+      "top": {"verdict": "FAIL", "source": "human_feedback"},
+      "bottom": {"verdict": "ACCEPT", "source": "human_feedback"},
+      "shoes": {"verdict": "FAIL", "source": "human_feedback"},
+      "headwear": {"verdict": "ACCEPT", "source": "human_feedback"}
+    }
+  },
+  "retrieval": {
+    "top": [
+      {"candidate_id": "djj2gqwphZt3wNW2WWNCDKYcet3-RgnpV4entVrbxqkXbH6G", "product_id": "djj2gqwphZt3wNW2WWNCDKYcet3-RgnpV4entVrbxqkXbH6G", "slot": "top", "title": "三福短袖T恤女2026新款夏季褶皱设计感修身圆领短款白色上衣女装", "source": "taobao", "is_mock": false, "product_acceptance_result": "PASS"},
+      {"candidate_id": "rjnogMvHOtV0NkKDV2sO29iqtZ-0v03y6G0U5YJ0RAN9cxz", "product_id": "rjnogMvHOtV0NkKDV2sO29iqtZ-0v03y6G0U5YJ0RAN9cxz", "slot": "top", "title": "MoodBerry 美式复古风V领假两件长袖T恤女春夏设计感宽松休闲上衣", "source": "taobao", "is_mock": false, "product_acceptance_result": "PASS"}
+    ],
+    "shoes": [
+      {"candidate_id": "eAWXaNbtDtdek9b993FBjYszt0-RgnpV4entXk99Qaebu6", "product_id": "eAWXaNbtDtdek9b993FBjYszt0-RgnpV4entXk99Qaebu6", "slot": "shoes", "title": "韩版设计感铆钉扣带斜浅口单鞋女", "source": "taobao", "is_mock": false, "product_acceptance_result": "PASS"},
+      {"candidate_id": "Y0mD5jasptXKwRrRRPU7B2C2t6-88aGpnNaF5pJkaKZjHb", "product_id": "Y0mD5jasptXKwRrRRPU7B2C2t6-88aGpnNaF5pJkaKZjHb", "slot": "shoes", "title": "足力健玛丽珍女夏季镂空妈妈单鞋", "source": "taobao", "is_mock": false, "product_acceptance_result": "SOFT_REJECT"}
+    ]
+  },
+  "assessments": {
+    "djj2gqwphZt3wNW2WWNCDKYcet3-RgnpV4entVrbxqkXbH6G|eAWXaNbtDtdek9b993FBjYszt0-RgnpV4entXk99Qaebu6": {
+      "top_bottom_harmony": 78,
+      "bottom_shoes_harmony": 76,
+      "top_shoes_harmony": 74,
+      "color_story": 72,
+      "style_language_coherence": 80,
+      "scene_expression": 76,
+      "design_interest": 84,
+      "personal_aesthetic_fit": 72,
+      "footwear_contribution": 78,
+      "contemporary_expression": 78,
+      "scene_fit": 74,
+      "final_human_grounded_score": 81.42,
+      "evidence": {"source": "frozen_real_taobao_candidate_evidence"}
+    },
+    "rjnogMvHOtV0NkKDV2sO29iqtZ-0v03y6G0U5YJ0RAN9cxz|eAWXaNbtDtdek9b993FBjYszt0-RgnpV4entXk99Qaebu6": {
+      "top_bottom_harmony": 54,
+      "bottom_shoes_harmony": 76,
+      "top_shoes_harmony": 58,
+      "color_story": 50,
+      "style_language_coherence": 48,
+      "scene_expression": 58,
+      "design_interest": 66,
+      "personal_aesthetic_fit": 72,
+      "footwear_contribution": 70,
+      "contemporary_expression": 64,
+      "scene_fit": 58,
+      "final_human_grounded_score": 72.2,
+      "evidence": {"source": "frozen_real_taobao_candidate_evidence"}
+    }
+  }
+}
