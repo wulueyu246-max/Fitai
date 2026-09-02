@@ -5,6 +5,9 @@ const {
   STATUS,
   evaluateHumanGroundedWholeLook,
 } = require("./evaluation/human_grounded_whole_look_eval_contract");
+const {
+  applyFemaleNightlifeScoringContract,
+} = require("./female_nightlife_scoring_adapter");
 
 const WHOLE_LOOK_HUMAN_GROUNDED_SCORE_VERSION =
   "whole_look_human_grounded_score.v1";
@@ -76,6 +79,7 @@ function evaluateProductionWholeLook({
     baseline_integrity: evaluation.baseline_integrity,
     intent_expression: evaluation.intent_expression,
     intent_authority: sample.intent_authority,
+    scene_scoring_contract: sample.scene_scoring_contract,
     authority_checks: sample.authority_checks,
     target_fidelity: evaluation.target_fidelity,
     required_intent_dimensions: evaluation.required_intent_dimensions,
@@ -102,7 +106,11 @@ function buildProductionAssessment({
   target,
   lookCandidateId,
 }) {
-  const requiredIntentDimensions = requiredIntentDimensionsFor(intent);
+  const sceneIntegration = applyFemaleNightlifeScoringContract(
+    requiredIntentDimensionsFor(intent),
+    intent,
+  );
+  const requiredIntentDimensions = sceneIntegration.required_intent_dimensions;
   const baselineIntegrity = {
     category_integrity: categoryIntegrity(entries),
     gender_integrity: aggregateTargetFit(entries, "audience_fit"),
@@ -154,6 +162,7 @@ function buildProductionAssessment({
     sample_id: String(lookCandidateId || "production-look"),
     human_score: null,
     required_intent_dimensions: requiredIntentDimensions,
+    scene_scoring_contract: sceneIntegration.scene_contract,
     target_contract: targetContract,
     baseline_integrity: baselineIntegrity,
     intent_expression: {
@@ -169,6 +178,7 @@ function buildProductionAssessment({
     },
     intent_authority: deepFreeze({
       source: "decision_context.user_intent_brain",
+      gender: intent.gender,
       scene: intent.scene,
       desired_impression: intent.desired_impression,
       formality_preference: intent.formality_preference,
@@ -194,6 +204,8 @@ function authoritativeIntent(context = {}) {
     context?.intent?.user_intent_brain || {};
   const truth = decision?.user_truth || context.user_truth ||
     context.user_requirements || {};
+  const gender = clean(valueOf(brain.gender) || truth.gender || context.gender)
+    .toLowerCase();
   const desired = unique(list(valueOf(brain.desired_impression) ||
     truth.desired_impression || context.desired_impression));
   const scene = clean(valueOf(brain.scene_intent) || truth.scene || context.scene);
@@ -202,6 +214,7 @@ function authoritativeIntent(context = {}) {
   const statement = clean(valueOf(brain.statement_level) ||
     truth.statement_level || context.statement_level).toLowerCase();
   return deepFreeze({
+    gender,
     scene,
     scene_source: brain.scene_intent?.source ||
       (truth.scene ? "user_truth" : "unknown"),
