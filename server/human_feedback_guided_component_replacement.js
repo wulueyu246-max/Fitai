@@ -9,9 +9,14 @@ const PIPELINE_STAGES = Object.freeze([
   "RERANKER",
 ]);
 const RELATIONSHIP_FLOOR = 60;
-const MATERIAL_IMPROVEMENT = 10;
 const MAX_CANDIDATES_PER_SLOT = 6;
 const MAX_COMBINATIONS = 36;
+const REQUIRED_HUMAN_FEEDBACK_FIELDS = Object.freeze([
+  "top_bottom_harmony",
+  "color_story",
+  "style_language_coherence",
+  "shoes_personal_aesthetic_fit",
+]);
 
 async function replaceLookComponents({
   originalLook,
@@ -28,7 +33,13 @@ async function replaceLookComponents({
   const replacementSlots = Object.keys(original.components).filter((slot) =>
     normalizeVerdict(decisions[slot]?.verdict) === "FAIL");
   if (replacementSlots.length === 0) {
-    return frozenResult("NO_REPLACEMENT_REQUIRED", original, lockedSlots, []);
+    return frozenResult(
+      "NO_COMPONENT_REPLACEMENT_NEEDED",
+      original,
+      lockedSlots,
+      replacementSlots,
+      [],
+    );
   }
 
   const lockedComponents = Object.fromEntries(lockedSlots.map((slot) => [
@@ -76,9 +87,10 @@ async function replaceLookComponents({
 
   if (replacementSlots.some((slot) => candidatesBySlot[slot].length === 0)) {
     return frozenResult(
-      "INSUFFICIENT_QUALITY_REPLACEMENT_CANDIDATES",
+      "NO_COMPONENT_REPLACEMENT_NEEDED",
       original,
       lockedSlots,
+      replacementSlots,
       pipelineTrace,
     );
   }
@@ -113,7 +125,7 @@ async function replaceLookComponents({
 
   return deepFreeze({
     version: REPLACEMENT_VERSION,
-    status: selected ? "PASS" : "FAIL",
+    status: selected ? "PASS" : "NO_COMPONENT_REPLACEMENT_NEEDED",
     core_component_locked: true,
     locked_slots: lockedSlots,
     replacement_slots: replacementSlots,
@@ -147,19 +159,26 @@ function replacementChecks({assessment, original, lockedComponents}) {
   const originalRelationships = original.relationships;
   return Object.freeze({
     locked_components_unchanged: Object.entries(lockedComponents).every(
-      ([slot, component]) => identity(component) === identity(original.components[slot]),
-    ),
-    top_bottom_harmony_pass:
-      assessment.top_bottom_harmony >= RELATIONSHIP_FLOOR,
-    color_story_pass_or_improved:
-      passOrImproved(assessment.color_story, originalRelationships.color_story),
-    style_language_coherence_pass_or_improved:
-      passOrImproved(
-        assessment.style_language_coherence,
-        originalRelationships.style_language_coherence,
+      ([slot]) => sameLockedComponent(
+        assessment.components[slot],
+        original.components[slot],
       ),
-    shoes_personal_aesthetic_improved:
-      assessment.personal_aesthetic_fit > originalRelationships.personal_aesthetic_fit,
+    ),
+    human_feedback_dimensions_emitted: REQUIRED_HUMAN_FEEDBACK_FIELDS.every(
+      (field) => assessment.emitted_fields[field] === true,
+    ),
+    top_bottom_harmony_not_decreased:
+      assessment.top_bottom_harmony != null &&
+      assessment.top_bottom_harmony >= originalRelationships.top_bottom_harmony,
+    color_story_known: assessment.color_story != null,
+    style_language_coherence_not_decreased:
+      assessment.style_language_coherence != null &&
+      assessment.style_language_coherence >=
+        originalRelationships.style_language_coherence,
+    shoes_personal_aesthetic_fit_not_decreased:
+      assessment.shoes_personal_aesthetic_fit != null &&
+      assessment.shoes_personal_aesthetic_fit >=
+        originalRelationships.personal_aesthetic_fit,
     final_human_grounded_score_improved:
       assessment.final_human_grounded_score > original.final_human_grounded_score,
     real_taobao_only: Object.values(assessment.components).every((component) =>
@@ -167,12 +186,17 @@ function replacementChecks({assessment, original, lockedComponents}) {
   });
 }
 
-function passOrImproved(value, originalValue) {
-  return value >= RELATIONSHIP_FLOOR || value >= Number(originalValue) + MATERIAL_IMPROVEMENT;
-}
-
 function normalizeCombinationAssessment(value) {
   const source = value && typeof value === "object" ? value : {};
+  const shoesPersonalAestheticFit = Object.hasOwn(
+    source,
+    "shoes_personal_aesthetic_fit",
+  ) ? source.shoes_personal_aesthetic_fit : source.personal_aesthetic_fit;
+  const emittedFields = Object.fromEntries(REQUIRED_HUMAN_FEEDBACK_FIELDS.map(
+    (field) => [field, field === "shoes_personal_aesthetic_fit"
+      ? Object.hasOwn(source, field) || Object.hasOwn(source, "personal_aesthetic_fit")
+      : Object.hasOwn(source, field)],
+  ));
   return deepFreeze({
     components: source.components || {},
     top_bottom_harmony: finite(source.top_bottom_harmony),
@@ -182,11 +206,13 @@ function normalizeCombinationAssessment(value) {
     style_language_coherence: finite(source.style_language_coherence),
     scene_expression: finite(source.scene_expression),
     design_interest: finite(source.design_interest),
-    personal_aesthetic_fit: finite(source.personal_aesthetic_fit),
+    shoes_personal_aesthetic_fit: finite(shoesPersonalAestheticFit),
+    personal_aesthetic_fit: finite(shoesPersonalAestheticFit),
     footwear_contribution: finite(source.footwear_contribution),
     contemporary_expression: finite(source.contemporary_expression),
     scene_fit: finite(source.scene_fit),
     final_human_grounded_score: finite(source.final_human_grounded_score),
+    emitted_fields: emittedFields,
     evidence: deepFreeze(source.evidence || {}),
   });
 }
@@ -211,13 +237,13 @@ function freezeCandidate(candidate) {
   return deepFreeze({...candidate, core_component_locked: false});
 }
 
-function frozenResult(status, original, lockedSlots, trace) {
+function frozenResult(status, original, lockedSlots, replacementSlots, trace) {
   return deepFreeze({
     version: REPLACEMENT_VERSION,
     status,
     core_component_locked: true,
     locked_slots: lockedSlots,
-    replacement_slots: [],
+    replacement_slots: replacementSlots,
     original_score: original.final_human_grounded_score,
     selected_look: null,
     evaluated_combination_count: 0,
@@ -259,6 +285,12 @@ function identity(component = {}) {
   return String(component.product_id || component.candidate_id || component.id || "");
 }
 
+function sameLockedComponent(candidate = {}, original = {}) {
+  return identity(candidate) === identity(original) &&
+    String(candidate.title || "") === String(original.title || "") &&
+    String(candidate.image_url || "") === String(original.image_url || "");
+}
+
 function normalizeVerdict(value) {
   return String(value || "UNKNOWN").trim().toUpperCase();
 }
@@ -272,6 +304,7 @@ function normalizeStage(value) {
 }
 
 function finite(value) {
+  if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : null;
 }
@@ -308,6 +341,7 @@ module.exports = {
   MAX_CANDIDATES_PER_SLOT,
   MAX_COMBINATIONS,
   PIPELINE_STAGES,
+  REQUIRED_HUMAN_FEEDBACK_FIELDS,
   REPLACEMENT_VERSION,
   replaceLookComponents,
   replacementGoals,

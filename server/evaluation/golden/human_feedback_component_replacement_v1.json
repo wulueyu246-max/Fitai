@@ -13,10 +13,10 @@
       "footwear_contribution": 26
     },
     "components": {
-      "top": {"product_id": "current-montbell-purple-top", "slot": "top", "title": "紫色 Montbell 长袖T", "source": "taobao", "is_mock": false},
-      "bottom": {"product_id": "current-black-a-line-skirt", "slot": "bottom", "title": "黑色 A字长裙", "source": "taobao", "is_mock": false},
-      "shoes": {"product_id": "current-white-loafer", "slot": "shoes", "title": "白色乐福鞋", "source": "taobao", "is_mock": false},
-      "headwear": {"product_id": "current-black-hat", "slot": "headwear", "title": "黑色帽子", "source": "taobao", "is_mock": false}
+      "top": {"product_id": "current-montbell-purple-top", "slot": "top", "title": "紫色 Montbell 长袖T", "image_url": "https://img.alicdn.com/frozen/current-montbell-purple-top.jpg", "source": "taobao", "is_mock": false},
+      "bottom": {"product_id": "current-black-a-line-skirt", "slot": "bottom", "title": "黑色 A字长裙", "image_url": "https://img.alicdn.com/frozen/current-black-a-line-skirt.jpg", "source": "taobao", "is_mock": false},
+      "shoes": {"product_id": "current-white-loafer", "slot": "shoes", "title": "白色乐福鞋", "image_url": "https://img.alicdn.com/frozen/current-white-loafer.jpg", "source": "taobao", "is_mock": false},
+      "headwear": {"product_id": "current-black-hat", "slot": "headwear", "title": "黑色帽子", "image_url": "https://img.alicdn.com/frozen/current-black-hat.jpg", "source": "taobao", "is_mock": false}
     }
   },
   "feedback": {
@@ -46,7 +46,7 @@
       "style_language_coherence": 80,
       "scene_expression": 76,
       "design_interest": 84,
-      "personal_aesthetic_fit": 72,
+      "shoes_personal_aesthetic_fit": 72,
       "footwear_contribution": 78,
       "contemporary_expression": 78,
       "scene_fit": 74,
@@ -61,7 +61,7 @@
       "style_language_coherence": 48,
       "scene_expression": 58,
       "design_interest": 66,
-      "personal_aesthetic_fit": 72,
+      "shoes_personal_aesthetic_fit": 72,
       "footwear_contribution": 70,
       "contemporary_expression": 64,
       "scene_fit": 58,

@@ -8,6 +8,7 @@ const fixture = require(
 );
 const {
   PIPELINE_STAGES,
+  REQUIRED_HUMAN_FEEDBACK_FIELDS,
   replaceLookComponents,
   replacementGoals,
 } = require("../human_feedback_guided_component_replacement");
@@ -45,8 +46,16 @@ test("accepted bottom and headwear are locked while only top and shoes retrieve"
   assert.deepEqual(retrievalCalls.map(({slot}) => slot).sort(), ["shoes", "top"]);
   assert.equal(result.selected_look.components.bottom.product_id,
     fixture.original_look.components.bottom.product_id);
+  assert.equal(result.selected_look.components.bottom.title,
+    fixture.original_look.components.bottom.title);
+  assert.equal(result.selected_look.components.bottom.image_url,
+    fixture.original_look.components.bottom.image_url);
   assert.equal(result.selected_look.components.headwear.product_id,
     fixture.original_look.components.headwear.product_id);
+  assert.equal(result.selected_look.components.headwear.title,
+    fixture.original_look.components.headwear.title);
+  assert.equal(result.selected_look.components.headwear.image_url,
+    fixture.original_look.components.headwear.image_url);
   assert.equal(result.selected_look.components.bottom.core_component_locked, true);
   assert.equal(result.selected_look.components.headwear.core_component_locked, true);
 });
@@ -70,12 +79,25 @@ test("frozen real-Taobao replacement improves all required human-grounded checks
   assert.equal(selected.assessment.top_bottom_harmony >= 60, true);
   assert.equal(selected.assessment.color_story >= 60, true);
   assert.equal(selected.assessment.style_language_coherence >= 60, true);
-  assert.ok(selected.assessment.personal_aesthetic_fit >
+  assert.ok(selected.assessment.shoes_personal_aesthetic_fit >
     fixture.original_look.relationships.personal_aesthetic_fit);
   assert.ok(selected.assessment.final_human_grounded_score > 73.89);
   assert.equal(selected.assessment.final_human_grounded_score, 81.42);
   assert.equal(Object.values(selected.components).every((component) =>
     component.source === "taobao" && component.is_mock === false), true);
+});
+
+test("every evaluated replacement emits all human-feedback score dimensions", async () => {
+  const {result} = await runFixture();
+  const assessment = result.selected_look.assessment;
+
+  assert.deepEqual(Object.keys(assessment.emitted_fields).sort(),
+    [...REQUIRED_HUMAN_FEEDBACK_FIELDS].sort());
+  assert.equal(Object.values(assessment.emitted_fields).every(Boolean), true);
+  assert.equal(Number.isFinite(assessment.top_bottom_harmony), true);
+  assert.equal(Number.isFinite(assessment.color_story), true);
+  assert.equal(Number.isFinite(assessment.style_language_coherence), true);
+  assert.equal(Number.isFinite(assessment.shoes_personal_aesthetic_fit), true);
 });
 
 test("soft-rejected candidates are never restored to fill replacement supply", async () => {
@@ -102,7 +124,7 @@ test("replacement requires the complete original candidate pipeline", async () =
   });
 });
 
-test("a relationship-valid but non-improving combination is not accepted", async () => {
+test("a relationship-valid but non-improving combination returns no replacement needed", async () => {
   const original = structuredClone(fixture.original_look);
   original.final_human_grounded_score = 90;
   const result = await replaceLookComponents({
@@ -122,8 +144,57 @@ test("a relationship-valid but non-improving combination is not accepted", async
     }),
   });
 
-  assert.equal(result.status, "FAIL");
+  assert.equal(result.status, "NO_COMPONENT_REPLACEMENT_NEEDED");
   assert.ok(result.rejection_reasons.includes(
     "FINAL_HUMAN_GROUNDED_SCORE_IMPROVED",
   ));
+});
+
+test("unknown color story cannot be accepted", async () => {
+  const result = await replaceLookComponents({
+    originalLook: fixture.original_look,
+    feedback: fixture.feedback,
+    retrieveCandidates: async ({slot}) => ({
+      queries: [], candidates: structuredClone(fixture.retrieval[slot] || []),
+    }),
+    runCandidatePipeline: async ({candidates}) => ({
+      stages: PIPELINE_STAGES, candidates,
+    }),
+    assessCombination: async ({components}) => ({
+      ...fixture.assessments[
+        `${components.top.product_id}|${components.shoes.product_id}`
+      ],
+      color_story: null,
+      components,
+    }),
+  });
+
+  assert.equal(result.status, "NO_COMPONENT_REPLACEMENT_NEEDED");
+  assert.ok(result.rejection_reasons.includes("COLOR_STORY_KNOWN"));
+});
+
+test("locked title or image mutation invalidates a replacement", async () => {
+  const result = await replaceLookComponents({
+    originalLook: fixture.original_look,
+    feedback: fixture.feedback,
+    retrieveCandidates: async ({slot}) => ({
+      queries: [], candidates: structuredClone(fixture.retrieval[slot] || []),
+    }),
+    runCandidatePipeline: async ({candidates}) => ({
+      stages: PIPELINE_STAGES, candidates,
+    }),
+    assessCombination: async ({components}) => {
+      const mutated = structuredClone(components);
+      mutated.bottom.image_url = "https://img.alicdn.com/other-product.jpg";
+      return {
+        ...fixture.assessments[
+          `${components.top.product_id}|${components.shoes.product_id}`
+        ],
+        components: mutated,
+      };
+    },
+  });
+
+  assert.equal(result.status, "NO_COMPONENT_REPLACEMENT_NEEDED");
+  assert.ok(result.rejection_reasons.includes("LOCKED_COMPONENTS_UNCHANGED"));
 });
